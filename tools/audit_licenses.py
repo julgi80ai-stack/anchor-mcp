@@ -66,7 +66,17 @@ class LicenseRecord:
 
     @property
     def is_copyleft(self) -> bool:
-        return any(marker in self.license.upper() for marker in COPYLEFT_MARKERS)
+        """모든 선택지가 카피레프트일 때만 참.
+
+        SPDX 선택형(OR) 라이선스는 배포자가 하나를 고를 수 있다 —
+        예: tld의 "MPL-1.1 OR GPL-2.0-only OR LGPL-2.1-or-later"는
+        MPL-1.1을 선택하면 Apache-2.0 배포와 호환된다 (THIRD-PARTY §4.4).
+        """
+        alternatives = [alt.strip() for alt in self.license.upper().split(" OR ")]
+        return all(
+            any(marker in alternative for marker in COPYLEFT_MARKERS)
+            for alternative in alternatives
+        )
 
 
 def fetch_license(package: str) -> LicenseRecord:
@@ -98,6 +108,38 @@ def fetch_license(package: str) -> LicenseRecord:
             )
 
     return LicenseRecord(package, version, "UNKNOWN", "none")
+
+
+def audit_installed() -> tuple[list[str], int]:
+    """설치된 전체 배포판(트랜지티브 포함)을 로컬 메타데이터로 감사한다.
+
+    RUNTIME_PACKAGES는 선언된 목록만 보지만, 카피레프트는 트랜지티브로도
+    유입된다 — tld가 실제로 그랬다. CI 게이트는 이 전수 검사를 쓴다.
+    """
+    from importlib.metadata import distributions
+
+    copyleft: list[str] = []
+    count = 0
+    for distribution in sorted(distributions(), key=lambda d: (d.metadata["Name"] or "").lower()):
+        name = distribution.metadata["Name"]
+        if not name:
+            continue
+        count += 1
+        license_text = (
+            distribution.metadata.get("License-Expression")
+            or (distribution.metadata.get("License") or "").splitlines()[:1]
+            and (distribution.metadata.get("License") or "").splitlines()[0]
+            or ""
+        )
+        if not license_text or len(license_text) > 80:
+            for classifier in distribution.metadata.get_all("Classifier") or []:
+                if classifier.startswith("License ::"):
+                    license_text = classifier.split("::")[-1].strip()
+                    break
+        record = LicenseRecord(name, distribution.version, license_text or "UNKNOWN", "installed")
+        if record.is_copyleft:
+            copyleft.append(f"{record.package} {record.version}: {record.license}")
+    return copyleft, count
 
 
 def check_version_floors() -> list[str]:
@@ -139,7 +181,23 @@ def main() -> int:
         action="store_true",
         help="설치된 패키지의 라이선스상 버전 하한을 검사한다",
     )
+    parser.add_argument(
+        "--all-installed",
+        action="store_true",
+        help="설치된 전체 배포판(트랜지티브 포함)을 로컬 메타데이터로 전수 감사한다",
+    )
     args = parser.parse_args()
+
+    installed_copyleft: list[str] = []
+    if args.all_installed:
+        installed_copyleft, scanned = audit_installed()
+        print(f"=== 설치 전수 감사: {scanned}개 배포판 ===")
+        if installed_copyleft:
+            for item in installed_copyleft:
+                print(f"  카피레프트: {item}")
+        else:
+            print("  카피레프트(선택 불가능한) 없음")
+        print()
 
     print("=== 런타임 의존성 라이선스 ===")
     copyleft_found: list[str] = []
@@ -171,7 +229,7 @@ def main() -> int:
     else:
         floor_violations = []
 
-    problems = bool(copyleft_found or floor_violations)
+    problems = bool(copyleft_found or floor_violations or installed_copyleft)
 
     if copyleft_found:
         print("\n카피레프트 의존성이 감지되었습니다:", file=sys.stderr)

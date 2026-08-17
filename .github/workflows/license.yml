@@ -13,14 +13,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install . pip-licenses packaging
-      - name: 카피레프트 의존성 차단
-        run: |
-          pip-licenses --format=csv --with-urls > licenses.csv
-          cat licenses.csv
-          # GPL/AGPL/LGPL이 트랜지티브로라도 유입되면 빌드 실패
-          if grep -Ei 'GNU General Public|Affero|LGPL|GPLv[23]' licenses.csv; then
-            echo "::error::카피레프트 라이선스가 감지되었습니다. THIRD-PARTY.md를 확인하세요."
-            exit 1
-          fi
-      - name: trafilatura 하한 및 대장 재현 감사
-        run: python tools/audit_licenses.py --fail-on-copyleft --check-floors
+      - name: 전체 트리 라이선스 목록 (기록용)
+        run: pip-licenses --format=csv --with-urls
+      - name: 카피레프트 차단 + trafilatura 하한 (선택형 OR 라이선스는 선택 가능 여부로 판정)
+        run: python tools/audit_licenses.py --all-installed --fail-on-copyleft --check-floors

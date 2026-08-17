@@ -25,6 +25,12 @@ BSD and MIT licensed components:
 Dual-licensed components:
   - blake3, offered under "CC0-1.0 OR Apache-2.0".
     This product elects the Apache-2.0 option.
+  - tld (transitive, via trafilatura/courlan), offered under
+    "MPL-1.1 OR GPL-2.0-only OR LGPL-2.1-or-later".
+    This product elects the MPL-1.1 option and uses the library unmodified.
+
+Weak-copyleft transitive components (used unmodified):
+  - certifi (MPL-2.0)
 
 ================================================================================
 Acknowledgements

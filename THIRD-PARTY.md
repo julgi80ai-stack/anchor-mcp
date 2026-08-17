@@ -18,9 +18,9 @@
 
 ## 1. 판정
 
-**모든 구성요소가 permissive이며, Apache-2.0 배포와 호환된다. 카피레프트(GPL/AGPL/LGPL) 구성요소는 없다.**
+**Apache-2.0 배포를 막는 카피레프트(GPL/AGPL/LGPL이 강제되는) 구성요소는 없다.** 직접 의존성은 전부 permissive다. MPL 계열 약카피레프트 트랜지티브 2건(`tld` — 선택형에서 MPL-1.1 선택, `certifi`)은 무수정 사용이라 추가 의무가 없다 (§4.4).
 
-주의가 필요한 세 건은 §4에 따로 정리했다.
+주의가 필요한 항목들은 §4에 따로 정리했다.
 
 ---
 
@@ -44,8 +44,11 @@
 | `mcp` (Python SDK) | 2.0.0 | **MIT** | `license` 필드 + classifier | ✅ |
 | `beautifulsoup4` | 4.15.0 | **MIT** | `license` 필드 | ✅ (`markdownify` 트랜지티브) |
 | `soupsieve` | 2.9.2 | **MIT** | `license-expression` | ✅ (`beautifulsoup4` 트랜지티브) |
+| `tld` | 0.13.2 | **MPL-1.1 OR GPL-2.0-only OR LGPL-2.1-or-later** | `license-expression` | ✅ ⚠️§4.4 (`courlan`←`trafilatura` 트랜지티브, **MPL-1.1 선택**) |
+| `certifi` | 2026.7.22 | **MPL-2.0** | classifier | ✅ §4.4 (`httpx` 계열 트랜지티브, 무수정 사용) |
 
-라이선스 종류별 집계: MIT 7, BSD-3-Clause 5, Apache-2.0 2, 복합 2 (총 16).
+라이선스 종류별 집계: MIT 7, BSD-3-Clause 5, Apache-2.0 2, 복합 2, MPL 계열 2 (총 18).
+전체 트랜지티브 트리(76개 배포판)는 `tools/audit_licenses.py --all-installed`가 전수 감사한다.
 
 > v1.0 변경: `pydantic-settings` 제거 — 설정 로딩은 표준 라이브러리(tomllib)로 구현되어 실제로 설치되지 않는다. `pydantic`은 `mcp` SDK의 트랜지티브 의존성으로만 배포물에 포함된다.
 
@@ -107,7 +110,7 @@ Anchor 배포물에 MemGator 바이너리나 소스가 들어가지 않으므로
 
 ---
 
-## 4. 주의가 필요한 세 건
+## 4. 주의가 필요한 항목
 
 ### 4.1 `trafilatura` — 버전 하한 필수
 
@@ -134,7 +137,19 @@ Anchor 배포물에 MemGator 바이너리나 소스가 들어가지 않으므로
 
 `NOTICE`에 선택 사실을 명시한다.
 
----
+### 4.4 `tld` / `certifi` — MPL 계열 트랜지티브 (v1.0에서 CI 게이트가 발견)
+
+`tld`는 `trafilatura`→`courlan`의 트랜지티브 의존성이며 **선택형 3중
+라이선스**(`MPL-1.1 OR GPL-2.0-only OR LGPL-2.1-or-later`)다. 선택형이므로
+GPL이 강제되지 않는다 — **Anchor는 MPL-1.1을 선택한다.** MPL은 파일 단위
+약카피레프트로, 무수정 사용·바이너리 배포에는 소스 공개 의무가 없어
+Apache-2.0 배포와 호환된다 (ADR-0002 원칙 B가 MPL-2.0을 허용하는 것과
+같은 논리·같은 조건). `certifi`(MPL-2.0)도 동일하게 무수정 트랜지티브로
+포함된다. 두 패키지 모두 수정하지 않는 한 추가 의무가 없다.
+
+감사 도구는 이 판정을 자동화한다: SPDX `OR` 표현식은 **모든 선택지가
+카피레프트일 때만** 차단한다 (`tools/audit_licenses.py`).
+
 
 ## 5. 재확인 방법
 
@@ -148,7 +163,7 @@ python3 tools/audit_licenses.py --fail-on-copyleft
 CI 게이트:
 
 ```yaml
-# .github/workflows/license.yml
+# .github/workflows/license.yml (실파일이 원본 — 여기 발췌는 요약)
 name: license-audit
 on: [push, pull_request]
 jobs:
@@ -157,24 +172,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
-      - run: pip install . pip-licenses
-      - name: 카피레프트 의존성 차단
-        run: |
-          pip-licenses --format=csv --with-urls > licenses.csv
-          cat licenses.csv
-          # GPL/AGPL/LGPL이 트랜지티브로라도 유입되면 빌드 실패
-          if grep -Ei 'GNU General Public|Affero|LGPL|GPLv[23]' licenses.csv; then
-            echo "::error::카피레프트 라이선스가 감지되었습니다. THIRD-PARTY.md를 확인하세요."
-            exit 1
-          fi
-      - name: trafilatura 하한 확인
-        run: python -c "
-          import trafilatura, sys
-          from packaging.version import Version
-          v = Version(trafilatura.__version__)
-          sys.exit(0 if v >= Version('1.8.0') else
-                   print(f'trafilatura {v} < 1.8.0 (GPLv3+). 라이선스 충돌.') or 1)"
+        with: { python-version: "3.12" }
+      - run: pip install . pip-licenses packaging
+      - name: 전체 트리 라이선스 목록 (기록용)
+        run: pip-licenses --format=csv --with-urls
+      - name: 카피레프트 차단 + trafilatura 하한
+        # 설치 전체(트랜지티브 포함) 전수 감사. SPDX OR 선택형은
+        # 모든 선택지가 카피레프트일 때만 차단한다 (§4.4).
+        run: python tools/audit_licenses.py --all-installed --fail-on-copyleft --check-floors
 ```
 
 ---
@@ -208,5 +213,5 @@ python3 tools/audit_licenses.py --fail-on-copyleft --check-floors # CI 게이트
 
 | 날짜 | 변경 |
 |---|---|
-| 2026-08-17 | v1.0: `pydantic-settings` 제거(미설치 — 설정은 stdlib), `pydantic`을 mcp 트랜지티브로 재분류, `beautifulsoup4`·`soupsieve` 추가(markdownify 트랜지티브), 개발 의존성 절(§2.1) 신설 (hypothesis MPL-2.0 dev 전용 포함). 런타임 16건, 미확인 0건 |
+| 2026-08-17 | v1.0: `pydantic-settings` 제거(미설치 — 설정은 stdlib), `pydantic`을 mcp 트랜지티브로 재분류, `beautifulsoup4`·`soupsieve` 추가, 개발 의존성 절(§2.1) 신설. **CI 게이트가 `tld`(선택형 MPL-1.1/GPL/LGPL) 발견 → MPL-1.1 선택 기록(§4.4)**, `certifi` MPL-2.0 병기. 감사 도구에 전수 검사(`--all-installed`)와 OR 선택 판정 추가. 런타임 18건, 미확인 0건 |
 | 2026-08-16 | 최초 작성. 런타임 의존성 15건, 참조 대상 10건, 명세 5건 확인 완료. 미확인 0건 |
