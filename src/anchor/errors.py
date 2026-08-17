@@ -9,7 +9,18 @@ class AnchorError(Exception):
 
 
 class RobotsDisallowed(AnchorError):
-    """robots.txt가 해당 URL의 페치를 거부했다. 네트워크 요청 없이 반환된다."""
+    """robots.txt가 해당 URL의 페치를 거부했다. 네트워크 요청 없이 반환된다.
+
+    `reason`이 `"explicit"`이면 규칙을 읽었고 그 규칙이 막은 것이고,
+    `"unavailable"`이면 규칙을 물어보지 못한 것이다(호스트 소멸·5xx).
+    전자는 사이트 소유자의 의사이므로 어떤 우회도 하지 않는다. 후자는
+    의사를 확인할 수 없는 상태일 뿐이므로, **다른 호스트인 공개 아카이브**를
+    확인하는 것까지 막지는 않는다 (SPEC §5.2 6단계).
+    """
+
+    def __init__(self, message: str, *, reason: str = "explicit") -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class ContentTooLarge(AnchorError):

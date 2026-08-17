@@ -7,7 +7,7 @@ from __future__ import annotations
 import pytest
 
 from anchor.config import Config
-from anchor.errors import FetchFailed
+from anchor.errors import FetchFailed, RobotsDisallowed
 from anchor.fetcher import archive as archive_module
 from anchor.service import Anchor
 from tests.integration.conftest import article_html
@@ -151,3 +151,54 @@ def test_first_fetch_of_dead_url_recovers_from_archive(fixture_server, cdx_ancho
     (document,) = cdx_anchor.list_documents()
     assert document.status == "gone"
     assert QUOTE in (result.content or "")
+
+
+def test_vanished_host_is_recovered_from_archive(fixture_server, tmp_path, monkeypatch):
+    """호스트가 통째로 사라져도 아카이브로 구제한다 (D-053).
+
+    robots.txt를 받을 수 없으면 RFC 9309 §2.3.1.4대로 원본 요청은 보류하지만,
+    그것이 **다른 호스트인** 공개 아카이브 확인까지 막아서는 안 된다.
+    호스트 소멸은 링크 부패의 가장 흔한 형태이자 구제가 가장 필요한 상황이다.
+    """
+    base_url, state = fixture_server
+    monkeypatch.setattr(archive_module, "WAYBACK_BASE", base_url)
+    state.archive_html = article_html()
+
+    # 원본은 존재하지 않는 호스트 — 연결 자체가 실패한다.
+    dead = "http://127.0.0.1:9/gone"
+    config = Config(
+        db_path=tmp_path / "vanished.db",
+        rate_limit_rps=1000.0,
+        retry_backoff_base=0.01,
+        archive_fallback_enabled=True,
+        timeout_seconds=2,
+    )
+    with Anchor(db_path=config.db_path, config=config) as anchor:
+        result = anchor.fetch(dead, max_age=0)
+        assert result.outcome == "archive"
+        assert result.source == "archive"
+        assert QUOTE in (result.content or "")
+
+        cited = anchor.cite(result.document_id, QUOTE)
+        report = anchor.verify()
+        assert report.summary["INTACT"] == 1, "아카이브 본문으로 인용이 구제되어야 한다"
+        assert cited.anchor_id
+
+
+def test_explicit_robots_denial_is_never_bypassed(fixture_server, tmp_path, monkeypatch):
+    """대조군: 소유자가 **명시적으로** 거부하면 아카이브로도 우회하지 않는다."""
+    base_url, state = fixture_server
+    monkeypatch.setattr(archive_module, "WAYBACK_BASE", base_url)
+    state.archive_html = article_html()
+
+    config = Config(
+        db_path=tmp_path / "denied.db",
+        rate_limit_rps=1000.0,
+        archive_fallback_enabled=True,
+    )
+    with Anchor(db_path=config.db_path, config=config) as anchor:
+        with pytest.raises(RobotsDisallowed):
+            anchor.fetch(f"{base_url}/private/report")
+    assert not any(path.startswith("/web/") for path in state.requests), (
+        "명시적 거부를 아카이브로 우회했다"
+    )

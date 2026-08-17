@@ -29,6 +29,9 @@ def _is_unavailable(status: int) -> bool:
 class RobotsVerdict:
     allowed: bool
     bytes_down: int  # robots.txt를 새로 받았다면 그 크기, 캐시였다면 0
+    # 거부 사유. "explicit"은 규칙을 읽었고 그 규칙이 막은 것,
+    # "unavailable"은 규칙을 물어보지 못한 것이다. 둘은 다르게 다뤄야 한다.
+    reason: str = "allowed"
 
 
 class RobotsGate:
@@ -57,13 +60,16 @@ class RobotsGate:
             # RFC 9309 §2.3.1.4: robots.txt를 받을 수 없으면(5xx) 전면 거부로
             # 간주한다. 서버가 과부하로 규칙을 못 주는 바로 그 순간에 무제한
             # 접근으로 전환하는 것은 정직한 클라이언트가 아니다 (D-003).
-            return RobotsVerdict(allowed=False, bytes_down=bytes_down)
+            return RobotsVerdict(allowed=False, bytes_down=bytes_down, reason="unavailable")
         if body is None:
             return RobotsVerdict(allowed=True, bytes_down=bytes_down)
 
         parser = Protego.parse(body)
+        allowed = parser.can_fetch(url, self._user_agent)
         return RobotsVerdict(
-            allowed=parser.can_fetch(url, self._user_agent), bytes_down=bytes_down
+            allowed=allowed,
+            bytes_down=bytes_down,
+            reason="allowed" if allowed else "explicit",
         )
 
     @staticmethod

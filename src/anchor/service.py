@@ -178,17 +178,33 @@ class Anchor:
                     self._log(document.id, "error", None, hop_verdict.bytes_down, started)
                 raise RobotsDisallowed(
                     "Fetch disallowed by robots.txt — robots.txt가 페치를 거부: "
-                    f"{hop_url}"
+                    f"{hop_url}",
+                    reason=hop_verdict.reason,
                 )
             self._ratelimit.acquire(httpx.URL(hop_url).host or "")
             return hop_verdict.bytes_down
 
-        response = self._fetcher.get(
-            norm_url,
-            etag=document.etag if document else None,
-            last_modified=document.last_modified if document else None,
-            before_hop=before_hop,
-        )
+        try:
+            response = self._fetcher.get(
+                norm_url,
+                etag=document.etag if document else None,
+                last_modified=document.last_modified if document else None,
+                before_hop=before_hop,
+            )
+        except (RobotsDisallowed, FetchFailed) as error:
+            # 원본에 닿지 못했다. 사이트 소유자가 **명시적으로** 거부한 경우가
+            # 아니라면(호스트 소멸·네트워크 오류·robots 판정 불능), 다른
+            # 호스트인 공개 아카이브를 확인하는 것까지 막을 이유는 없다.
+            # 호스트가 통째로 사라지는 것은 링크 부패의 가장 흔한 형태이자
+            # 아카이브 구제가 가장 필요한 상황이다 (SPEC §5.2 6단계).
+            if isinstance(error, RobotsDisallowed) and error.reason == "explicit":
+                raise
+            recovered = self._recover_from_archive(
+                norm_url, document, started, include_content
+            )
+            if recovered is not None:
+                return recovered
+            raise
         bytes_down = response.bytes_down
 
         if response.status == 304:
@@ -714,6 +730,24 @@ class Anchor:
 
         return self._finish(
             document, version, outcome, 200, bytes_down, started, include_content
+        )
+
+    def _recover_from_archive(
+        self,
+        norm_url: str,
+        document: Document | None,
+        started: float,
+        include_content: bool,
+    ) -> FetchResult | None:
+        """원본에 닿지 못했을 때 아카이브에서 되살린다. 실패하면 None."""
+        if not self._archive.enabled:
+            return None
+        hit = self._archive.lookup(norm_url)
+        if hit is None:
+            return None
+        status_label = document.status if document else "gone"
+        return self._ingest_archive(
+            norm_url, document, hit, status_label, hit.bytes_down, started, include_content
         )
 
     def _ingest_archive(
