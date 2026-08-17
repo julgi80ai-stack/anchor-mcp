@@ -11,9 +11,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import threading
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -55,7 +55,8 @@ TASKABLE_TOOLS = frozenset({"verify_citations"})
 class _TaskEntry:
     task: Task
     result: CallToolResult | None = None
-    handle: asyncio.Task | None = None
+    worker: threading.Thread | None = None
+    cancel: threading.Event = field(default_factory=threading.Event)
 
 
 @dataclass
@@ -64,8 +65,9 @@ class AnchorTasksExtension(Extension):
 
     identifier = "dev.julgi.anchor/tasks"
 
-    run_tool: Any = None  # Callable[[str, dict], dict] — 서버가 주입
+    run_tool: Any = None  # Callable[[str, dict, Callable[[], bool]], dict] — 서버가 주입
     _entries: dict[str, _TaskEntry] = field(default_factory=dict)
+    _entries_lock: threading.RLock = field(default_factory=threading.RLock)
 
     def settings(self) -> dict[str, Any]:
         return {"tools": sorted(TASKABLE_TOOLS)}
@@ -92,41 +94,37 @@ class AnchorTasksExtension(Extension):
             poll_interval=500,
         )
         entry = _TaskEntry(task=task)
-        self._entries[task.task_id] = entry
+        with self._entries_lock:
+            self._entries[task.task_id] = entry
 
         tool_name = params.name
         arguments = params.arguments or {}
 
-        async def _run() -> None:
+        def _run() -> None:
+            # 추적 가능한 스레드에서 돈다. anyio.to_thread의 워커는 join할 수
+            # 없어 종료 시 커넥션 해제와 겹치면 SIGSEGV가 났다 (D-034).
             try:
-                payload = await anyio.to_thread.run_sync(
-                    lambda: self.run_tool(tool_name, arguments)
-                )
-                entry.result = CallToolResult(
-                    content=[TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))],
+                payload = self.run_tool(tool_name, arguments, entry.cancel.is_set)
+                result = CallToolResult(
+                    content=[
+                        TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))
+                    ],
                     structured_content=payload,
                 )
-                entry.task = entry.task.model_copy(
-                    update={"status": "completed", "last_updated_at": utcnow_iso()}
-                )
-            except asyncio.CancelledError:
-                entry.task = entry.task.model_copy(
-                    update={"status": "cancelled", "last_updated_at": utcnow_iso()}
-                )
-                raise
+                status = "cancelled" if entry.cancel.is_set() else "completed"
+                self._finish(entry, result, status)
             except Exception as error:  # 실패도 Task 상태로 보고한다
-                entry.result = CallToolResult(
-                    content=[TextContent(type="text", text=str(error))], is_error=True
-                )
-                entry.task = entry.task.model_copy(
-                    update={
-                        "status": "failed",
-                        "status_message": str(error),
-                        "last_updated_at": utcnow_iso(),
-                    }
+                self._finish(
+                    entry,
+                    CallToolResult(
+                        content=[TextContent(type="text", text=str(error))], is_error=True
+                    ),
+                    "failed",
+                    str(error),
                 )
 
-        entry.handle = asyncio.create_task(_run())
+        entry.worker = threading.Thread(target=_run, name=f"anchor-task-{task.task_id[:8]}")
+        entry.worker.start()
         # SDK 2.0의 와이어 게이트는 2026-07-28에서 tools/call 응답으로
         # CreateTaskResult를 허용하지 않는다 (tasks는 2025-11-25 실험 리비전
         # 전용). task 기술자를 CallToolResult에 인밴드로 담아 반환하고,
@@ -137,8 +135,40 @@ class AnchorTasksExtension(Extension):
             structured_content={"task": task_payload},
         )
 
+    def _finish(
+        self,
+        entry: _TaskEntry,
+        result: CallToolResult,
+        status: str,
+        message: str | None = None,
+    ) -> None:
+        """워커 스레드에서 종결 상태를 기록한다. 취소된 task도 결과를 남겨
+        `tasks/result`가 영원히 '아직 안 끝남'을 반환하지 않게 한다 (D-036)."""
+        with self._entries_lock:
+            entry.result = result
+            update: dict[str, Any] = {"status": status, "last_updated_at": utcnow_iso()}
+            if message is not None:
+                update["status_message"] = message
+            entry.task = entry.task.model_copy(update=update)
+
+    def shutdown(self, timeout: float = 10.0) -> None:
+        """진행 중인 task에 중단을 알리고 워커가 끝나기를 기다린다.
+
+        저장소를 닫기 전에 반드시 호출해야 한다 — 워커가 쓰는 중인 SQLite
+        커넥션을 닫으면 use-after-free로 프로세스가 죽는다 (D-034).
+        """
+        with self._entries_lock:
+            entries = list(self._entries.values())
+        for entry in entries:
+            entry.cancel.set()
+        deadline = time.monotonic() + timeout
+        for entry in entries:
+            if entry.worker is not None and entry.worker.is_alive():
+                entry.worker.join(timeout=max(0.0, deadline - time.monotonic()))
+
     def _entry(self, task_id: str) -> _TaskEntry:
-        entry = self._entries.get(task_id)
+        with self._entries_lock:
+            entry = self._entries.get(task_id)
         if entry is None:
             raise MCPError(_TASK_NOT_FOUND, f"task not found — task 없음: {task_id}")
         return entry
@@ -158,19 +188,27 @@ class AnchorTasksExtension(Extension):
 
     async def _on_cancel(self, ctx, params: CancelTaskRequestParams) -> CancelTaskResult:
         entry = self._entry(params.task_id)
-        if entry.task.status == "working" and entry.handle is not None:
-            entry.handle.cancel()
-            entry.task = entry.task.model_copy(
-                update={
-                    "status": "cancelled",
-                    "status_message": "cancelled by client request — 클라이언트 요청으로 취소됨",
-                    "last_updated_at": utcnow_iso(),
-                }
-            )
+        if entry.task.status == "working":
+            # 중단 신호만 세운다. 워커는 문서 사이에서 이를 확인하고 남은
+            # 작업을 건드리지 않는다 — 상태만 바꾸고 계속 돌던 문제를 고침
+            # (D-035). 실제 종결 상태는 워커가 멈춘 뒤 _finish가 기록한다.
+            entry.cancel.set()
+            with self._entries_lock:
+                entry.task = entry.task.model_copy(
+                    update={
+                        "status_message": (
+                            "cancellation requested — 취소 요청됨 (진행 중 작업을 정리하는 중)"
+                        ),
+                        "last_updated_at": utcnow_iso(),
+                    }
+                )
+            if entry.worker is not None:
+                await anyio.to_thread.run_sync(lambda: entry.worker.join(timeout=5.0))
         return CancelTaskResult(**entry.task.model_dump())
 
     async def _on_list(self, ctx, params: PaginatedRequestParams | None) -> ListTasksResult:
-        return ListTasksResult(tasks=[entry.task for entry in self._entries.values()])
+        with self._entries_lock:
+            return ListTasksResult(tasks=[entry.task for entry in self._entries.values()])
 
 
 # ---------------------------------------------------------------------------
@@ -185,22 +223,25 @@ def build_server(
     service = Anchor(db_path=db_path, config=config)
     lock = threading.Lock()
 
-    def _verify_payload(arguments: dict[str, Any]) -> dict[str, Any]:
+    def _verify_payload(
+        arguments: dict[str, Any], should_stop: Any = None
+    ) -> dict[str, Any]:
         with lock:
             report = service.verify(
                 anchor_ids=arguments.get("anchor_ids"),
                 document_ids=arguments.get("document_ids"),
                 older_than=arguments.get("older_than"),
                 time_budget_ms=arguments.get("time_budget_ms"),
+                should_stop=should_stop,
             )
         payload = asdict(report)
         payload["network"] = {"requests": report.requests, "bytes_down": report.bytes_down}
         del payload["requests"], payload["bytes_down"]
         return payload
 
-    def _run_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    def _run_tool(name: str, arguments: dict[str, Any], should_stop: Any) -> dict[str, Any]:
         assert name == "verify_citations", name
-        return _verify_payload(arguments)
+        return _verify_payload(arguments, should_stop)
 
     tasks_extension = AnchorTasksExtension(run_tool=_run_tool)
 
@@ -416,6 +457,7 @@ def build_server(
         with lock:
             return {"items": service.export_robust_links(anchor_ids, fmt=format)}
 
+    server.anchor_tasks = tasks_extension
     return server, service
 
 
@@ -439,6 +481,8 @@ def main() -> None:
     try:
         server.run(transport="streamable-http" if transport == "http" else "stdio")
     finally:
+        # 순서가 중요하다: 워커가 커넥션을 쓰는 중에 닫으면 죽는다 (D-034).
+        server.anchor_tasks.shutdown()
         service.close()
 
 

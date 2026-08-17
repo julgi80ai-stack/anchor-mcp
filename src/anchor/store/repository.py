@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
+from typing import Any, Sequence
 
 import zstandard
 
@@ -14,6 +16,64 @@ from anchor.models import AnchorRecord, Document, Version, uuid7
 
 SCHEMA_VERSION = 2
 ZSTD_LEVEL = 6
+
+
+class _Rows:
+    """락을 놓기 전에 구체화한 조회 결과. 커서를 밖으로 내보내지 않는다."""
+
+    __slots__ = ("_rows",)
+
+    def __init__(self, rows: list[sqlite3.Row]) -> None:
+        self._rows = rows
+
+    def fetchone(self) -> sqlite3.Row | None:
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self) -> list[sqlite3.Row]:
+        return self._rows
+
+
+class _SerializedConnection:
+    """모든 SQL 실행을 재진입 락으로 직렬화하는 커넥션 래퍼 (D-020/D-023).
+
+    `sqlite3.threadsafety == 3`은 커넥션 자체를 보호하지만 두 가지를 보호하지
+    않는다: ① `with connection:` 트랜잭션은 커넥션 전역이라 스레드별 격리가
+    없어 한 스레드의 롤백이 다른 스레드의 커밋에 무효화된다 ② 커서를 밖으로
+    돌려주면 다음 스레드가 그 위를 덮어쓴다. 여기서 트랜잭션을 명시적으로
+    열고(`isolation_level=None`), 결과를 락 안에서 구체화한다.
+    """
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._connection = connection
+        self._lock = threading.RLock()
+
+    def execute(self, sql: str, params: Sequence[Any] = ()) -> _Rows:
+        with self._lock:
+            return _Rows(self._connection.execute(sql, params).fetchall())
+
+    def executemany(self, sql: str, seq: Sequence[Sequence[Any]]) -> None:
+        with self._lock:
+            self._connection.executemany(sql, seq)
+
+    def __enter__(self) -> _SerializedConnection:
+        self._lock.acquire()
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+        except BaseException:
+            self._lock.release()
+            raise
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        try:
+            self._connection.execute("ROLLBACK" if exc_type else "COMMIT")
+        finally:
+            self._lock.release()
+        return False
+
+    def close(self) -> None:
+        with self._lock:
+            self._connection.close()
 
 # 증분 마이그레이션: {목표 버전: SQL 파일}. 신규 DB는 schema.sql 전체를 쓴다.
 MIGRATION_FILES: dict[int, str] = {
@@ -38,14 +98,13 @@ class Repository:
         db_path = Path(db_path).expanduser()
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db_path = db_path
-        # sqlite3.threadsafety == 3 (serialized) 전제 하에 MCP 서버의
-        # 스레드 풀 실행을 허용한다. 논리적 직렬화는 server.py의 락이 맡는다.
-        self._connection = sqlite3.connect(db_path, check_same_thread=False)
-        self._connection.row_factory = sqlite3.Row
-        self._connection.execute("PRAGMA journal_mode = WAL")
-        self._connection.execute("PRAGMA foreign_keys = ON")
-        self._compressor = zstandard.ZstdCompressor(level=ZSTD_LEVEL)
-        self._decompressor = zstandard.ZstdDecompressor()
+        raw = sqlite3.connect(db_path, check_same_thread=False, isolation_level=None)
+        raw.row_factory = sqlite3.Row
+        raw.execute("PRAGMA journal_mode = WAL")
+        raw.execute("PRAGMA foreign_keys = ON")
+        # 압축기 인스턴스는 스레드 안전하지 않아 공유하면 segfault가 난다.
+        # 호출마다 만든다 — 실측 비용 +0.016ms (D-020).
+        self._connection = _SerializedConnection(raw)
         self._migrate()
 
     def close(self) -> None:
@@ -59,12 +118,25 @@ class Repository:
                 total += candidate.stat().st_size
         return total
 
+    def _apply_sql_atomically(self, sql: str, target_version: int) -> None:
+        """스키마 SQL과 버전 표시를 한 트랜잭션으로 적용한다 (D-019).
+
+        `executescript`는 대기 중인 트랜잭션을 암시적으로 COMMIT하고 각 문장을
+        autocommit으로 실행하므로 원자성을 주지 못한다. 적용 도중 중단되면
+        테이블 일부만 생성된 채 `user_version`이 갱신되지 않아 이후 DB를 영영
+        열 수 없게 되므로, 문장 단위로 나눠 명시적 트랜잭션 안에서 실행한다.
+        `PRAGMA user_version`은 DB 헤더에 기록되며 트랜잭션에 포함된다(실측 확인).
+        """
+        statements = [part.strip() for part in sql.split(";") if part.strip()]
+        with self._connection as connection:
+            for statement in statements:
+                connection.execute(statement)
+            connection.execute(f"PRAGMA user_version = {target_version}")
+
     def _migrate(self) -> None:
         (current,) = self._connection.execute("PRAGMA user_version").fetchone()
         if current == 0:
-            with self._connection:
-                self._connection.executescript(_load_schema())
-                self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            self._apply_sql_atomically(_load_schema(), SCHEMA_VERSION)
             return
         if current > SCHEMA_VERSION:
             raise RuntimeError(
@@ -76,9 +148,7 @@ class Repository:
                 .joinpath(MIGRATION_FILES[target])
                 .read_text("utf-8")
             )
-            with self._connection:
-                self._connection.executescript(sql)
-                self._connection.execute(f"PRAGMA user_version = {target}")
+            self._apply_sql_atomically(sql, target)
 
     # -- documents ---------------------------------------------------------
 
@@ -201,7 +271,9 @@ class Repository:
         source_uri: str | None = None,
     ) -> Version:
         version_id = uuid7()
-        blob = self._compressor.compress(normalized_text.encode("utf-8"))
+        blob = zstandard.ZstdCompressor(level=ZSTD_LEVEL).compress(
+            normalized_text.encode("utf-8")
+        )
         with self._connection:
             self._connection.execute(
                 """INSERT INTO versions
@@ -233,7 +305,7 @@ class Repository:
         ).fetchone()
         if row is None:
             raise KeyError(f"version not found — 버전 없음: {version_id}")
-        return self._decompressor.decompress(row["content_blob"]).decode("utf-8")
+        return zstandard.ZstdDecompressor().decompress(row["content_blob"]).decode("utf-8")
 
     # -- fetch_log ---------------------------------------------------------
 

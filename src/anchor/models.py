@@ -152,6 +152,7 @@ class VerifyReport:
     summary: dict[str, int]
     attention: tuple[AttentionItem, ...]
     anchor_ids: tuple[str, ...]  # 이번에 검증한 앵커들 (SPEC §8 예시의 재내보내기용)
+    stopped_early: bool  # 취소·종료 신호로 중도 종료됐는가 (부분 결과)
     requests: int
     bytes_down: int
 

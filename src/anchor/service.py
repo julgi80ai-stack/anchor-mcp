@@ -7,6 +7,7 @@ v0.1 완료 기준: 같은 URL 두 번 호출 시 두 번째가 네트워크 0�
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import TracebackType
 
@@ -240,11 +241,16 @@ class Anchor:
         document_ids: list[str] | None = None,
         older_than: str | float | None = None,
         time_budget_ms: float | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> VerifyReport:
         """앵커들을 현재 원문 대비 재검증한다 (SPEC §7.3). 조건이 없으면 전체.
 
         older_than: ISO 8601 기간 문자열("P7D") 또는 초. 그 안에 검증된
         앵커는 건너뛴다.
+
+        should_stop: 문서 사이마다 확인하는 중단 신호. 참을 돌려주면 남은
+        문서를 건드리지 않고 지금까지의 결과만 반환한다 — 취소와 종료가
+        실제로 작업을 멈추게 하는 유일한 경로다 (D-034/D-035).
         """
         if isinstance(older_than, str):
             older_than = parse_iso_duration(older_than)
@@ -262,7 +268,11 @@ class Anchor:
         for anchor in anchors:
             by_document.setdefault(anchor.document_id, []).append(anchor)
 
+        stopped_early = False
         for document_id, document_anchors in by_document.items():
+            if should_stop is not None and should_stop():
+                stopped_early = True
+                break
             document = self._repository.get_document(document_id)
             assert document is not None, "앵커는 문서 없이 존재할 수 없다 (FK)"
 
@@ -358,11 +368,13 @@ class Anchor:
                         )
                     )
 
+        checked = sum(summary.values())
         return VerifyReport(
-            checked=len(anchors),
+            checked=checked,
             summary=summary,
             attention=tuple(attention),
             anchor_ids=tuple(anchor.id for anchor in anchors),
+            stopped_early=stopped_early,
             requests=requests,
             bytes_down=bytes_down,
         )
