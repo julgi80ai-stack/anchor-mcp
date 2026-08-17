@@ -14,3 +14,7 @@ dist/
 
 # 로컬 전용 (git 미추적)
 CLAUDE.md
+
+# 커버리지 데이터
+.coverage
+coverage.xml
