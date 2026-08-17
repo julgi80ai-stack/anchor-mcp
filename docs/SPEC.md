@@ -588,7 +588,7 @@ k = max(1, min(int(len(exact) * ratio), 64))
 
 ```jsonc
 // 입력
-{ "document_id": "018f...", "quote": "재페치의 절반은 낭비다", "note": "3장 근거" }
+{ "document_id": "018f...", "quote": "AI 크롤러 트래픽의 절반 이상이 변하지 않은 페이지를 다시 가져오는 데 쓰인다", "note": "3장 근거" }
 
 // 출력
 {
@@ -626,10 +626,10 @@ k = max(1, min(int(len(exact) * ratio), 64))
       "anchor_id": "018f...",
       "state": "ALTERED",
       "url": "https://example.com/report",
-      "before": "재페치의 절반은 낭비다",
-      "after":  "재페치의 약 60%는 낭비다",
-      "match_score": 0.88,
-      "edit_distance": 4
+      "before": "AI 크롤러 트래픽의 절반 이상이 변하지 않은 페이지를 다시 가져오는 데 쓰인다",
+      "after":  "AI 크롤러 트래픽의 약 60%가 변하지 않은 페이지를 다시 가져오는 데 쓰인다",
+      "match_score": 0.86,
+      "edit_distance": 6
     }
   ],
   "network": { "requests": 12, "not_modified": 9, "bytes_down": 48210 },
@@ -732,7 +732,7 @@ with Anchor(db_path="~/.anchor/store.db") as ax:
     doc = ax.fetch("https://example.com/report", max_age=3600)
     print(doc.outcome, doc.char_count)
 
-    cit = ax.cite(doc.id, "재페치의 절반은 낭비다")
+    cit = ax.cite(doc.id, "AI 크롤러 트래픽의 절반 이상이 변하지 않은 페이지를 다시 가져오는 데 쓰인다")
     if cit.quality is Quality.SHORT:
         print("경고: 인용문이 짧아 재검증 정확도가 낮을 수 있습니다")
 

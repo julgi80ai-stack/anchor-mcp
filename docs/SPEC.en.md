@@ -597,7 +597,7 @@ Assigns an anchor to a quote.
 
 ```jsonc
 // input
-{ "document_id": "018f...", "quote": "Half of all re-fetching is waste", "note": "grounds for ch. 3" }
+{ "document_id": "018f...", "quote": "More than half of AI crawler traffic goes to re-fetching pages that have not changed", "note": "grounds for ch. 3" }
 
 // output
 {
@@ -635,10 +635,10 @@ Re-verifies anchors against the current source. Processes in batch and observes 
       "anchor_id": "018f...",
       "state": "ALTERED",
       "url": "https://example.com/report",
-      "before": "Half of all re-fetching is waste",
-      "after":  "About 60% of all re-fetching is waste",
-      "match_score": 0.88,
-      "edit_distance": 4
+      "before": "More than half of AI crawler traffic goes to re-fetching pages that have not changed",
+      "after":  "About 60% of AI crawler traffic goes to re-fetching pages that have not changed",
+      "match_score": 0.86,
+      "edit_distance": 12
     }
   ],
   "network": { "requests": 12, "not_modified": 9, "bytes_down": 48210 },
@@ -741,7 +741,7 @@ with Anchor(db_path="~/.anchor/store.db") as ax:
     doc = ax.fetch("https://example.com/report", max_age=3600)
     print(doc.outcome, doc.char_count)
 
-    cit = ax.cite(doc.id, "Half of all re-fetching is waste")
+    cit = ax.cite(doc.id, "More than half of AI crawler traffic goes to re-fetching pages that have not changed")
     if cit.quality is Quality.SHORT:
         print("Warning: the quote is short, so re-verification accuracy may be low")
 
