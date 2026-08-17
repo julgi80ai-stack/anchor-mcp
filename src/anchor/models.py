@@ -36,6 +36,32 @@ def age_seconds(since_iso: str) -> float:
     return (datetime.now(timezone.utc) - parse_iso(since_iso)).total_seconds()
 
 
+_DURATION_RE = None  # 지연 컴파일
+
+
+def parse_iso_duration(value: str) -> float:
+    """ISO 8601 기간(P7D, PT12H, P1DT6H30M …)을 초로 변환한다."""
+    global _DURATION_RE
+    import re
+
+    if _DURATION_RE is None:
+        _DURATION_RE = re.compile(
+            r"^P(?:(?P<weeks>\d+)W)?(?:(?P<days>\d+)D)?"
+            r"(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+(?:\.\d+)?)S)?)?$"
+        )
+    match = _DURATION_RE.match(value.strip().upper())
+    if not match or not any(match.groupdict().values()):
+        raise ValueError(f"ISO 8601 기간 형식이 아닙니다: {value!r} (예: P7D, PT12H)")
+    parts = {key: float(group or 0) for key, group in match.groupdict().items()}
+    return (
+        parts["weeks"] * 604800
+        + parts["days"] * 86400
+        + parts["hours"] * 3600
+        + parts["minutes"] * 60
+        + parts["seconds"]
+    )
+
+
 def iso_ago(seconds: float) -> str:
     """현재로부터 seconds 이전 시각의 ISO 8601 UTC 문자열."""
     moment = datetime.now(timezone.utc) - timedelta(seconds=seconds)

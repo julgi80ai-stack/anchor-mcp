@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Anchor — AI가 사용한 웹 근거의 시간적·출처적 무결성 계층.
 
-Memento(RFC 7089)의 로컬 클라이언트. v0.2까지 구현됨: fetch + 해시 +
-변경 감지(v0.1), 앵커 생성·재검증 + 근사 매칭 + 시간 예산(v0.2).
-SPEC §13 로드맵 참조.
+Memento(RFC 7089)의 로컬 클라이언트. v0.3까지 구현됨: fetch + 해시 +
+변경 감지(v0.1), 앵커 생성·재검증 + 근사 매칭 + 시간 예산(v0.2),
+MCP 서버 + 도구 9종 + Tasks 확장(v0.3). SPEC §13 로드맵 참조.
 """
 
 from anchor.service import Anchor
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = ["Anchor", "__version__"]

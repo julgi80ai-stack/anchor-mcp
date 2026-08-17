@@ -4,13 +4,13 @@
 
 > Anchor는 AI가 사용한 웹 근거를 시간에 걸쳐 다시 검증할 수 있게 한다.
 
-사양·철학·판단 근거·라이선스 대장이 먼저 확정됐고, 그 위에 v0.2(fetch + 변경 감지 + 앵커 재검증, CLI)까지 구현된 상태다. 다음 단계는 SPEC.md §13 로드맵의 v0.3(MCP 서버)이다.
+사양·철학·판단 근거·라이선스 대장이 먼저 확정됐고, 그 위에 v0.3(fetch + 변경 감지 + 앵커 재검증 + MCP 서버)까지 구현된 상태다. 다음 단계는 SPEC.md §13 로드맵의 v0.4다.
 
 ```bash
 # 설치 (Python 3.11+)
 uv venv --python 3.12 && uv pip install -e .
 
-# 사용
+# CLI
 anchor fetch https://www.rfc-editor.org/rfc/rfc7089.html   # created
 anchor fetch https://www.rfc-editor.org/rfc/rfc7089.html   # cache_hit — 네트워크 0바이트
 anchor cite  https://www.rfc-editor.org/rfc/rfc7089.html \
@@ -18,6 +18,19 @@ anchor cite  https://www.rfc-editor.org/rfc/rfc7089.html \
 anchor verify        # INTACT | MOVED | ALTERED | MISSING | GONE | UNREACHABLE | UNRESOLVED
 anchor list
 ```
+
+MCP 서버로 쓰려면 (`mcp-server-fetch` 자리에 그대로 교체 가능 — 같은 일을 하되 캐시·버전·출처가 붙는다):
+
+```jsonc
+// Claude Desktop 등의 MCP 설정
+{
+  "mcpServers": {
+    "anchor": { "command": "/절대/경로/.venv/bin/anchor-mcp" }
+  }
+}
+```
+
+도구 9종: `fetch_document` `cite` `verify_citations` `diff_versions` `get_version` `list_documents` `cache_stats` `get_timemap` `export_robust_links`
 
 ---
 
@@ -94,7 +107,7 @@ Memento는 틀려서 죽은 게 아니라 **중앙 서비스로 지어졌기 때
 | 선행기술 조사 | 완료 (ADR-0001) |
 | 라이선스 감사 | 완료 — 런타임 15건 전수 확인, 카피레프트 0건 (ADR-0002) |
 | PyPI `anchor-mcp` | 사용 가능 (2026-08-16 확인) |
-| 구현 | **v0.2 완료** (2026-08-17) — fetch + 이중 해시 + 변경 감지 + 앵커 재검증(7상태), CLI. 다음은 v0.3 MCP 서버 |
+| 구현 | **v0.3 완료** (2026-08-17) — fetch + 변경 감지 + 앵커 재검증(7상태) + MCP 서버(도구 9종, Tasks). 다음은 v0.4 |
 
 ### 알려진 미해결 항목
 

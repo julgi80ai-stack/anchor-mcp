@@ -154,6 +154,26 @@ def verify(
             typer.echo(f"  (score {item.match_score:.2f}, 편집거리 {item.edit_distance})")
 
 
+@app.command()
+def serve(
+    transport: Optional[str] = typer.Option(
+        None, "--transport", help="stdio | http (기본: 설정 파일, 없으면 stdio)"
+    ),
+    db: Optional[Path] = typer.Option(None, "--db", help="SQLite 경로"),
+) -> None:
+    """MCP 서버를 시작한다 (도구 9종). Claude Desktop 연동은 `anchor-mcp` 참조."""
+    from anchor.config import load_config
+    from anchor.server import build_server
+
+    config = load_config()
+    resolved = transport or config.server_transport
+    server, service = build_server(db_path=db, config=config)
+    try:
+        server.run(transport="streamable-http" if resolved == "http" else "stdio")
+    finally:
+        service.close()
+
+
 @app.command("list")
 def list_command(
     db: Optional[Path] = typer.Option(None, "--db", help="SQLite 경로"),

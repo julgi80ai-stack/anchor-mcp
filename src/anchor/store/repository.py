@@ -37,7 +37,10 @@ class Repository:
     def __init__(self, db_path: Path | str) -> None:
         db_path = Path(db_path).expanduser()
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(db_path)
+        self._db_path = db_path
+        # sqlite3.threadsafety == 3 (serialized) 전제 하에 MCP 서버의
+        # 스레드 풀 실행을 허용한다. 논리적 직렬화는 server.py의 락이 맡는다.
+        self._connection = sqlite3.connect(db_path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA journal_mode = WAL")
         self._connection.execute("PRAGMA foreign_keys = ON")
@@ -47,6 +50,14 @@ class Repository:
 
     def close(self) -> None:
         self._connection.close()
+
+    def disk_bytes(self) -> int:
+        total = 0
+        for suffix in ("", "-wal", "-shm"):
+            candidate = Path(str(self._db_path) + suffix)
+            if candidate.exists():
+                total += candidate.stat().st_size
+        return total
 
     def _migrate(self) -> None:
         (current,) = self._connection.execute("PRAGMA user_version").fetchone()
@@ -154,6 +165,20 @@ class Repository:
         ).fetchone()
         return self._to_version(row) if row else None
 
+    def get_version(self, version_id: str) -> Version | None:
+        row = self._connection.execute(
+            "SELECT * FROM versions WHERE id = ?", (version_id,)
+        ).fetchone()
+        return self._to_version(row) if row else None
+
+    def list_versions(self, document_id: str) -> list[Version]:
+        """captured_at 오름차순 — TimeMap 직렬화 순서와 일치."""
+        rows = self._connection.execute(
+            "SELECT * FROM versions WHERE document_id = ? ORDER BY captured_at ASC, id ASC",
+            (document_id,),
+        ).fetchall()
+        return [self._to_version(row) for row in rows]
+
     def find_version_by_text_hash(self, document_id: str, text_hash: str) -> Version | None:
         row = self._connection.execute(
             "SELECT * FROM versions WHERE document_id = ? AND text_hash = ?",
@@ -229,6 +254,59 @@ class Repository:
                    VALUES (?, ?, ?, ?, ?, ?)""",
                 (document_id, requested_at, outcome, http_status, bytes_down, elapsed_ms),
             )
+
+    # -- stats -------------------------------------------------------------
+
+    def count_rows(self) -> dict[str, int]:
+        counts = {}
+        for table in ("documents", "versions", "anchors"):
+            (counts[table],) = self._connection.execute(
+                f"SELECT COUNT(*) FROM {table}"
+            ).fetchone()
+        return counts
+
+    def fetch_stats_since(self, since_iso: str) -> dict[str, int]:
+        """fetch_log 집계: outcome별 건수 + 총 다운로드 바이트."""
+        rows = self._connection.execute(
+            """SELECT outcome, COUNT(*), SUM(bytes_down) FROM fetch_log
+               WHERE requested_at >= ? GROUP BY outcome""",
+            (since_iso,),
+        ).fetchall()
+        stats: dict[str, int] = {"requests": 0, "bytes_down": 0}
+        for outcome, count, bytes_down in rows:
+            stats[outcome] = count
+            stats["requests"] += count
+            stats["bytes_down"] += bytes_down or 0
+        return stats
+
+    def bytes_saved_estimate_since(self, since_iso: str) -> int:
+        """cache_hit·not_modified가 아니었다면 내려받았을 바이트의 추정치.
+
+        각 이벤트 시점의 정확한 크기는 남아 있지 않으므로 해당 문서의
+        최신 버전 byte_size로 근사한다.
+        """
+        (total,) = self._connection.execute(
+            """SELECT COALESCE(SUM(latest.byte_size), 0)
+               FROM fetch_log f
+               JOIN (
+                 SELECT document_id, byte_size,
+                        ROW_NUMBER() OVER (
+                          PARTITION BY document_id ORDER BY captured_at DESC, id DESC
+                        ) AS rn
+                 FROM versions
+               ) latest ON latest.document_id = f.document_id AND latest.rn = 1
+               WHERE f.requested_at >= ? AND f.outcome IN ('cache_hit', 'not_modified')""",
+            (since_iso,),
+        ).fetchone()
+        return int(total)
+
+    def latest_verification_time(self, anchor_id: str) -> str | None:
+        row = self._connection.execute(
+            """SELECT checked_at FROM verifications WHERE anchor_id = ?
+               ORDER BY checked_at DESC LIMIT 1""",
+            (anchor_id,),
+        ).fetchone()
+        return row["checked_at"] if row else None
 
     # -- anchors -----------------------------------------------------------
 

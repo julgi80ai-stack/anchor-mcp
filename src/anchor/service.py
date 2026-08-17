@@ -33,6 +33,8 @@ from anchor.models import (
     iso_ago,
     utcnow_iso,
 )
+from anchor.export import diff as export_diff
+from anchor.export import robustlinks, timemap
 from anchor.normalize import extract
 from anchor.normalize.hashing import hash_bytes, hash_text
 from anchor.store.repository import Repository
@@ -327,11 +329,150 @@ class Anchor:
             bytes_down=bytes_down,
         )
 
-    def list_documents(self) -> list[Document]:
-        return self._repository.list_documents()
+    def list_documents(
+        self,
+        *,
+        status: str | None = None,
+        host: str | None = None,
+        has_pending_verification: bool | None = None,
+    ) -> list[Document]:
+        documents = self._repository.list_documents()
+        if status is not None:
+            documents = [d for d in documents if d.status == status]
+        if host is not None:
+            documents = [d for d in documents if httpx.URL(d.url).host == host]
+        if has_pending_verification is not None:
+            documents = [
+                d for d in documents if self._has_pending_verification(d) == has_pending_verification
+            ]
+        return documents
 
     def get_version_text(self, version_id: str) -> str:
         return self._repository.get_version_text(version_id)
+
+    def get_version(
+        self,
+        version_id: str | None = None,
+        *,
+        document_id: str | None = None,
+        ref: str = "latest",
+    ) -> tuple[Version, str]:
+        """버전 메타데이터와 본문. version_id 직접 지정 또는 document_id + ref."""
+        if version_id is not None:
+            version = self._repository.get_version(version_id)
+            if version is None:
+                raise DocumentNotFound(f"버전을 찾을 수 없습니다: {version_id}")
+        else:
+            if document_id is None:
+                raise DocumentNotFound("version_id 또는 document_id를 지정해야 합니다")
+            version = self._resolve_version_ref(document_id, ref)
+        return version, self._repository.get_version_text(version.id)
+
+    def diff_versions(
+        self,
+        document_ref: str,
+        *,
+        from_ref: str = "latest~1",
+        to_ref: str = "latest",
+        context_lines: int = 2,
+    ) -> str:
+        """두 버전의 본문 차이를 통합 diff로 (SPEC §7.4)."""
+        document = self._resolve_document(document_ref)
+        from_version = self._resolve_version_ref(document.id, from_ref)
+        to_version = self._resolve_version_ref(document.id, to_ref)
+        return export_diff.unified_diff(
+            from_version,
+            self._repository.get_version_text(from_version.id),
+            to_version,
+            self._repository.get_version_text(to_version.id),
+            context_lines=context_lines,
+        )
+
+    def cache_stats(self, *, window_seconds: float = 30 * 86400) -> dict:
+        """캐시 회계 (SPEC §7.7). 절감 효과를 사용자가 직접 확인하는 지표."""
+        since = iso_ago(window_seconds)
+        counts = self._repository.count_rows()
+        window = self._repository.fetch_stats_since(since)
+        requests = window["requests"]
+        cache_hits = window.get("cache_hit", 0)
+        not_modified = window.get("not_modified", 0)
+        return {
+            "documents": counts["documents"],
+            "versions": counts["versions"],
+            "anchors": counts["anchors"],
+            "disk_bytes": self._repository.disk_bytes(),
+            "last_30d": {
+                "requests": requests,
+                "cache_hits": cache_hits,
+                "not_modified": not_modified,
+                "unchanged": window.get("unchanged", 0),
+                "changed": window.get("changed", 0)
+                + window.get("created", 0)
+                + window.get("renormalized", 0),
+                "errors": window.get("error", 0),
+                "bytes_down": window["bytes_down"],
+                "bytes_saved_estimate": self._repository.bytes_saved_estimate_since(since),
+                "hit_rate": round((cache_hits + not_modified) / requests, 4) if requests else 0.0,
+            },
+        }
+
+    def get_timemap(self, document_ref: str, *, fmt: str = "link") -> dict:
+        """RFC 7089 TimeMap 내보내기 (SPEC §7.8)."""
+        document = self._resolve_document(document_ref)
+        versions = self._repository.list_versions(document.id)
+        if fmt == "link":
+            return {
+                "content_type": "application/link-format",
+                "body": timemap.to_link_format(document, versions),
+            }
+        if fmt == "json":
+            return {
+                "content_type": "application/json",
+                "body": timemap.to_json_format(document, versions),
+            }
+        raise ValueError(f"지원하지 않는 형식: {fmt} (link | json)")
+
+    def export_robust_links(self, anchor_ids: list[str], *, fmt: str = "html") -> list[dict]:
+        """Robust Links 내보내기 (SPEC §7.9)."""
+        serializer = robustlinks.SERIALIZERS.get(fmt)
+        if serializer is None:
+            raise ValueError(f"지원하지 않는 형식: {fmt} (html | markdown | bibtex_note)")
+        items: list[dict] = []
+        for anchor_id in anchor_ids:
+            anchor = self._repository.get_anchor(anchor_id)
+            if anchor is None:
+                raise DocumentNotFound(f"앵커를 찾을 수 없습니다: {anchor_id}")
+            document = self._repository.get_document(anchor.document_id)
+            version = self._repository.get_version(anchor.created_version)
+            assert document is not None and version is not None
+            items.append({"anchor_id": anchor_id, fmt: serializer(document, version, anchor)})
+        return items
+
+    def _resolve_version_ref(self, document_id: str, ref: str) -> Version:
+        """'latest', 'latest~N' 또는 버전 id를 버전으로 해석한다."""
+        if ref == "latest" or ref.startswith("latest~"):
+            back = int(ref[7:]) if ref.startswith("latest~") else 0
+            versions = self._repository.list_versions(document_id)
+            if not versions or back >= len(versions):
+                raise DocumentNotFound(
+                    f"버전 참조 {ref!r}를 해석할 수 없습니다 (보유 버전 {len(versions)}개)"
+                )
+            return versions[-1 - back]
+        version = self._repository.get_version(ref)
+        if version is None or version.document_id != document_id:
+            raise DocumentNotFound(f"버전을 찾을 수 없습니다: {ref}")
+        return version
+
+    def _has_pending_verification(self, document: Document) -> bool:
+        """최신 버전 캡처 이후 재검증되지 않은 앵커가 있는가."""
+        latest = self._repository.latest_version(document.id)
+        if latest is None:
+            return False
+        for anchor in self._repository.select_anchors(document_ids=[document.id]):
+            last_checked = self._repository.latest_verification_time(anchor.id)
+            if last_checked is None or last_checked < latest.captured_at:
+                return True
+        return False
 
     def _resolve_document(self, document_ref: str) -> Document:
         if document_ref.startswith(("http://", "https://")):

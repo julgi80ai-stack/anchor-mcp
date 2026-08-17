@@ -19,7 +19,7 @@ DEFAULT_DB_PATH = Path("~/.anchor/store.db")
 @dataclass(frozen=True)
 class Config:
     db_path: Path = DEFAULT_DB_PATH
-    user_agent: str = "Anchor/0.2 (+https://github.com/julgi80ai-stack/anchor-mcp)"
+    user_agent: str = "Anchor/0.3 (+https://github.com/julgi80ai-stack/anchor-mcp)"
     respect_robots: bool = True
     timeout_seconds: float = 30.0
     max_redirects: int = 5
@@ -38,6 +38,8 @@ class Config:
     time_budget_ms: int = 200
     hint_radius: int = 500
     max_match_chars: int = 2_097_152
+    # [server] (SPEC §9)
+    server_transport: str = "stdio"  # stdio | http
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -82,6 +84,9 @@ def load_config(path: Path | None = None) -> Config:
             overrides["time_budget_ms"] = int(anchor_section["time_budget_ms"])
         if "max_document_bytes" in anchor_section:
             overrides["max_match_chars"] = int(anchor_section["max_document_bytes"])
+        server_section = data.get("server", {})
+        if "transport" in server_section:
+            overrides["server_transport"] = str(server_section["transport"])
         config = replace(config, **overrides)
 
     if env_db := os.environ.get("ANCHOR_DB_PATH"):
