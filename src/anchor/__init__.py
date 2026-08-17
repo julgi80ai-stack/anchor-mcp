@@ -9,5 +9,5 @@ SPEC §13 로드맵 참조.
 
 from anchor.service import Anchor
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 __all__ = ["Anchor", "__version__"]

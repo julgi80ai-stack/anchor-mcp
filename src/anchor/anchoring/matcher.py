@@ -13,8 +13,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from anchor.anchoring.approx import bounded_edit_distance, fuzzy_search
+from anchor.anchoring.approx import bounded_edit_distance, fuzzy_search, fuzzy_search_myers
 from anchor.anchoring.budget import Budget
+
+# regex 퍼지는 편집거리 상한이 이보다 크면 미발견 시 지수적으로 느려진다
+# (실측: k=11, 1천 자 문서에서 5초 초과). 그 위로는 k와 무관하게 O(n)인
+# Myers 경로를 쓴다 (SPEC §6.2 폴백). 영어 인용문은 같은 문장이라도 글자
+# 수가 길어 k가 커지므로 이 분기가 실질적으로 언어 간 형평을 만든다.
+_REGEX_MAX_K = 6
 
 INTACT = "INTACT"
 MOVED = "MOVED"
@@ -85,7 +91,10 @@ def match_anchor(
 
     # 4단계 — 편집거리 상한 근사 검색
     try:
-        approx = fuzzy_search(text, exact, k, timeout_seconds=budget.remaining_seconds())
+        if k <= _REGEX_MAX_K:
+            approx = fuzzy_search(text, exact, k, timeout_seconds=budget.remaining_seconds())
+        else:
+            approx = fuzzy_search_myers(text, exact, k, budget)
     except TimeoutError:
         return MatchResult(UNRESOLVED, truncated=truncated)
     if approx is None:

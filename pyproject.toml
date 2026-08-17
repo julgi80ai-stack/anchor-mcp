@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "anchor-mcp"
-version = "1.0.1"
+version = "1.0.2"
 description = "AI가 사용한 웹 근거의 시간적·출처적 무결성 계층 — Memento(RFC 7089)의 로컬 클라이언트"
 readme = "README.md"
 requires-python = ">=3.11"
