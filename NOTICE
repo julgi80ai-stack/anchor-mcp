@@ -1,0 +1,65 @@
+Anchor
+Copyright 2026 <저작자명>
+
+This product is licensed under the Apache License, Version 2.0.
+See the LICENSE file for the full license text.
+
+================================================================================
+Third-party components
+================================================================================
+
+This product depends on software developed by third parties. A complete
+inventory with verified license identifiers is maintained in THIRD-PARTY.md.
+
+Apache License 2.0 components:
+  - Trafilatura, Copyright Adrien Barbaresi (>= 1.8.0 required; earlier
+    versions are GPLv3+ and are not compatible with this distribution)
+  - readability-lxml
+  - regex (licensed as "Apache-2.0 AND CNRI-Python")
+
+BSD and MIT licensed components:
+  - lxml, protego, zstandard, pypdf, httpx (BSD-3-Clause)
+  - markdownify, charset-normalizer, pydantic, pydantic-settings, typer,
+    mcp Python SDK (MIT)
+
+Dual-licensed components:
+  - blake3, offered under "CC0-1.0 OR Apache-2.0".
+    This product elects the Apache-2.0 option.
+
+================================================================================
+Acknowledgements
+================================================================================
+
+Anchor is an implementation of ideas developed by others over two decades.
+No code is copied from the projects below; they are acknowledged because the
+design would not exist without them.
+
+The temporal model follows the Memento framework, RFC 7089, authored by
+Herbert Van de Sompel, Michael L. Nelson, and Robert Sanderson. The service
+that operated this protocol at the Los Alamos National Laboratory Research
+Library closed at the end of 2025.
+
+The citation anchor model follows the W3C Web Annotation Data Model
+(TextQuoteSelector and TextPositionSelector).
+
+The multi-stage anchor reattachment strategy is informed by the Hypothesis
+annotation client (BSD-2-Clause, Copyright (c) 2013-2019 Hypothes.is Project
+and contributors), and by the publicly documented performance failures of
+fuzzy quote anchoring in that project. The decision to use bounded
+edit-distance matching rather than diff-match-patch follows from benchmarks
+published by Robert Knight in the anchor-quote project (MIT).
+
+Citation export follows the Robust Links Specification.
+
+The empirical basis for this work comes from:
+  Klein M, Van de Sompel H, Sanderson R, Shankar H, Balakireva L, Zhou K,
+  Tobin R (2014). "Scholarly Context Not Found: One in Five Articles Suffers
+  from Reference Rot." PLoS ONE 9(12): e115253.
+
+  Jones SM, Van de Sompel H, Shankar H, Klein M, Tobin R, Grover C (2016).
+  "Scholarly Context Adrift: Three out of Four URI References Lead to
+  Changed Content." PLoS ONE 11(12): e0167475.
+
+Archive fallback interoperates with MemGator (MIT, Copyright Sawood Alam and
+Michael L. Nelson), invoked as a separate process. Its user-agent spoofing
+option is intentionally not used.
