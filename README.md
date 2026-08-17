@@ -4,7 +4,7 @@
 
 > Anchor는 AI가 사용한 웹 근거를 시간에 걸쳐 다시 검증할 수 있게 한다.
 
-사양·철학·판단 근거·라이선스 대장이 먼저 확정됐고, 그 위에 v0.4(fetch + 변경 감지 + 앵커 재검증 + MCP 서버 + PDF·gc·내보내기 CLI)까지 구현된 상태다. 다음 단계는 SPEC.md §13 로드맵의 v0.5(아카이브 폴백)다.
+사양·철학·판단 근거·라이선스 대장이 먼저 확정됐고, 그 위에 v0.5(fetch + 변경 감지 + 앵커 재검증 + MCP 서버 + PDF·gc·내보내기 + 아카이브 폴백)까지 구현된 상태다. 다음 단계는 SPEC.md §13 로드맵의 v1.0(문서화·CI 매트릭스·안정 스키마)이다.
 
 ```bash
 # 설치 (Python 3.11+)
@@ -21,6 +21,15 @@ anchor timemap https://www.rfc-editor.org/rfc/rfc7089.html   # RFC 7089 TimeMap
 anchor export --robust-links --format markdown
 anchor stats         # hit_rate, 절감 바이트
 anchor gc --keep 20
+```
+
+원본이 죽었을 때 공개 아카이브를 확인하는 폴백은 기본 꺼져 있다 — 외부 서비스에 조용히 의존하지 않는다. `~/.anchor/config.toml`에서 명시적으로 켠다:
+
+```toml
+[fetch.archive_fallback]
+enabled    = true
+aggregator = ""   # 자체 호스팅 MemGator 엔드포인트. 비우면 Wayback CDX
+# 주의: MemGator를 쓸 경우 --spoof 를 켜지 말 것 (SPEC §5.2 운영 지침)
 ```
 
 MCP 서버로 쓰려면 (`mcp-server-fetch` 자리에 그대로 교체 가능 — 같은 일을 하되 캐시·버전·출처가 붙는다):
@@ -111,7 +120,7 @@ Memento는 틀려서 죽은 게 아니라 **중앙 서비스로 지어졌기 때
 | 선행기술 조사 | 완료 (ADR-0001) |
 | 라이선스 감사 | 완료 — 런타임 15건 전수 확인, 카피레프트 0건 (ADR-0002) |
 | PyPI `anchor-mcp` | 사용 가능 (2026-08-16 확인) |
-| 구현 | **v0.4 완료** (2026-08-17) — fetch + 변경 감지 + 앵커 재검증(7상태) + MCP 서버(도구 9종, Tasks) + PDF·gc·내보내기 CLI. 30일 실사용 관찰 창 진행 중. 다음은 v0.5 아카이브 폴백 |
+| 구현 | **v0.5 완료** (2026-08-17) — fetch + 변경 감지 + 앵커 재검증(7상태) + MCP 서버(도구 9종, Tasks) + PDF·gc·내보내기 + 아카이브 폴백(기본 off). 30일 실사용 관찰 창 진행 중. 다음은 v1.0 |
 
 ### 알려진 미해결 항목
 

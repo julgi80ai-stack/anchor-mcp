@@ -43,6 +43,9 @@ class FixtureState:
         self.robots: str = "User-agent: *\nDisallow: /private\n"
         self.status_override: int | None = None
         self.requests: list[str] = []  # 수신한 경로 순서
+        # 아카이브 에뮬레이션: 설정 시 CDX·MemGator API·/web/ 재생이 살아난다.
+        self.archive_html: str | None = None
+        self.archive_timestamp: str = "20260801123456"
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -57,6 +60,11 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+            return
+
+        # 아카이브 에뮬레이션 — status_override(원본 사망)보다 먼저 처리한다.
+        if self.path.startswith(("/cdx/search/cdx", "/web/", "/api/json/")):
+            self._serve_archive(state)
             return
 
         if state.status_override is not None:
@@ -80,6 +88,65 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("ETag", state.etag)
         self.end_headers()
         self.wfile.write(body)
+
+    def _serve_archive(self, state: FixtureState) -> None:
+        import json as _json
+
+        host = self.headers.get("Host", "")
+        original = f"http://{host}/article"
+        uri_m = f"http://{host}/web/{state.archive_timestamp}id_/{original}"
+
+        if self.path.startswith("/web/"):
+            if state.archive_html is None:
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            body = state.archive_html.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if self.path.startswith("/cdx/search/cdx"):
+            if state.archive_html is None:
+                payload = b"[]"
+            else:
+                payload = _json.dumps(
+                    [
+                        ["urlkey", "timestamp", "original", "mimetype", "statuscode", "digest", "length"],
+                        ["key", state.archive_timestamp, original, "text/html", "200", "D", "1"],
+                    ]
+                ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
+        # MemGator Time Travel 호환 API
+        if state.archive_html is None:
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        payload = _json.dumps(
+            {
+                "original_uri": original,
+                "mementos": {
+                    "last": {"datetime": "2026-08-01T12:34:56Z", "uri": uri_m},
+                    "list": [{"datetime": "2026-08-01T12:34:56Z", "uri": uri_m}],
+                },
+            }
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
 
     def log_message(self, format: str, *args: object) -> None:
         pass  # 테스트 출력을 어지럽히지 않는다

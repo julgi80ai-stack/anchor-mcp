@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """설정 로딩. `~/.anchor/config.toml`을 읽고 환경변수 `ANCHOR_*`가 항상 우선한다.
 
-v0.1은 SPEC §9 중 storage·fetch의 부분집합만 지원한다. 비밀값은 파일에 두지 않는다.
+SPEC §9의 storage / fetch(+rate_limit, archive_fallback) / anchor / server
+섹션을 지원한다. 비밀값은 파일에 두지 않는다.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ DEFAULT_DB_PATH = Path("~/.anchor/store.db")
 class Config:
     db_path: Path = DEFAULT_DB_PATH
     keep_versions: int = 20
-    user_agent: str = "Anchor/0.4 (+https://github.com/julgi80ai-stack/anchor-mcp)"
+    user_agent: str = "Anchor/0.5 (+https://github.com/julgi80ai-stack/anchor-mcp)"
     respect_robots: bool = True
     timeout_seconds: float = 30.0
     max_redirects: int = 5
@@ -30,6 +31,12 @@ class Config:
     rate_limit_burst: int = 3
     retry_backoff_base: float = 1.0
     robots_ttl_seconds: int = 86400
+    # [fetch.archive_fallback] (SPEC §5.2 6단계, §9). 기본 비활성 —
+    # 외부 서비스에 조용히 의존하지 않는다.
+    archive_fallback_enabled: bool = False
+    archive_aggregator: str = ""  # 자체 호스팅 MemGator 엔드포인트. 비우면 Wayback CDX
+    archive_list: str = ""  # MemGator 기동 시 --arcs로 넘길 목록(운영값). Anchor가 직접 쓰진 않는다
+    archive_timeout_seconds: float = 20.0
     # [anchor] (SPEC §9)
     context_chars: int = 48
     max_edit_ratio: float = 0.15
@@ -74,6 +81,15 @@ def load_config(path: Path | None = None) -> Config:
             overrides["rate_limit_rps"] = float(rate["requests_per_second"])
         if "burst" in rate:
             overrides["rate_limit_burst"] = int(rate["burst"])
+        fallback = fetch.get("archive_fallback", {})
+        if "enabled" in fallback:
+            overrides["archive_fallback_enabled"] = bool(fallback["enabled"])
+        if "aggregator" in fallback:
+            overrides["archive_aggregator"] = str(fallback["aggregator"])
+        if "archive_list" in fallback:
+            overrides["archive_list"] = str(fallback["archive_list"])
+        if "timeout_seconds" in fallback:
+            overrides["archive_timeout_seconds"] = float(fallback["timeout_seconds"])
         anchor_section = data.get("anchor", {})
         if "context_chars" in anchor_section:
             overrides["context_chars"] = int(anchor_section["context_chars"])

@@ -16,6 +16,7 @@ from anchor.anchoring import matcher
 from anchor.anchoring.selector import QUALITY_SHORT, build_selector
 from anchor.config import Config, load_config
 from anchor.errors import AnchorError, DocumentNotFound, FetchFailed, RobotsDisallowed
+from anchor.fetcher.archive import ArchiveFallback, ArchiveHit
 from anchor.fetcher.client import ConditionalFetcher, FetchResponse
 from anchor.fetcher.ratelimit import HostRateLimiter
 from anchor.fetcher.robots import RobotsGate
@@ -40,6 +41,9 @@ from anchor.normalize.hashing import hash_bytes, hash_text
 from anchor.store.repository import Repository
 
 _STATUS_BY_HTTP = {402: "paywalled", 403: "forbidden", 404: "gone", 410: "gone"}
+
+# 아카이브 폴백으로 이어지는 원본 실패 (SPEC §5.2 5→6단계).
+_ARCHIVE_FALLBACK_STATUSES = frozenset({402, 403, 404, 410, 429})
 
 
 class Anchor:
@@ -68,6 +72,14 @@ class Anchor:
         )
         self._ratelimit = HostRateLimiter(
             rate=self._config.rate_limit_rps, burst=self._config.rate_limit_burst
+        )
+        self._archive = ArchiveFallback(
+            self._client,
+            enabled=self._config.archive_fallback_enabled,
+            aggregator=self._config.archive_aggregator,
+            timeout_seconds=self._config.archive_timeout_seconds,
+            user_agent=self._config.user_agent,
+            ratelimit=self._ratelimit,
         )
 
     def __enter__(self) -> Anchor:
@@ -152,6 +164,23 @@ class Anchor:
         status_label = _STATUS_BY_HTTP.get(response.status)
         if document and status_label:
             self._repository.set_document_status(document.id, status_label, utcnow_iso())
+
+        # 6단계: GONE 확정 전 아카이브 폴백 (SPEC §5.2). 기본 비활성.
+        if response.status in _ARCHIVE_FALLBACK_STATUSES and self._archive.enabled:
+            hit = self._archive.lookup(norm_url)
+            if hit is not None:
+                result = self._ingest_archive(
+                    norm_url,
+                    document,
+                    hit,
+                    status_label,
+                    bytes_down + hit.bytes_down,
+                    started,
+                    include_content,
+                )
+                if result is not None:
+                    return result
+
         if document:
             self._log(document.id, "error", response.status, bytes_down, started)
         raise FetchFailed(
@@ -567,6 +596,61 @@ class Anchor:
 
         return self._finish(
             document, version, outcome, 200, bytes_down, started, include_content
+        )
+
+    def _ingest_archive(
+        self,
+        norm_url: str,
+        document: Document | None,
+        hit: ArchiveHit,
+        status_label: str | None,
+        bytes_down: int,
+        started: float,
+        include_content: bool,
+    ) -> FetchResult | None:
+        """아카이브 본문을 source='archive' 버전으로 저장한다.
+
+        실패하면 None — 폴백의 실패가 원래의 실패 보고를 가리면 안 된다.
+        """
+        try:
+            normalized = extract.to_normalized(hit.content, hit.content_type)
+        except AnchorError:
+            return None
+
+        now = utcnow_iso()
+        text_hash = hash_text(normalized.text)
+
+        if document is None:
+            document = self._repository.create_document(
+                url=norm_url,
+                original_url=norm_url,
+                title=normalized.title,
+                now=now,
+                status=status_label or "gone",
+            )
+        else:
+            self._repository.set_document_status(
+                document.id, status_label or document.status, now
+            )
+
+        version = self._repository.find_version_by_text_hash(document.id, text_hash)
+        if version is None:
+            version = self._repository.insert_version(
+                document_id=document.id,
+                text_hash=text_hash,
+                raw_hash=hash_bytes(hit.content),
+                pipeline_version=normalized.pipeline_version,
+                captured_at=hit.memento_datetime,  # Memento-Datetime (SPEC §2)
+                byte_size=len(hit.content),
+                normalized_text=normalized.text,
+                http_status=200,
+                source="archive",
+                source_uri=hit.uri_m,
+            )
+        refreshed = self._repository.get_document(document.id)
+        assert refreshed is not None
+        return self._finish(
+            refreshed, version, "archive", 200, bytes_down, started, include_content
         )
 
     def _insert_or_reuse(

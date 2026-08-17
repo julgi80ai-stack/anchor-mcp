@@ -223,7 +223,7 @@ class Repository:
                     source_uri,
                 ),
             )
-        version = self.latest_version(document_id)
+        version = self.get_version(version_id)
         assert version is not None
         return version
 
