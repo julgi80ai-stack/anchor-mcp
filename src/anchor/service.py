@@ -54,16 +54,17 @@ class Anchor:
     def __init__(self, db_path: Path | str | None = None, config: Config | None = None) -> None:
         self._config = config or load_config()
         self._repository = Repository(db_path or self._config.db_path)
+        # 리다이렉트를 자동으로 따라가지 않는다 — 목적지마다 robots를 다시
+        # 판정해야 하므로 페처가 홉을 직접 관리한다 (D-001).
         self._client = httpx.Client(
-            follow_redirects=True,
-            max_redirects=self._config.max_redirects,
-            timeout=self._config.timeout_seconds,
+            follow_redirects=False, timeout=self._config.timeout_seconds
         )
         self._fetcher = ConditionalFetcher(
             self._client,
             user_agent=self._config.user_agent,
             max_content_bytes=self._config.max_content_bytes,
             retry_backoff_base=self._config.retry_backoff_base,
+            max_redirects=self._config.max_redirects,
         )
         self._robots = RobotsGate(
             self._repository,
@@ -113,7 +114,7 @@ class Anchor:
             max_age = self._config.default_max_age
         started = time.monotonic()
         norm_url = normalize_url(url)
-        document = self._repository.get_document_by_url(norm_url)
+        document = self._repository.get_document_by_any_url(norm_url)
 
         # 캐시 조회 — 순수 로컬 경로. 네트워크 요청이 없으므로 robots 판정보다
         # 앞선다 (robots는 "요청해도 되는가"의 규칙이다).
@@ -124,20 +125,31 @@ class Anchor:
                     document, latest, "cache_hit", None, 0, started, include_content
                 )
 
-        verdict = self._robots.check(norm_url)
-        if not verdict.allowed:
-            if document:
-                self._repository.set_robots_allowed(document.id, False)
-                self._log(document.id, "error", None, verdict.bytes_down, started)
-            raise RobotsDisallowed(f"Fetch disallowed by robots.txt — robots.txt가 페치를 거부: {norm_url}")
+        def before_hop(hop_url: str) -> int:
+            """홉마다 robots를 판정하고 레이트 제한을 지킨다 (D-001).
 
-        self._ratelimit.acquire(httpx.URL(norm_url).host or "")
+            리다이렉트 목적지도 예외가 아니다 — 자동 추종에 맡기면 금지된
+            경로나 다른 호스트를 robots 요청조차 없이 가져오게 된다.
+            """
+            hop_verdict = self._robots.check(hop_url)
+            if not hop_verdict.allowed:
+                if document:
+                    self._repository.set_robots_allowed(document.id, False)
+                    self._log(document.id, "error", None, hop_verdict.bytes_down, started)
+                raise RobotsDisallowed(
+                    "Fetch disallowed by robots.txt — robots.txt가 페치를 거부: "
+                    f"{hop_url}"
+                )
+            self._ratelimit.acquire(httpx.URL(hop_url).host or "")
+            return hop_verdict.bytes_down
+
         response = self._fetcher.get(
             norm_url,
             etag=document.etag if document else None,
             last_modified=document.last_modified if document else None,
+            before_hop=before_hop,
         )
-        bytes_down = verdict.bytes_down + response.bytes_down
+        bytes_down = response.bytes_down
 
         if response.status == 304:
             assert document is not None, "304는 저장된 검증자가 있어야만 온다"
@@ -151,7 +163,7 @@ class Anchor:
                 etag=response.etag or document.etag,
                 last_modified=response.last_modified or document.last_modified,
             )
-            document = self._repository.get_document_by_url(norm_url)
+            document = self._repository.get_document_by_any_url(norm_url)
             assert document is not None
             return self._finish(
                 document, latest, "not_modified", 304, bytes_down, started, include_content
@@ -550,7 +562,7 @@ class Anchor:
 
     def _resolve_document(self, document_ref: str) -> Document:
         if document_ref.startswith(("http://", "https://")):
-            document = self._repository.get_document_by_url(normalize_url(document_ref))
+            document = self._repository.get_document_by_any_url(normalize_url(document_ref))
         else:
             document = self._repository.get_document(document_ref)
         if document is None:
@@ -578,7 +590,7 @@ class Anchor:
         # 리다이렉트를 따라갔다면 문서는 정규화된 목적지 URL로 귀속된다.
         final_url = normalize_url(response.final_url)
         if final_url != norm_url:
-            document = self._repository.get_document_by_url(final_url) or document
+            document = self._repository.get_document_by_any_url(final_url) or document
 
         if document is None:
             document = self._repository.create_document(
@@ -590,6 +602,9 @@ class Anchor:
                 last_modified=response.last_modified,
             )
             version = self._insert_version(document, response, raw_hash, text_hash, normalized, now)
+            if final_url != norm_url:
+                # 사용자가 넘긴 URL로도 이 문서를 찾을 수 있어야 한다 (D-007).
+                self._repository.add_alias(norm_url, document.id)
             return self._finish(
                 document, version, "created", 200, bytes_down, started, include_content
             )
@@ -605,6 +620,8 @@ class Anchor:
             last_modified=response.last_modified,
             title=normalized.title,
         )
+        if final_url != norm_url:
+            self._repository.add_alias(norm_url, document.id)
         refreshed = self._repository.get_document_by_url(document.url)
         assert refreshed is not None
         document = refreshed

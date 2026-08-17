@@ -47,6 +47,11 @@ class FixtureState:
         self.archive_html: str | None = None
         self.archive_timestamp: str = "20260801123456"
         self.response_delay: float = 0.0  # 문서 응답 지연(초) — 타임아웃 테스트용
+        # 리다이렉트 맵: 요청 경로 → Location (상대·절대 모두 가능)
+        self.redirects: dict[str, str] = {}
+        self.redirect_status: int = 301
+        # 실패 응답에도 본문을 실을지 (크기 상한 검증용)
+        self.status_override_with_body: bool = False
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -68,15 +73,26 @@ class _Handler(BaseHTTPRequestHandler):
             self._serve_archive(state)
             return
 
+        if self.path in state.redirects:
+            self.send_response(state.redirect_status)
+            self.send_header("Location", state.redirects[self.path])
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
         if state.response_delay:
             import time as _time
 
             _time.sleep(state.response_delay)
 
         if state.status_override is not None:
+            body = state.html.encode("utf-8") if state.status_override_with_body else b""
             self.send_response(state.status_override)
-            self.send_header("Content-Length", "0")
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
+            if body:
+                self.wfile.write(body)
             return
 
         if state.etag and self.headers.get("If-None-Match") == state.etag:

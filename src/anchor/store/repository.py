@@ -14,7 +14,7 @@ import zstandard
 
 from anchor.models import AnchorRecord, Document, Version, uuid7
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 ZSTD_LEVEL = 6
 
 
@@ -79,6 +79,7 @@ class _SerializedConnection:
 MIGRATION_FILES: dict[int, str] = {
     2: "migrations/0002_anchors.sql",
     3: "migrations/0003_current_version.sql",
+    4: "migrations/0004_document_aliases.sql",
 }
 
 
@@ -158,6 +159,25 @@ class Repository:
             "SELECT * FROM documents WHERE url = ?", (url,)
         ).fetchone()
         return self._to_document(row) if row else None
+
+    def get_document_by_any_url(self, url: str) -> Document | None:
+        """정규화된 URL 또는 리다이렉트 이전 별칭으로 문서를 찾는다 (D-007)."""
+        document = self.get_document_by_url(url)
+        if document is not None:
+            return document
+        row = self._connection.execute(
+            """SELECT d.* FROM document_aliases a JOIN documents d ON d.id = a.document_id
+               WHERE a.url = ?""",
+            (url,),
+        ).fetchone()
+        return self._to_document(row) if row else None
+
+    def add_alias(self, url: str, document_id: str) -> None:
+        with self._connection:
+            self._connection.execute(
+                "INSERT OR REPLACE INTO document_aliases (url, document_id) VALUES (?, ?)",
+                (url, document_id),
+            )
 
     def get_document(self, document_id: str) -> Document | None:
         row = self._connection.execute(

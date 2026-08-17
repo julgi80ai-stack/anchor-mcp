@@ -1,5 +1,5 @@
 -- SPDX-License-Identifier: Apache-2.0
--- Anchor 스키마 v3 — 신규 DB용 전체 스키마 (SPEC §4.1 + robots 캐시).
+-- Anchor 스키마 v4 — 신규 DB용 전체 스키마 (SPEC §4.1 + robots 캐시).
 -- 기존 DB는 migrations/ 아래의 증분 SQL로 따라온다.
 
 -- 논리적 문서 (Memento: Original Resource / URI-R). URL 정규화 후 유일.
@@ -49,6 +49,12 @@ CREATE TABLE fetch_log (
     elapsed_ms    INTEGER NOT NULL
 );
 
+-- 리다이렉트 이전 URL → 문서. 사용자가 넘긴 URL로도 캐시를 찾게 한다 (v4).
+CREATE TABLE document_aliases (
+    url         TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE
+);
+
 -- robots.txt 캐시 (호스트 origin별 24h). CLI 프로세스 간 공유를 위해 영속화.
 CREATE TABLE robots_cache (
     origin       TEXT PRIMARY KEY,   -- 예: https://example.com
@@ -90,3 +96,4 @@ CREATE INDEX idx_versions_doc  ON versions(document_id, captured_at DESC);
 CREATE INDEX idx_fetchlog_time ON fetch_log(requested_at DESC);
 CREATE INDEX idx_anchors_doc   ON anchors(document_id);
 CREATE INDEX idx_verif_anchor  ON verifications(anchor_id, checked_at DESC);
+CREATE INDEX idx_aliases_document ON document_aliases(document_id);
