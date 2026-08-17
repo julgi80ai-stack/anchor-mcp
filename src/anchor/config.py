@@ -23,7 +23,7 @@ DEFAULT_DB_PATH = Path("~/.anchor/store.db")
 class Config:
     db_path: Path = DEFAULT_DB_PATH
     keep_versions: int = 20
-    user_agent: str = "Anchor/1.0 (+https://github.com/julgi80ai-stack/anchor-mcp)"
+    user_agent: str = "Anchor/1.1 (+https://github.com/julgi80ai-stack/anchor-mcp)"
     respect_robots: bool = True
     timeout_seconds: float = 30.0
     max_redirects: int = 5
