@@ -140,29 +140,41 @@ def fuzzy_search_myers(text: str, exact: str, k: int, budget) -> ApproxMatch | N
         (exact[-_CORE_LEN:], m - _CORE_LEN),
     ]
 
-    best_hit: tuple[int, int, str, int] | None = None  # (score, end, core, offset)
-    for core, offset in cores:
+    # 코어마다 후보 창을 만들고 **전부** 정제해 본다. 점수가 가장 낮은 코어
+    # 하나만 남기면, 인용문의 한쪽 끝이 문서 다른 곳(제목·리드·풀인용)에
+    # 더 잘 정렬될 때 그 디코이 창만 검사하고 진짜 위치를 놓쳐 거짓
+    # MISSING이 된다 (D-042).
+    candidates: list[tuple[int, int]] = []  # (창 시작, 창 끝)
+    for core, core_offset in cores:
         found = myers_scan(text, core, min(k, len(core) - 1), budget)
-        if found is not None and (best_hit is None or found[0] < best_hit[0]):
-            best_hit = (found[0], found[1], core, offset)
+        if found is None:
+            continue
+        _, core_end = found
+        quote_start_estimate = core_end + 1 - len(core) - core_offset
+        window_start = max(0, quote_start_estimate - k)
+        # 오른쪽 여유는 2k가 필요하다. 참 매치의 시작은 추정치에서 ±k,
+        # 길이는 m±k까지 벌어지므로 m+k만으로는 꼬리가 잘린다 (D-043).
+        window_end = min(len(text), quote_start_estimate + m + 2 * k)
+        candidates.append((window_start, window_end))
 
-    if best_hit is None:
-        return None
-
-    _, core_end, core, core_offset = best_hit
-    quote_start_estimate = core_end + 1 - len(core) - core_offset
-    window_start = max(0, quote_start_estimate - k)
-    window = text[window_start : min(len(text), quote_start_estimate + m + k)]
-
-    refined = best_substring_match(exact, window, k)
-    if refined is None:
-        return None
-    distance, relative_start, relative_end = refined
-    return ApproxMatch(
-        offset=window_start + relative_start,
-        found_text=window[relative_start:relative_end],
-        edit_distance=distance,
-    )
+    best: ApproxMatch | None = None
+    for window_start, window_end in candidates:
+        if budget.exhausted():
+            raise TimeoutError("fuzzy_search_myers 예산 소진")
+        window = text[window_start:window_end]
+        refined = best_substring_match(exact, window, k)
+        if refined is None:
+            continue
+        distance, relative_start, relative_end = refined
+        if best is None or distance < best.edit_distance:
+            best = ApproxMatch(
+                offset=window_start + relative_start,
+                found_text=window[relative_start:relative_end],
+                edit_distance=distance,
+            )
+            if distance == 0:
+                break
+    return best
 
 
 def fuzzy_search(text: str, exact: str, k: int, timeout_seconds: float) -> ApproxMatch | None:

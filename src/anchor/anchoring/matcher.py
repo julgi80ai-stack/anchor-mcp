@@ -121,10 +121,15 @@ def _match_by_context(
     if not prefix or not suffix:
         return None
 
+    # 후보를 전부 훑어 **가장 가까운 것**을 고른다. 첫 후보를 그대로 확정하면
+    # 템플릿이 반복되는 문서(약관 조항·변경이력·FAQ·표)에서 인용문과 무관한
+    # 형제 문단이 "당신 인용문의 현재 모습"으로 보고된다 (D-044).
+    best: MatchResult | None = None
+    best_distance = k + 1
     candidate_start = text.find(prefix)
     for _ in range(_MAX_CONTEXT_CANDIDATES):
         if candidate_start == -1 or budget.exhausted():
-            return None
+            break
         body_start = candidate_start + len(prefix)
         # 후보 본문은 원 인용문 길이에서 편집거리 상한만큼만 늘어날 수 있다.
         # str.find의 end는 부분문자열 전체를 포함해야 하므로 suffix 길이를 더한다.
@@ -132,12 +137,13 @@ def _match_by_context(
         suffix_at = text.find(suffix, body_start, search_end)
         if suffix_at != -1:
             candidate = text[body_start:suffix_at]
-            distance = bounded_edit_distance(exact, candidate, k)
-            if distance is not None:
+            distance = bounded_edit_distance(exact, candidate, min(k, best_distance - 1))
+            if distance is not None and distance < best_distance:
+                best_distance = distance
                 if distance == 0:
-                    # 완전 일치가 문맥으로 확인됨 — 2단계가 놓쳤을 수 없으나 방어적 처리
+                    # 완전 일치가 문맥으로 확인됨 — 더 가까운 후보는 없다.
                     return MatchResult(MOVED, 1.0, 0, body_start, candidate, truncated)
-                return MatchResult(
+                best = MatchResult(
                     ALTERED,
                     score=_score(distance, exact),
                     edit_distance=distance,
@@ -146,7 +152,7 @@ def _match_by_context(
                     truncated=truncated,
                 )
         candidate_start = text.find(prefix, candidate_start + 1)
-    return None
+    return best
 
 
 def _score(edit_distance: int, exact: str) -> float:

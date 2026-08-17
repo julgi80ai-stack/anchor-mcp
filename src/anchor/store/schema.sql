@@ -1,5 +1,5 @@
 -- SPDX-License-Identifier: Apache-2.0
--- Anchor 스키마 v2 — 신규 DB용 전체 스키마 (SPEC §4.1 + robots 캐시).
+-- Anchor 스키마 v3 — 신규 DB용 전체 스키마 (SPEC §4.1 + robots 캐시).
 -- 기존 DB는 migrations/ 아래의 증분 SQL로 따라온다.
 
 -- 논리적 문서 (Memento: Original Resource / URI-R). URL 정규화 후 유일.
@@ -13,7 +13,10 @@ CREATE TABLE documents (
     status          TEXT NOT NULL,             -- live | gone | forbidden | paywalled
     etag            TEXT,
     last_modified   TEXT,
-    robots_allowed  INTEGER NOT NULL DEFAULT 1
+    robots_allowed  INTEGER NOT NULL DEFAULT 1,
+    -- 원문이 지금 서빙하는 본문의 버전. captured_at 최대값과 다를 수 있다
+    -- (아카이브 폴백, 본문 되돌림). v3에서 신설.
+    current_version TEXT REFERENCES versions(id)
 );
 
 -- 본문 스냅샷 (Memento: URI-M). text_hash가 같으면 새 버전을 만들지 않는다.

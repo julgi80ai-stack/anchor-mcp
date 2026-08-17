@@ -88,6 +88,7 @@ class Document:
     etag: str | None
     last_modified: str | None
     robots_allowed: bool
+    current_version: str | None = None  # 원문이 지금 서빙하는 본문의 버전 (v3)
 
 
 @dataclass(frozen=True)

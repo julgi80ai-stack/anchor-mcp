@@ -118,7 +118,7 @@ class Anchor:
         # 캐시 조회 — 순수 로컬 경로. 네트워크 요청이 없으므로 robots 판정보다
         # 앞선다 (robots는 "요청해도 되는가"의 규칙이다).
         if document and not force_refresh and max_age > 0:
-            latest = self._repository.latest_version(document.id)
+            latest = self._repository.current_version(document.id)
             if latest and age_seconds(document.last_checked_at) <= max_age:
                 return self._finish(
                     document, latest, "cache_hit", None, 0, started, include_content
@@ -141,7 +141,7 @@ class Anchor:
 
         if response.status == 304:
             assert document is not None, "304는 저장된 검증자가 있어야만 온다"
-            latest = self._repository.latest_version(document.id)
+            latest = self._repository.current_version(document.id)
             if latest is None:
                 raise FetchFailed("Got 304 but no stored version exists — 304를 받았으나 저장된 버전이 없습니다", http_status=304)
             self._repository.update_document_checked(
@@ -192,7 +192,7 @@ class Anchor:
     def cite(self, document_ref: str, quote: str, note: str | None = None) -> CiteResult:
         """인용문에 앵커를 부여한다 (SPEC §7.2). document_ref는 문서 id 또는 URL."""
         document = self._resolve_document(document_ref)
-        latest = self._repository.latest_version(document.id)
+        latest = self._repository.current_version(document.id)
         if latest is None:
             raise DocumentNotFound(f"Document has no stored version — 저장된 버전이 없습니다: {document.url}")
         text = self._repository.get_version_text(latest.id)
@@ -319,7 +319,10 @@ class Anchor:
                         )
                 continue
 
-            latest = self._repository.latest_version(document_id)
+            # 방금 관측한 버전을 그대로 쓴다. 여기서 latest_version()을 다시
+            # 조회하면 아카이브 폴백·본문 되돌림 상황에서 앵커 생성에 쓴 옛
+            # 본문과 자기 자신을 대조하게 된다 (D-011).
+            latest = self._repository.get_version(fetch_result.version_id)
             assert latest is not None
             text = self._repository.get_version_text(latest.id)
 
@@ -517,6 +520,12 @@ class Anchor:
         """'latest', 'latest~N' 또는 버전 id를 버전으로 해석한다."""
         if ref == "latest" or ref.startswith("latest~"):
             back = int(ref[7:]) if ref.startswith("latest~") else 0
+            if back == 0:
+                # "latest" = 원문이 지금 서빙하는 본문 (캡처 시각 최대값이
+                # 아니다 — 되돌림·아카이브에서 갈린다, D-012/D-024).
+                current = self._repository.current_version(document_id)
+                if current is not None:
+                    return current
             versions = self._repository.list_versions(document_id)
             if not versions or back >= len(versions):
                 raise DocumentNotFound(
@@ -530,7 +539,7 @@ class Anchor:
 
     def _has_pending_verification(self, document: Document) -> bool:
         """최신 버전 캡처 이후 재검증되지 않은 앵커가 있는가."""
-        latest = self._repository.latest_version(document.id)
+        latest = self._repository.current_version(document.id)
         if latest is None:
             return False
         for anchor in self._repository.select_anchors(document_ids=[document.id]):
@@ -585,7 +594,9 @@ class Anchor:
                 document, version, "created", 200, bytes_down, started, include_content
             )
 
-        latest = self._repository.latest_version(document.id)
+        # 직전 관측본과 비교한다 — 캡처 시각 최대값이 아니라 "원문이 지금까지
+        # 서빙하던 본문"이 비교 기준이다 (되돌림 시 갈린다, D-012/D-024).
+        latest = self._repository.current_version(document.id)
         self._repository.update_document_checked(
             document.id,
             now=now,
@@ -720,6 +731,10 @@ class Anchor:
         started: float,
         include_content: bool,
     ) -> FetchResult:
+        # 원문을 실제로 관측한 결과라면 "현재 본문" 포인터를 갱신한다.
+        # cache_hit은 관측이 아니므로 건드리지 않는다 (D-011/D-012/D-024).
+        if outcome != "cache_hit" and document.current_version != version.id:
+            self._repository.set_current_version(document.id, version.id)
         elapsed_ms = self._log(document.id, outcome, http_status, bytes_down, started)
         return FetchResult(
             document_id=document.id,

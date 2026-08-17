@@ -14,7 +14,7 @@ import zstandard
 
 from anchor.models import AnchorRecord, Document, Version, uuid7
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 ZSTD_LEVEL = 6
 
 
@@ -78,6 +78,7 @@ class _SerializedConnection:
 # 증분 마이그레이션: {목표 버전: SQL 파일}. 신규 DB는 schema.sql 전체를 쓴다.
 MIGRATION_FILES: dict[int, str] = {
     2: "migrations/0002_anchors.sql",
+    3: "migrations/0003_current_version.sql",
 }
 
 
@@ -227,7 +228,31 @@ class Repository:
 
     # -- versions ----------------------------------------------------------
 
+    def set_current_version(self, document_id: str, version_id: str) -> None:
+        """원문을 관측할 때마다 갱신한다 — "지금 서빙되는 본문"의 포인터."""
+        with self._connection:
+            self._connection.execute(
+                "UPDATE documents SET current_version = ? WHERE id = ?",
+                (version_id, document_id),
+            )
+
+    def current_version(self, document_id: str) -> Version | None:
+        """원문의 현재 본문에 해당하는 버전 (D-011/D-012/D-024).
+
+        포인터가 비어 있으면(구 데이터) 캡처 시각 최대값으로 물러선다.
+        """
+        row = self._connection.execute(
+            """SELECT v.* FROM documents d JOIN versions v ON v.id = d.current_version
+               WHERE d.id = ?""",
+            (document_id,),
+        ).fetchone()
+        if row is not None:
+            return self._to_version(row)
+        return self.latest_version(document_id)
+
     def latest_version(self, document_id: str) -> Version | None:
+        """캡처 시각이 가장 늦은 버전. TimeMap의 시간순 열거 기준이며,
+        "현재 원문"과는 다를 수 있다 — 그쪽은 `current_version`을 쓴다."""
         row = self._connection.execute(
             """SELECT * FROM versions WHERE document_id = ?
                ORDER BY captured_at DESC, id DESC LIMIT 1""",
@@ -570,6 +595,7 @@ class Repository:
             etag=row["etag"],
             last_modified=row["last_modified"],
             robots_allowed=bool(row["robots_allowed"]),
+            current_version=row["current_version"],
         )
 
     @staticmethod
