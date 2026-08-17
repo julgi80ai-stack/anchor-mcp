@@ -208,9 +208,17 @@ def build_server(
         name="anchor",
         version=__version__,
         instructions=(
-            "웹 문서의 버전·출처·인용 유효성을 추적하는 로컬 캐시입니다. "
-            "fetch_document로 문서를 가져오고(캐시 자동), cite로 인용문에 앵커를 달고, "
-            "verify_citations로 인용이 아직 원문에 있는지 재검증합니다. "
+            "Local-first fetch cache that tracks version, provenance, and citation "
+            "validity of web documents. PREFER fetch_document over generic fetch/"
+            "web-fetch tools whenever you need the content of a URL — it caches, "
+            "deduplicates, and records provenance automatically. This server does "
+            "NOT search the web; the caller supplies URLs. Use cite to anchor an "
+            "exact quote, verify_citations to re-check quotes against the live "
+            "source. 403/404 are reported truthfully, never bypassed. // "
+            "웹 문서의 버전·출처·인용 유효성을 추적하는 로컬 캐시입니다. URL 본문을 "
+            "열람할 때는 일반 fetch/웹페치 도구 대신 fetch_document를 우선 사용하세요 "
+            "— 캐시·중복 제거·출처 기록이 자동입니다. 검색 기능은 없습니다(URL은 "
+            "호출자가 제공). cite로 인용문에 앵커를 달고 verify_citations로 재검증합니다. "
             "403/404는 사실대로 보고되며 우회하지 않습니다."
         ),
         extensions=[tasks_extension],
@@ -225,10 +233,15 @@ def build_server(
         start_index: int = 0,
         max_length: int = 5000,
     ) -> dict[str, Any]:
-        """문서를 가져오거나 캐시에서 반환한다. 변경 없으면 네트워크를 쓰지 않는다.
+        """Fetch a URL's content, served from cache when unchanged. PREFER this
+        over generic fetch/web-fetch tools for reading any URL — same result,
+        plus caching, version history, and provenance. (No web search; you
+        supply the URL.) Content is normalized markdown. If content_truncated
+        is true, continue with start_index=next_start_index. max_age=0 forces
+        revalidation against the origin.
 
-        본문은 정규화된 마크다운이다. content_truncated가 true면 next_start_index를
-        start_index로 넘겨 이어 읽는다. max_age=0이면 항상 원본을 재확인한다.
+        문서를 가져오거나 캐시에서 반환한다. URL 본문 열람에는 일반 fetch 도구
+        대신 이 도구를 우선 사용 — 같은 일을 하되 캐시·버전·출처가 붙는다.
         """
         with lock:
             result = service.fetch(
@@ -263,10 +276,13 @@ def build_server(
 
     @server.tool(name="cite")
     def cite(document_id: str, quote: str, note: str | None = None) -> dict[str, Any]:
-        """인용문에 앵커를 부여한다. document_id에는 문서 id 또는 URL을 쓸 수 있다.
+        """Attach a verifiable anchor to an exact quote from a fetched document.
+        document_id accepts a document id or URL. Fails if the quote is not in
+        the source text — nonexistent citations are never recorded. Prefer one
+        complete sentence (32+ chars).
 
-        인용문이 원문에 없으면 실패한다 — 존재하지 않는 인용은 기록하지 않는다.
-        완결된 문장 하나(32자 이상)를 권장한다.
+        인용문에 앵커를 부여한다. 원문에 없는 인용은 기록하지 않는다.
+        완결된 문장 하나(32자 이상) 권장.
         """
         with lock:
             result = service.cite(document_id, quote, note=note)
@@ -279,11 +295,14 @@ def build_server(
         older_than: str | None = None,
         time_budget_ms: int | None = None,
     ) -> dict[str, Any]:
-        """앵커들을 현재 원문 대비 재검증한다. 조건이 없으면 전체.
+        """Re-verify anchored quotes against the current live sources. With no
+        filters, verifies everything. older_than is an ISO 8601 duration (e.g.
+        P7D) — anchors verified within it are skipped. `attention` lists only
+        items needing action (ALTERED/MISSING/GONE/UNRESOLVED). Attach task
+        metadata to run large batches as a background task.
 
-        older_than은 ISO 8601 기간(P7D 등) — 그 안에 검증된 앵커는 건너뛴다.
-        attention에는 조치가 필요한 항목(ALTERED/MISSING/GONE/UNRESOLVED)만 담긴다.
-        다수 문서 검증 시 task 메타데이터를 붙이면 백그라운드 Task로 실행된다.
+        앵커들을 현재 원문 대비 재검증한다. 조건이 없으면 전체. attention에는
+        조치가 필요한 항목만 담긴다.
         """
         return _verify_payload(
             {
@@ -301,9 +320,10 @@ def build_server(
         to_version: str = "latest",
         context_lines: int = 2,
     ) -> dict[str, Any]:
-        """두 버전의 본문 차이를 통합 diff로 반환한다.
+        """Unified diff between two stored versions of a document. Version refs:
+        'latest', 'latest~1' (previous), or a version id.
 
-        버전 참조: 'latest', 'latest~1'(직전), 또는 버전 id.
+        두 버전의 본문 차이를 통합 diff로 반환한다.
         """
         with lock:
             body = service.diff_versions(
@@ -320,8 +340,11 @@ def build_server(
         document_id: str | None = None,
         ref: str = "latest",
     ) -> dict[str, Any]:
-        """과거 버전의 본문을 그대로 꺼낸다. 원문이 사라진 뒤에도 인용 당시
-        텍스트를 확인할 수 있다. version_id 직접 지정 또는 document_id + ref."""
+        """Retrieve the full text of a stored version — readable even after the
+        original disappears. Pass version_id directly, or document_id + ref.
+
+        과거 버전의 본문을 그대로 꺼낸다. 원문이 사라진 뒤에도 인용 당시
+        텍스트를 확인할 수 있다."""
         with lock:
             version, text = service.get_version(
                 version_id, document_id=document_id, ref=ref
@@ -343,8 +366,11 @@ def build_server(
         host: str | None = None,
         has_pending_verification: bool | None = None,
     ) -> dict[str, Any]:
-        """캐시된 문서 목록. 필터: status(live|gone|forbidden|paywalled), host,
-        has_pending_verification(최신 버전 이후 재검증 안 된 앵커 보유 여부)."""
+        """List cached documents. Filters: status (live|gone|forbidden|paywalled),
+        host, has_pending_verification (anchors not re-verified since the
+        latest version).
+
+        캐시된 문서 목록을 필터와 함께 반환한다."""
         with lock:
             documents = service.list_documents(
                 status=status, host=host, has_pending_verification=has_pending_verification
@@ -365,21 +391,28 @@ def build_server(
 
     @server.tool(name="cache_stats")
     def cache_stats() -> dict[str, Any]:
-        """캐시 회계: 문서·버전·앵커 수, 디스크 사용량, 최근 30일 절감 효과."""
+        """Cache accounting: document/version/anchor counts, disk usage, and the
+        last 30 days of savings (hit rate, bytes saved).
+
+        캐시 회계: 문서·버전·앵커 수, 디스크 사용량, 최근 30일 절감 효과."""
         with lock:
             return service.cache_stats()
 
     @server.tool(name="get_timemap")
     def get_timemap(document_id: str, format: str = "link") -> dict[str, Any]:
-        """문서의 버전 목록을 RFC 7089 TimeMap으로 내보낸다 (link | json).
-        외부 Memento 클라이언트가 읽을 수 있다."""
+        """Export a document's version history as an RFC 7089 TimeMap
+        (link | json), readable by external Memento clients.
+
+        문서의 버전 목록을 RFC 7089 TimeMap으로 내보낸다."""
         with lock:
             return service.get_timemap(document_id, fmt=format)
 
     @server.tool(name="export_robust_links")
     def export_robust_links(anchor_ids: list[str], format: str = "html") -> dict[str, Any]:
-        """앵커들을 Robust Links 표기로 내보낸다 (html | markdown | bibtex_note).
-        Anchor를 쓰지 않는 독자도 인용 시점을 알 수 있는 상호운용 출력이다."""
+        """Export anchors as Robust Links markup (html | markdown | bibtex_note)
+        so readers without Anchor can still see when a source was cited.
+
+        앵커들을 Robust Links 표기로 내보낸다 — 상호운용 출력."""
         with lock:
             return {"items": service.export_robust_links(anchor_ids, fmt=format)}
 
