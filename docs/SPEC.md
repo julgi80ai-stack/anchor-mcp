@@ -1,6 +1,6 @@
 # Anchor — 출처 추적형 페치 캐시
 
-**기술사양서 v1.2 (완성 시점 기준)**
+**기술사양서 v1.3 (완성 시점 기준)**
 
 | 항목 | 내용 |
 |---|---|
@@ -14,9 +14,11 @@
 | 준거 스펙 | RFC 7089, RFC 9110 (조건부 요청), W3C Web Annotation Data Model, MCP 2026-07-28 |
 | 설계 근거 | `docs/decisions/0001` (선행기술·포지셔닝), `docs/decisions/0002` (라이선스·재사용) |
 
+> **v1.2 → v1.3 변경 요약**: v0.1~v0.4 구현에서 확정된 사항을 반영했다. `versions.pipeline_version` 컬럼과 `renormalized`·`unchanged` outcome을 정식화하고(§4.1, §5.2, §5.3, §7.1), URL 정규화의 추적 파라미터 제거 목록을 축소하고(§5.1), robots 캐시 영속화와 요청 순서를 명확화하고(§4.1, §5.2), mcp-server-fetch 호환 청크 읽기를 추가하고(§7.1), Tasks 와이어 형식의 SDK 제약을 기록했다(§7.0). 전체 목록은 §15 참조.
+>
 > **v1.1 → v1.2 변경 요약**: 라이선스 감사 결과를 반영했다. `trafilatura>=1.8.0` 하한을 필수로 지정하고(§11), MemGator 운영 지침을 명문화하고(§5.2, §9), 테스트 픽스처의 출처 정책을 3분류로 나누고(§12), CI에 라이선스 게이트를 추가했다(§12). 전체 목록은 §16 참조.
 >
-> **v1.0 → v1.1 변경 요약**: 선행기술 조사 결과를 반영해 Memento 호환성을 도입하고(§2, §5.2, §7.8), 앵커 매칭 알고리즘을 성능 안전한 방식으로 교체하고(§6.2), 검증 상태를 7개로 확장하고(§6.3), MCP 최신 스펙의 Tasks 확장을 채택했다(§7.0). 전체 목록은 §16 참조.
+> **v1.0 → v1.1 변경 요약**: 선행기술 조사 결과를 반영해 Memento 호환성을 도입하고(§2, §5.2, §7.8), 앵커 매칭 알고리즘을 성능 안전한 방식으로 교체하고(§6.2), 검증 상태를 7개로 확장하고(§6.3), MCP 최신 스펙의 Tasks 확장을 채택했다(§7.0). 전체 목록은 §17 참조.
 
 ---
 
@@ -176,17 +178,18 @@ CREATE TABLE documents (
 
 -- 본문 스냅샷 (Memento: URI-M). text_hash가 같으면 새 버전을 만들지 않는다.
 CREATE TABLE versions (
-    id            TEXT PRIMARY KEY,
-    document_id   TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-    text_hash     TEXT NOT NULL,               -- blake3(normalized_text)
-    raw_hash      TEXT NOT NULL,               -- blake3(원본 바이트)
-    captured_at   TEXT NOT NULL,               -- Memento-Datetime 대응
-    byte_size     INTEGER NOT NULL,
-    char_count    INTEGER NOT NULL,
-    content_blob  BLOB NOT NULL,               -- zstd(normalized_text)
-    http_status   INTEGER NOT NULL,
-    source        TEXT NOT NULL DEFAULT 'live',-- live | archive
-    source_uri    TEXT,                        -- 아카이브에서 온 경우 URI-M
+    id               TEXT PRIMARY KEY,
+    document_id      TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    text_hash        TEXT NOT NULL,               -- blake3(normalized_text)
+    raw_hash         TEXT NOT NULL,               -- blake3(원본 바이트)
+    pipeline_version TEXT NOT NULL,               -- 추출기+정규화 규칙 버전 (v1.3, §5.3)
+    captured_at      TEXT NOT NULL,               -- Memento-Datetime 대응
+    byte_size        INTEGER NOT NULL,
+    char_count       INTEGER NOT NULL,
+    content_blob     BLOB NOT NULL,               -- zstd(normalized_text)
+    http_status      INTEGER NOT NULL,
+    source           TEXT NOT NULL DEFAULT 'live',-- live | archive
+    source_uri       TEXT,                        -- 아카이브에서 온 경우 URI-M
     UNIQUE (document_id, text_hash)
 );
 
@@ -224,10 +227,20 @@ CREATE TABLE fetch_log (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     document_id   TEXT NOT NULL,
     requested_at  TEXT NOT NULL,
-    outcome       TEXT NOT NULL,               -- cache_hit | not_modified | changed | archive | error
+    outcome       TEXT NOT NULL,  -- cache_hit | not_modified | unchanged | changed
+                                  -- | renormalized | created | archive | error (v1.3, §5.2)
     http_status   INTEGER,
     bytes_down    INTEGER NOT NULL DEFAULT 0,
     elapsed_ms    INTEGER NOT NULL
+);
+
+-- robots.txt 캐시 (호스트 origin별 24h). CLI는 매 호출이 새 프로세스이므로
+-- 영속화하지 않으면 "두 번째 호출 네트워크 0바이트"를 지킬 수 없다 (v1.3).
+CREATE TABLE robots_cache (
+    origin       TEXT PRIMARY KEY,   -- 예: https://example.com
+    body         TEXT NOT NULL,
+    fetch_status INTEGER NOT NULL,
+    fetched_at   TEXT NOT NULL
 );
 
 CREATE INDEX idx_versions_doc      ON versions(document_id, captured_at DESC);
@@ -239,7 +252,7 @@ CREATE INDEX idx_fetchlog_time     ON fetch_log(requested_at DESC);
 ### 4.2 저장 정책
 
 - 버전 blob은 zstd level 6으로 압축. 일반 기사 기준 원문 대비 25~30%.
-- 기본 보존 정책: 문서당 최근 20개 버전 + 앵커가 참조하는 모든 버전. **앵커가 가리키는 버전은 절대 삭제하지 않는다.**
+- 기본 보존 정책: 문서당 최근 20개 버전 + 앵커가 참조하는 모든 버전. **앵커가 가리키는 버전은 절대 삭제하지 않는다.** 검증 이력(`verifications.checked_version`)이 참조하는 버전도 감사 추적을 위해 보존한다 — 최소 보존 규칙보다 넓게 남기는 것은 안전한 방향이다 (v1.3).
 - `anchor gc` 명령으로 고아 버전 정리.
 
 ---
@@ -252,18 +265,18 @@ CREATE INDEX idx_fetchlog_time     ON fetch_log(requested_at DESC);
 
 1. 스킴·호스트 소문자화, 기본 포트 제거
 2. 프래그먼트(`#...`) 제거
-3. 추적 파라미터 제거 — `utm_*`, `fbclid`, `gclid`, `ref`, `s`, `igshid` 등 (설정으로 확장 가능)
+3. 추적 파라미터 제거 — `utm_*`, `fbclid`, `gclid`, `dclid`, `msclkid`, `twclid`, `yclid`, `igshid`, `mc_eid` 등 명백한 것만 (설정으로 확장 가능). **`ref`·`s`는 제거하지 않는다** — 사이트에 따라 실질 경로여서 제거하면 서로 다른 문서가 하나로 합쳐진다 (v1.3)
 4. 남은 쿼리 파라미터 키 기준 정렬
 5. 경로 말미 슬래시 정규화 (단, 리다이렉트 응답이 있으면 그것을 우선)
 
 ### 5.2 요청 순서
 
 ```
-1. robots.txt 확인 (호스트별 24h 캐시, protego 사용)
-   └ 거부 → RobotsDisallowed, 네트워크 요청 없음
-
-2. 캐시 조회
+1. 캐시 조회 (순수 로컬 — 네트워크 요청이 없으므로 robots 판정보다 앞선다. v1.3)
    └ max_age 이내의 버전 존재 → cache_hit 반환 (네트워크 0)
+
+2. robots.txt 확인 (호스트 origin별 24h 캐시를 SQLite에 영속화, protego 사용)
+   └ 거부 → RobotsDisallowed, 네트워크 요청 없음
 
 3. 레이트 제한 대기 (호스트별 토큰 버킷, 기본 1 req/s, burst 3)
 
@@ -276,8 +289,13 @@ CREATE INDEX idx_fetchlog_time     ON fetch_log(requested_at DESC);
 5. 응답 분기
    304 → not_modified. last_checked_at만 갱신. 본문 전송 없음.
    200 → 정규화 → text_hash 비교
-          동일 → unchanged. 새 버전 생성 안 함.
-          상이 → changed. 새 버전 삽입.
+          동일 → unchanged. 새 버전 생성 안 함. (raw_hash가 달라도 해당 —
+                 이중 해시의 노이즈 제거가 작동한 경우)
+          상이 ┬ raw_hash 동일 + pipeline_version 상이 → renormalized.
+               │  원문은 안 바뀌었고 추출·정규화 규칙이 바뀐 것. 새 버전은
+               │  삽입하되 "문서가 변경됨"으로 보고하지 않는다. (v1.3)
+               └ 그 외 → changed. 새 버전 삽입.
+          (첫 획득은 created)
    3xx → 정규화된 목적지로 1회 추종 (최대 5홉)
    402 → PaymentRequired (Cloudflare Pay Per Use 등) → 6단계
    403/429 → 지수 백오프 재시도 (최대 3회) → 실패 시 6단계
@@ -323,6 +341,8 @@ text_hash = blake3(normalized_text.encode("utf-8"))
 
 `raw_hash`는 달라도 `text_hash`가 같으면 **변경 없음**으로 판정한다. 광고 슬롯, 조회수 카운터, CSRF 토큰 같은 노이즈를 걸러내는 핵심 장치다.
 
+**`pipeline_version`** (v1.3): `text_hash`에는 숨은 입력이 있다 — 추출기(trafilatura/pypdf) 버전과 정규화 규칙 버전이다. 이를 각 버전에 `"trafilatura/2.2.0+norm/1"` 형식으로 기록한다. `raw_hash` 동일 + `text_hash` 상이 + `pipeline_version` 상이는 원문 변경이 아니라 파이프라인 변경이며, outcome을 `changed`가 아니라 `renormalized`로 구분한다. 원문이 안 바뀌었는데 바뀌었다고 보고하는 것을 막는 장치다. 정규화 규칙을 고치면 반드시 규칙 버전을 올린다.
+
 > 이 이중 해시는 앵커 안정성에도 직결된다. 뉴스 사이트는 페이지 로드마다 다른 광고 텍스트를 삽입하므로, **문서 내용이 바뀌지 않아도 문자 오프셋이 달라진다.** 정규화된 본문을 기준으로 삼지 않으면 위치 기반 앵커가 매번 깨진다.
 
 PDF는 `pypdf` 텍스트 추출 후 동일 경로를 탄다. 스캔 PDF는 v1.0 범위 밖이며 `UnsupportedContent`를 반환한다.
@@ -331,7 +351,7 @@ PDF는 `pypdf` 텍스트 추출 후 동일 경로를 탄다. 스캔 PDF는 v1.0 
 
 Anchor는 **정직한 클라이언트**로 동작한다. 이것은 기능이 아니라 전제다.
 
-- **User-Agent**: 기본값 `Anchor/1.2 (+https://github.com/<org>/anchor-mcp)`. 위장·스푸핑 옵션은 제공하지 않는다.
+- **User-Agent**: 기본값 `Anchor/<릴리스 버전> (+https://github.com/julgi80ai-stack/anchor-mcp)`. 위장·스푸핑 옵션은 제공하지 않는다.
 - **robots.txt**: 기본 준수. `respect_robots = false` 설정은 존재하나, 활성화 시 서버 시작 로그에 경고를 출력한다.
 - **레이트 제한**: 호스트별 토큰 버킷. `Retry-After` 헤더를 항상 존중한다.
 - **조건부 요청**: 항상 사용. 이것이 곧 서버 부하 절감이다.
@@ -451,7 +471,9 @@ k = min(int(len(exact) * 0.15), 64)
 
 - **Stateless core** — 서버는 sticky session을 요구하지 않는다. 로컬 SQLite가 유일한 상태이므로 자연히 충족된다.
 - **Streamable HTTP** — `Mcp-Method`, `Mcp-Name` 헤더를 붙인다.
-- **Tasks 확장** — `verify_citations`와 `refresh_all`은 수십~수백 건의 네트워크 요청을 동반하므로 **Task로 반환한다.** 클라이언트가 `tasks/get`으로 진행률을 조회하고 `tasks/cancel`로 중단할 수 있다. 즉시 응답형 도구(`fetch_document`, `cite`, `get_version` 등)는 일반 tool call을 유지한다.
+- **Tasks 확장** — `verify_citations`는 수십~수백 건의 네트워크 요청을 동반하므로 **Task로 실행할 수 있다.** task 메타데이터를 붙여 호출하면 백그라운드로 실행되고, 클라이언트가 `tasks/get`으로 진행 상태를 조회하고 `tasks/result`로 결과를 회수하고 `tasks/cancel`로 중단할 수 있다. task 메타데이터 없이 부르면 일반 동기 호출이다 (Tasks를 모르는 클라이언트와의 호환 경로). 즉시 응답형 도구(`fetch_document`, `cite`, `get_version` 등)는 일반 tool call을 유지한다.
+
+> **와이어 형식 주의 (v1.3)**: MCP tasks는 2025-11-25 실험 리비전 전용이라, 현행 프로토콜(2026-07-28)의 와이어 게이트는 `tools/call` 응답으로 `CreateTaskResult`를 허용하지 않는다. 따라서 task 기술자는 `CallToolResult`의 structuredContent에 **인밴드**로 담아 반환하며(`{"task": {taskId, status, …}}`), `tasks/*` 메서드는 확장(SEP-2133) `dev.julgi.anchor/tasks`로 서빙한다. tasks가 코어 스펙에 복귀하면 표준 형식으로 교체한다.
 
 모든 시각은 ISO 8601 UTC 문자열이다.
 
@@ -466,7 +488,8 @@ k = min(int(len(exact) * 0.15), 64)
   "max_age": 3600,                          // 초. 기본 86400. 0이면 항상 확인
   "force_refresh": false,
   "include_content": true,                  // false면 메타데이터만 (토큰 절약)
-  "start_index": 0                          // mcp-server-fetch 호환: 청크 읽기
+  "start_index": 0,                         // mcp-server-fetch 호환: 청크 읽기
+  "max_length": 5000                        // 청크 길이. 0이면 무제한 (v1.3)
 }
 
 // 출력
@@ -475,12 +498,15 @@ k = min(int(len(exact) * 0.15), 64)
   "version_id": "018f...",
   "url": "https://example.com/report",
   "title": "2026 Report",
-  "outcome": "not_modified",                // cache_hit|not_modified|changed|created|archive
+  "outcome": "not_modified",                // cache_hit|not_modified|unchanged|changed
+                                            // |renormalized|created|archive (v1.3, §5.2)
   "captured_at": "2026-08-16T04:12:00Z",
   "text_hash": "b3:9a4f...",
   "char_count": 18432,
   "source": "live",                         // live | archive
   "content": "# 2026 Report\n\n...",         // include_content=true일 때만
+  "content_truncated": true,                // 청크가 잘렸으면 true (v1.3)
+  "next_start_index": 5000,                 // 이어 읽을 시작점 (잘렸을 때만, v1.3)
   "network": { "bytes_down": 0, "elapsed_ms": 142 }
 }
 ```
@@ -546,8 +572,10 @@ k = min(int(len(exact) * 0.15), 64)
 두 버전의 본문 차이를 통합 diff로 반환한다.
 
 ```jsonc
-{ "document_id": "018f...", "from": "latest~1", "to": "latest", "context_lines": 2 }
+{ "document_id": "018f...", "from_version": "latest~1", "to_version": "latest", "context_lines": 2 }
 ```
+
+파라미터명이 `from`/`to`가 아닌 이유: Python 예약어라 참조 구현의 도구 시그니처로 쓸 수 없다 (v1.3). 버전 참조는 `latest`, `latest~N`, 또는 버전 id.
 
 ### 7.5 `get_version`
 
@@ -648,13 +676,17 @@ CLI도 동일 기능을 제공한다.
 
 ```bash
 anchor fetch https://example.com/report
-anchor cite <doc-id> "인용문"
-anchor verify --older-than 7d --format table
-anchor timemap <doc-id> --format link
+anchor cite <doc-id|url> "인용문"
+anchor verify --older-than 7d
+anchor list                                  # 캐시된 문서 목록 (v1.3)
+anchor timemap <doc-id|url> --format link
 anchor export --robust-links --format markdown
 anchor stats
 anchor gc --keep 20
+anchor serve --transport stdio               # MCP 서버 (v1.3; anchor-mcp와 동일)
 ```
+
+MCP 클라이언트 등록용 진입점은 콘솔 스크립트 `anchor-mcp`다 (v1.3).
 
 ---
 
@@ -669,7 +701,7 @@ keep_versions  = 20
 compression    = "zstd:6"
 
 [fetch]
-user_agent       = "Anchor/1.2 (+https://github.com/<org>/anchor-mcp)"
+user_agent       = "Anchor/<릴리스 버전> (+https://github.com/julgi80ai-stack/anchor-mcp)"
 respect_robots   = true
 timeout_seconds  = 30
 max_redirects    = 5
@@ -776,9 +808,10 @@ anchor-mcp/
 ```toml
 [project]
 dependencies = [
-    # 본문 추출. v1.8.0 미만은 GPLv3+이므로 Apache-2.0 배포와 충돌한다.
-    # 이 하한은 기능 요구가 아니라 라이선스 요구다. 낮추지 말 것.
-    "trafilatura>=1.8.0",       # Apache-2.0
+    # 본문 추출. 라이선스 하한 1.8.0 — 미만은 GPLv3+이므로 Apache-2.0 배포와
+    # 충돌한다. 이 하한 아래로 낮추지 말 것. 기능 하한은 1.9.0 —
+    # markdown 출력(output_format="markdown")이 이 버전에서 추가됐다 (v1.3).
+    "trafilatura>=1.9.0",       # Apache-2.0
     "readability-lxml",         # Apache-2.0  (추출 폴백)
     "lxml",                     # BSD-3-Clause
     "markdownify",              # MIT
@@ -890,7 +923,27 @@ Anchor는 다음 성과 위에 서 있다. README와 문서에 명시한다.
 
 ---
 
-## 15. v1.1 → v1.2 변경 이력
+## 15. v1.2 → v1.3 변경 이력
+
+v0.1~v0.4 구현(2026-08-17)에서 확정된 사항 반영. 구현이 사양을 앞서며 발견한 것들이므로, 각 항목의 근거는 코드와 테스트에 있다.
+
+| # | 절 | 변경 | 근거 |
+|---|---|---|---|
+| 1 | **4.1, 5.3** | **`versions.pipeline_version` 컬럼 신설** — 추출기+정규화 규칙 버전. text_hash의 숨은 입력 | 파이프라인 변경을 원문 변경으로 오보하는 것 방지 |
+| 2 | **5.2, 4.1, 7.1** | **outcome 어휘 정식화** — `unchanged`(200인데 text_hash 동일)·`renormalized`(raw 동일+파이프라인 상이)·`created` 추가 | §5.2 본문에만 있던 `unchanged`가 열거에 빠져 있었다 |
+| 3 | **5.1** | 추적 파라미터 제거 목록 축소, **`ref`·`s` 제거 금지** | 사이트에 따라 실질 경로 — 서로 다른 문서가 합쳐진다 |
+| 4 | 5.2 | 요청 순서: 캐시 조회를 robots 확인 앞으로 | 캐시 반환은 네트워크 요청이 아니다. robots는 요청 직전에 판정 |
+| 5 | 4.1 | `robots_cache` 테이블 신설 (origin별 24h 영속화) | CLI는 매 호출이 새 프로세스 — 영속화 없이는 v0.1 완료 기준 불충족 |
+| 6 | 4.2 | 검증 이력 참조 버전도 gc에서 보존 | FK 무결성 + 감사 추적 |
+| 7 | 7.1 | `max_length`·`content_truncated`·`next_start_index` (mcp-server-fetch 호환 청크 읽기) | 드롭인 대체 경로(§13 v0.3 완료 기준) |
+| 8 | 7.0 | Tasks 와이어 형식 주의 — task 기술자를 CallToolResult에 인밴드 반환, tasks/*는 확장으로 서빙 | 현행 프로토콜(2026-07-28) 와이어 게이트가 CreateTaskResult 불허 |
+| 9 | 7.4 | `from`/`to` → `from_version`/`to_version` | Python 예약어 |
+| 10 | 8 | CLI `list`·`serve` 추가, `anchor-mcp` 진입점 명시 | 구현 반영 |
+| 11 | 11.1 | `trafilatura>=1.9.0` — 라이선스 하한(1.8.0)과 기능 하한(markdown 출력) 구분 명시 | 1.8.x에는 markdown 출력이 없다 |
+
+---
+
+## 16. v1.1 → v1.2 변경 이력
 
 라이선스 감사(2026-08-16) 결과 반영. 미확인 항목 16건을 전부 확인해 0건으로 만들었고, 그 과정에서 한 건의 실질적 충돌을 발견했다.
 
@@ -920,7 +973,7 @@ Anchor는 다음 성과 위에 서 있다. README와 문서에 명시한다.
 
 ---
 
-## 16. v1.0 → v1.1 변경 이력
+## 17. v1.0 → v1.1 변경 이력
 
 | # | 절 | 변경 | 근거 |
 |---|---|---|---|

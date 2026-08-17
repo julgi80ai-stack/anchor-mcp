@@ -19,7 +19,8 @@ DEFAULT_DB_PATH = Path("~/.anchor/store.db")
 @dataclass(frozen=True)
 class Config:
     db_path: Path = DEFAULT_DB_PATH
-    user_agent: str = "Anchor/0.3 (+https://github.com/julgi80ai-stack/anchor-mcp)"
+    keep_versions: int = 20
+    user_agent: str = "Anchor/0.4 (+https://github.com/julgi80ai-stack/anchor-mcp)"
     respect_robots: bool = True
     timeout_seconds: float = 30.0
     max_redirects: int = 5
@@ -55,6 +56,8 @@ def load_config(path: Path | None = None) -> Config:
         overrides: dict[str, object] = {}
         if "db_path" in storage:
             overrides["db_path"] = Path(storage["db_path"])
+        if "keep_versions" in storage:
+            overrides["keep_versions"] = int(storage["keep_versions"])
         if "user_agent" in fetch:
             overrides["user_agent"] = fetch["user_agent"]
         if "respect_robots" in fetch:

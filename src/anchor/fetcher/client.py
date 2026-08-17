@@ -14,7 +14,7 @@ import httpx
 
 from anchor.errors import ContentTooLarge, FetchFailed
 
-ACCEPT_HEADER = "text/html, application/xhtml+xml, text/plain"
+ACCEPT_HEADER = "text/html, application/xhtml+xml, text/plain, application/pdf"
 RETRYABLE_STATUSES = frozenset({403, 429})
 MAX_RETRIES = 3
 MAX_RETRY_AFTER_SECONDS = 60.0

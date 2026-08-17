@@ -2,14 +2,16 @@
 """본문 추출 + 마크다운 변환 (SPEC §5.3).
 
 원본 바이트 → 인코딩 판별(charset-normalizer) → 본문 추출(trafilatura,
-마크다운 출력) → 텍스트 정규화. readability-lxml 폴백과 PDF는 v0.1 범위
-밖이다.
+마크다운 출력) → 텍스트 정규화. PDF는 pypdf 텍스트 추출 후 동일 경로를
+탄다 (스캔 PDF는 UnsupportedContent). readability-lxml 폴백은 미구현.
 """
 
 from __future__ import annotations
 
+import io
 from dataclasses import dataclass
 
+import pypdf
 import trafilatura
 from charset_normalizer import from_bytes
 
@@ -17,9 +19,11 @@ from anchor.errors import ExtractionFailed, UnsupportedContent
 from anchor.normalize.text import NORM_VERSION, normalize_text
 
 PIPELINE_VERSION = f"trafilatura/{trafilatura.__version__}+norm/{NORM_VERSION}"
+PDF_PIPELINE_VERSION = f"pypdf/{pypdf.__version__}+norm/{NORM_VERSION}"
 
 _TEXT_PLAIN_TYPES = ("text/plain", "text/markdown")
 _HTML_TYPES = ("text/html", "application/xhtml+xml")
+_PDF_TYPES = ("application/pdf",)
 
 
 @dataclass(frozen=True)
@@ -45,8 +49,11 @@ def to_normalized(raw: bytes, content_type: str) -> NormalizedDoc:
             text=normalize_text(text), title=None, pipeline_version=PIPELINE_VERSION
         )
 
+    if media_type.startswith(_PDF_TYPES):
+        return _from_pdf(raw)
+
     if media_type and not media_type.startswith(_HTML_TYPES):
-        raise UnsupportedContent(f"v0.1이 처리하지 않는 콘텐츠 유형: {media_type}")
+        raise UnsupportedContent(f"처리하지 않는 콘텐츠 유형: {media_type}")
 
     html = decode_bytes(raw)
     extracted = trafilatura.extract(html, output_format="markdown")
@@ -64,3 +71,25 @@ def to_normalized(raw: bytes, content_type: str) -> NormalizedDoc:
     return NormalizedDoc(
         text=normalize_text(extracted), title=title, pipeline_version=PIPELINE_VERSION
     )
+
+
+def _from_pdf(raw: bytes) -> NormalizedDoc:
+    try:
+        reader = pypdf.PdfReader(io.BytesIO(raw))
+        pages = [page.extract_text() or "" for page in reader.pages]
+    except Exception as error:
+        raise ExtractionFailed(f"PDF 파싱 실패: {error}") from error
+
+    text = normalize_text("\n\n".join(pages))
+    if not text:
+        # 텍스트 레이어가 없는 스캔 PDF. OCR은 범위 밖이다 (SPEC §5.3).
+        raise UnsupportedContent("텍스트 레이어가 없는 PDF (스캔본 추정) — OCR은 범위 밖")
+
+    title: str | None = None
+    try:
+        if reader.metadata is not None and reader.metadata.title:
+            title = str(reader.metadata.title)
+    except Exception:
+        title = None
+
+    return NormalizedDoc(text=text, title=title, pipeline_version=PDF_PIPELINE_VERSION)

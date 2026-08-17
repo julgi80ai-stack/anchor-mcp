@@ -255,6 +255,38 @@ class Repository:
                 (document_id, requested_at, outcome, http_status, bytes_down, elapsed_ms),
             )
 
+    # -- gc ----------------------------------------------------------------
+
+    def collect_garbage_versions(self, *, keep: int = 20) -> tuple[int, int]:
+        """문서당 최근 keep개를 넘는 고아 버전을 삭제한다 (SPEC §4.2).
+
+        앵커가 가리키는 버전은 절대 삭제하지 않는다. 검증 이력이 참조하는
+        버전도 FK 무결성과 감사 추적을 위해 보존한다 (스펙의 최소 보존
+        규칙보다 넓게 남기는 것은 안전한 방향이다).
+
+        반환: (삭제된 버전 수, 회수된 blob 바이트 추정치)
+        """
+        rows = self._connection.execute(
+            """SELECT id, LENGTH(content_blob) FROM versions v
+               WHERE (
+                 SELECT COUNT(*) FROM versions newer
+                 WHERE newer.document_id = v.document_id
+                   AND (newer.captured_at > v.captured_at
+                        OR (newer.captured_at = v.captured_at AND newer.id > v.id))
+               ) >= ?
+               AND NOT EXISTS (SELECT 1 FROM anchors a WHERE a.created_version = v.id)
+               AND NOT EXISTS (SELECT 1 FROM verifications f WHERE f.checked_version = v.id)""",
+            (keep,),
+        ).fetchall()
+        if not rows:
+            return 0, 0
+        ids = [row[0] for row in rows]
+        freed = sum(row[1] for row in rows)
+        with self._connection:
+            self._connection.executemany("DELETE FROM versions WHERE id = ?", [(i,) for i in ids])
+        self._connection.execute("VACUUM")
+        return len(ids), freed
+
     # -- stats -------------------------------------------------------------
 
     def count_rows(self) -> dict[str, int]:

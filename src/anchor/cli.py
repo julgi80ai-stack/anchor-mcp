@@ -155,6 +155,94 @@ def verify(
 
 
 @app.command()
+def timemap(
+    document: str = typer.Argument(..., help="문서 id 또는 URL"),
+    format: str = typer.Option("link", "--format", help="link | json"),
+    db: Optional[Path] = typer.Option(None, "--db", help="SQLite 경로"),
+) -> None:
+    """문서의 버전 목록을 RFC 7089 TimeMap으로 내보낸다."""
+    try:
+        with Anchor(db_path=db) as anchor:
+            result = anchor.get_timemap(document, fmt=format)
+    except (AnchorError, ValueError) as error:
+        typer.secho(f"실패: {error}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    if format == "json":
+        typer.echo(json.dumps(result["body"], ensure_ascii=False, indent=2))
+    else:
+        typer.echo(result["body"])
+
+
+@app.command()
+def export(
+    robust_links: bool = typer.Option(
+        False, "--robust-links", help="앵커들을 Robust Links 표기로 내보낸다"
+    ),
+    format: str = typer.Option("html", "--format", help="html | markdown | bibtex_note"),
+    anchor_ids: Optional[list[str]] = typer.Option(
+        None, "--anchor", help="특정 앵커 id (반복 가능, 생략 시 전체)"
+    ),
+    db: Optional[Path] = typer.Option(None, "--db", help="SQLite 경로"),
+) -> None:
+    """앵커들을 상호운용 포맷으로 내보낸다. 현재 지원: --robust-links."""
+    if not robust_links:
+        typer.secho("내보낼 포맷을 지정하세요: --robust-links", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    try:
+        with Anchor(db_path=db) as anchor:
+            items = anchor.export_robust_links(anchor_ids or None, fmt=format)
+    except (AnchorError, ValueError) as error:
+        typer.secho(f"실패: {error}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    if not items:
+        typer.echo("내보낼 앵커가 없습니다.")
+        return
+    for item in items:
+        typer.echo(item[format])
+
+
+@app.command()
+def stats(
+    json_out: bool = typer.Option(False, "--json", help="결과를 JSON으로 출력"),
+    db: Optional[Path] = typer.Option(None, "--db", help="SQLite 경로"),
+) -> None:
+    """캐시 회계: 문서·버전·앵커 수, 디스크 사용량, 최근 30일 절감 효과."""
+    with Anchor(db_path=db) as anchor:
+        payload = anchor.cache_stats()
+    if json_out:
+        typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+    window = payload["last_30d"]
+    typer.echo(
+        f"문서 {payload['documents']} · 버전 {payload['versions']} · 앵커 {payload['anchors']}"
+        f" · 디스크 {payload['disk_bytes']:,} bytes"
+    )
+    typer.echo(
+        f"최근 30일: 요청 {window['requests']}"
+        f" (cache_hit {window['cache_hits']}, not_modified {window['not_modified']},"
+        f" unchanged {window['unchanged']}, changed {window['changed']}, error {window['errors']})"
+    )
+    typer.echo(
+        f"다운로드 {window['bytes_down']:,} bytes · 절감 추정 {window['bytes_saved_estimate']:,} bytes"
+        f" · hit_rate {window['hit_rate']:.2%}"
+    )
+
+
+@app.command()
+def gc(
+    keep: Optional[int] = typer.Option(None, "--keep", help="문서당 보존할 최근 버전 수 (기본 20)"),
+    db: Optional[Path] = typer.Option(None, "--db", help="SQLite 경로"),
+) -> None:
+    """고아 버전을 정리한다. 앵커가 가리키는 버전은 절대 삭제하지 않는다."""
+    with Anchor(db_path=db) as anchor:
+        result = anchor.collect_garbage(keep=keep)
+    typer.echo(
+        f"삭제 {result['deleted_versions']}개 버전, 회수 추정 {result['freed_bytes_estimate']:,} bytes"
+        f" (문서당 최근 {result['keep']}개 + 앵커·검증 참조 버전 보존)"
+    )
+
+
+@app.command()
 def serve(
     transport: Optional[str] = typer.Option(
         None, "--transport", help="stdio | http (기본: 설정 파일, 없으면 stdio)"

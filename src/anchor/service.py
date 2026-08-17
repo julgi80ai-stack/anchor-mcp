@@ -432,21 +432,36 @@ class Anchor:
             }
         raise ValueError(f"지원하지 않는 형식: {fmt} (link | json)")
 
-    def export_robust_links(self, anchor_ids: list[str], *, fmt: str = "html") -> list[dict]:
-        """Robust Links 내보내기 (SPEC §7.9)."""
+    def export_robust_links(
+        self, anchor_ids: list[str] | None = None, *, fmt: str = "html"
+    ) -> list[dict]:
+        """Robust Links 내보내기 (SPEC §7.9). anchor_ids가 None이면 전체 앵커."""
         serializer = robustlinks.SERIALIZERS.get(fmt)
         if serializer is None:
             raise ValueError(f"지원하지 않는 형식: {fmt} (html | markdown | bibtex_note)")
+        if anchor_ids is None:
+            anchors = self._repository.select_anchors()
+        else:
+            anchors = []
+            for anchor_id in anchor_ids:
+                anchor = self._repository.get_anchor(anchor_id)
+                if anchor is None:
+                    raise DocumentNotFound(f"앵커를 찾을 수 없습니다: {anchor_id}")
+                anchors.append(anchor)
         items: list[dict] = []
-        for anchor_id in anchor_ids:
-            anchor = self._repository.get_anchor(anchor_id)
-            if anchor is None:
-                raise DocumentNotFound(f"앵커를 찾을 수 없습니다: {anchor_id}")
+        for anchor in anchors:
             document = self._repository.get_document(anchor.document_id)
             version = self._repository.get_version(anchor.created_version)
             assert document is not None and version is not None
-            items.append({"anchor_id": anchor_id, fmt: serializer(document, version, anchor)})
+            items.append({"anchor_id": anchor.id, fmt: serializer(document, version, anchor)})
         return items
+
+    def collect_garbage(self, *, keep: int | None = None) -> dict:
+        """고아 버전 정리 (SPEC §4.2). 앵커가 가리키는 버전은 절대 삭제하지 않는다."""
+        if keep is None:
+            keep = self._config.keep_versions
+        deleted, freed = self._repository.collect_garbage_versions(keep=keep)
+        return {"deleted_versions": deleted, "freed_bytes_estimate": freed, "keep": keep}
 
     def _resolve_version_ref(self, document_id: str, ref: str) -> Version:
         """'latest', 'latest~N' 또는 버전 id를 버전으로 해석한다."""
