@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+
+# Anchor local store
+*.db
+*.db-wal
+*.db-shm
+
+# 로컬 전용 (git 미추적)
+CLAUDE.md

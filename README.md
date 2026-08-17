@@ -4,15 +4,26 @@
 
 > Anchor는 AI가 사용한 웹 근거를 시간에 걸쳐 다시 검증할 수 있게 한다.
 
-이 저장소는 **구현 착수 전 문서 세트**다. 코드는 아직 없다. 사양·철학·판단 근거·라이선스 대장이 먼저 확정된 상태이며, 다음 단계는 SPEC.md §13 로드맵의 v0.1 스캐폴딩이다.
+사양·철학·판단 근거·라이선스 대장이 먼저 확정됐고, 그 위에 v0.1(fetch + 해시 + 변경 감지, CLI)이 구현된 상태다. 다음 단계는 SPEC.md §13 로드맵의 v0.2(앵커 생성·재검증)다.
+
+```bash
+# 설치 (Python 3.11+)
+uv venv --python 3.12 && uv pip install -e .
+
+# 사용
+anchor fetch https://www.rfc-editor.org/rfc/rfc7089.html   # created
+anchor fetch https://www.rfc-editor.org/rfc/rfc7089.html   # cache_hit — 네트워크 0바이트
+anchor list
+```
 
 ---
 
 ## 문서 지도
 
 ```
-anchor-docs/
+anchor-mcp/
 ├── README.md                  ← 지금 이 문서
+├── LICENSE                    Apache-2.0 전문
 ├── NOTICE                     저작권 고지 (배포물)
 ├── THIRD-PARTY.md             제3자 라이선스 대장 (배포물)
 ├── docs/
@@ -21,6 +32,8 @@ anchor-docs/
 │   └── decisions/
 │       ├── 0001-prior-art-and-positioning.md
 │       └── 0002-license-and-reuse-policy.md
+├── src/anchor/                v0.1 구현 (fetcher / normalize / store / cli)
+├── tests/                     단위 + 통합 (로컬 픽스처 서버, 네트워크 없음)
 └── tools/
     └── audit_licenses.py      라이선스 감사 (실행 가능)
 ```
@@ -78,7 +91,7 @@ Memento는 틀려서 죽은 게 아니라 **중앙 서비스로 지어졌기 때
 | 선행기술 조사 | 완료 (ADR-0001) |
 | 라이선스 감사 | 완료 — 런타임 15건 전수 확인, 카피레프트 0건 (ADR-0002) |
 | PyPI `anchor-mcp` | 사용 가능 (2026-08-16 확인) |
-| 구현 | **미착수** — 다음 단계는 v0.1 스캐폴딩 |
+| 구현 | **v0.1 완료** (2026-08-17) — fetch + 이중 해시 + 변경 감지, CLI. 다음은 v0.2 앵커 엔진 |
 
 ### 알려진 미해결 항목
 

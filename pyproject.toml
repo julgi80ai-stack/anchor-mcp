@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "anchor-mcp"
+version = "0.1.0"
+description = "AI가 사용한 웹 근거의 시간적·출처적 무결성 계층 — Memento(RFC 7089)의 로컬 클라이언트"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "Julgi.Kang" }]
+dependencies = [
+    # 라이선스 하한은 1.8.0 — 미만은 GPLv3+이며 Apache-2.0 배포와 충돌한다. 낮추지 말 것.
+    # 기능 하한은 1.9.0 — markdown 출력(output_format="markdown")이 이 버전에서 추가됐다.
+    "trafilatura>=1.9.0",
+    "httpx",
+    "protego",
+    "charset-normalizer",
+    "blake3",
+    "zstandard",
+    "typer",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "packaging",
+]
+
+[project.scripts]
+anchor = "anchor.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/anchor"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
