@@ -54,7 +54,12 @@ def test_archive_rescues_citation_from_gone(fixture_server, cdx_anchor):
     assert document.status == "gone"          # 원본 상태는 사실대로 남는다
 
 
-def test_archive_fetch_reuses_identical_version(fixture_server, cdx_anchor):
+def test_archive_keeps_provenance_even_when_text_matches(fixture_server, cdx_anchor):
+    """D-013: 본문이 live 버전과 같아도 아카이브 관측은 별개의 memento다.
+
+    기존 live 행을 재사용하면 source·source_uri·Memento 시각이 전부
+    사라져 "원본이 아니라 아카이브에서 확인됨"을 알 수 없게 된다.
+    """
     base_url, state = fixture_server
     first = cdx_anchor.fetch(f"{base_url}/article")
     state.status_override = 404
@@ -62,7 +67,15 @@ def test_archive_fetch_reuses_identical_version(fixture_server, cdx_anchor):
 
     result = cdx_anchor.fetch(f"{base_url}/article", max_age=0)
     assert result.outcome == "archive"
-    assert result.version_id == first.version_id  # 본문 동일 → 버전 재사용
+    assert result.version_id != first.version_id
+    assert result.source == "archive"
+    assert result.captured_at == "2026-08-01T12:34:56Z"  # Memento-Datetime
+
+    version = cdx_anchor._repository.get_version(result.version_id)
+    assert version.source_uri and "/web/" in version.source_uri
+
+    # 두 memento가 같은 본문 해시를 공유한다 — 내용은 같고 출처만 다르다.
+    assert version.text_hash == first.text_hash
 
 
 def test_archive_snapshot_with_older_text_creates_archive_version(fixture_server, cdx_anchor):

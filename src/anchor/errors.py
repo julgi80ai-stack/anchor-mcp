@@ -24,6 +24,10 @@ class ExtractionFailed(AnchorError):
     """본문 추출기가 문서에서 본문을 찾지 못했다."""
 
 
+class ConfigError(AnchorError):
+    """설정 파일·환경변수의 문법 또는 값 범위 오류."""
+
+
 class QuoteNotFound(AnchorError):
     """인용문이 원문에 없다. 존재하지 않는 인용은 기록하지 않는다 (SPEC §6.1)."""
 

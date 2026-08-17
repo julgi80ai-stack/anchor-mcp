@@ -36,9 +36,12 @@ def normalize_url(url: str, extra_tracking: frozenset[str] = frozenset()) -> str
     scheme = parts.scheme.lower()
     host = parts.hostname.lower() if parts.hostname else ""
 
-    netloc = host
+    # IPv6 리터럴은 대괄호를 유지해야 한다. `parts.hostname`이 벗겨서
+    # 돌려주므로 다시 씌우지 않으면 문법상 무효한 URL이 되고, 재정규화가
+    # ValueError를 낸다 (D-008).
+    netloc = f"[{host}]" if ":" in host else host
     if parts.port is not None and parts.port != _DEFAULT_PORTS.get(scheme):
-        netloc = f"{host}:{parts.port}"
+        netloc = f"{netloc}:{parts.port}"
     if parts.username:
         credentials = parts.username + (f":{parts.password}" if parts.password else "")
         netloc = f"{credentials}@{netloc}"

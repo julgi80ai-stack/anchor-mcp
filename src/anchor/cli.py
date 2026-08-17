@@ -106,10 +106,31 @@ def cite(
 
 
 def _parse_older_than(value: str) -> float:
-    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
-    if value and value[-1] in units:
-        return float(value[:-1]) * units[value[-1]]
-    return float(value)
+    """`7d`·`12H`·`P7D`·`3600`을 초로. 잘못된 값은 도메인 예외로 (D-028)."""
+    from anchor.models import parse_iso_duration
+
+    raw = value.strip()
+    if raw.upper().startswith("P"):
+        try:
+            return parse_iso_duration(raw)
+        except ValueError as error:
+            raise AnchorError(str(error)) from error
+
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+    suffix = raw[-1:].lower()
+    number = raw[:-1] if suffix in units else raw
+    try:
+        seconds = float(number) * (units[suffix] if suffix in units else 1)
+    except ValueError as error:
+        raise AnchorError(
+            f"Cannot parse duration {value!r}; use 7d, 12h, 30m, 3600, or P7D — "
+            f"기간을 해석할 수 없습니다: {value!r}"
+        ) from error
+    if seconds < 0:
+        raise AnchorError(
+            f"Duration must not be negative, got {value!r} — 기간은 음수일 수 없습니다"
+        )
+    return seconds
 
 
 @app.command()
@@ -207,8 +228,15 @@ def stats(
     db: Optional[Path] = typer.Option(None, "--db", help="SQLite 경로"),
 ) -> None:
     """캐시 회계: 문서·버전·앵커 수, 디스크 사용량, 최근 30일 절감 효과."""
-    with Anchor(db_path=db) as anchor:
-        payload = anchor.cache_stats()
+    try:
+        with Anchor(db_path=db) as anchor:
+            payload = anchor.cache_stats()
+    except AnchorError as error:
+        typer.secho(f"실패: {error}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    except OSError as error:
+        typer.secho(f"실패: {error}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
     if json_out:
         typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
         return
@@ -234,8 +262,15 @@ def gc(
     db: Optional[Path] = typer.Option(None, "--db", help="SQLite 경로"),
 ) -> None:
     """고아 버전을 정리한다. 앵커가 가리키는 버전은 절대 삭제하지 않는다."""
-    with Anchor(db_path=db) as anchor:
-        result = anchor.collect_garbage(keep=keep)
+    try:
+        with Anchor(db_path=db) as anchor:
+            result = anchor.collect_garbage(keep=keep)
+    except AnchorError as error:
+        typer.secho(f"실패: {error}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    except OSError as error:
+        typer.secho(f"실패: {error}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
     typer.echo(
         f"삭제 {result['deleted_versions']}개 버전, 회수 추정 {result['freed_bytes_estimate']:,} bytes"
         f" (문서당 최근 {result['keep']}개 + 앵커·검증 참조 버전 보존)"
@@ -267,8 +302,15 @@ def list_command(
     db: Optional[Path] = typer.Option(None, "--db", help="SQLite 경로"),
 ) -> None:
     """캐시된 문서 목록을 상태·최종 확인 시각과 함께 출력한다."""
-    with Anchor(db_path=db) as anchor:
-        documents = anchor.list_documents()
+    try:
+        with Anchor(db_path=db) as anchor:
+            documents = anchor.list_documents()
+    except AnchorError as error:
+        typer.secho(f"실패: {error}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    except OSError as error:
+        typer.secho(f"실패: {error}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
     if not documents:
         typer.echo("캐시된 문서가 없습니다.")
         return

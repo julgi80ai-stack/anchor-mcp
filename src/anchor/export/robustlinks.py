@@ -9,8 +9,32 @@
 from __future__ import annotations
 
 import html
+import re
 
 from anchor.models import AnchorRecord, Document, Version
+
+# 마크다운 링크 텍스트에서 구조를 깨는 문자들.
+_MD_TEXT_SPECIALS = re.compile(r"([\\\[\]`*_])")
+# BibTeX에서 특별한 의미를 갖는 문자들.
+_BIBTEX_SPECIALS = {
+    "\\": "\\textbackslash{}", "{": "\\{", "}": "\\}", "$": "\\$", "&": "\\&",
+    "%": "\\%", "#": "\\#", "_": "\\_", "^": "\\textasciicircum{}",
+    "~": "\\textasciitilde{}",
+}
+
+
+def _escape_markdown_text(text: str) -> str:
+    """링크 텍스트를 이스케이프한다. 제목의 `]` 하나로 링크가 통째로
+    사라지거나, `<script>`가 그대로 렌더되던 문제를 막는다 (D-026)."""
+    return _MD_TEXT_SPECIALS.sub(r"\\\1", text).replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _escape_markdown_url(url: str) -> str:
+    return url.replace("(", "%28").replace(")", "%29").replace(" ", "%20")
+
+
+def _escape_bibtex(text: str) -> str:
+    return "".join(_BIBTEX_SPECIALS.get(char, char) for char in text)
 
 
 def _version_date(version: Version) -> str:
@@ -37,18 +61,25 @@ def to_html(document: Document, version: Version, anchor: AnchorRecord | None = 
 
 
 def to_markdown(document: Document, version: Version, anchor: AnchorRecord | None = None) -> str:
-    text = document.title or document.url
-    line = f"[{text}]({document.url})"
-    comment = f'data-originalurl="{document.url}" data-versiondate="{_version_date(version)}"'
+    text = _escape_markdown_text(document.title or document.url)
+    line = f"[{text}]({_escape_markdown_url(document.url)})"
+    comment = (
+        f'data-originalurl="{html.escape(document.url, quote=True)}" '
+        f'data-versiondate="{_version_date(version)}"'
+    )
     if version_url := _version_url(version):
-        comment += f' data-versionurl="{version_url}"'
-    return f"{line} <!-- {comment} -->"
+        comment += f' data-versionurl="{html.escape(version_url, quote=True)}"'
+    # 주석을 조기 종료시키는 `--`를 막는다.
+    return f"{line} <!-- {comment.replace('--', '- -')} -->"
 
 
 def to_bibtex_note(document: Document, version: Version, anchor: AnchorRecord | None = None) -> str:
-    parts = [f"\\url{{{document.url}}}", f"versiondate {_version_date(version)}"]
+    parts = [
+        f"\\url{{{_escape_bibtex(document.url)}}}",
+        f"versiondate {_version_date(version)}",
+    ]
     if version_url := _version_url(version):
-        parts.append(f"versionurl \\url{{{version_url}}}")
+        parts.append(f"versionurl \\url{{{_escape_bibtex(version_url)}}}")
     return f"note = {{{', '.join(parts)}}}"
 
 

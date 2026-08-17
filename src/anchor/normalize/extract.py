@@ -40,9 +40,10 @@ READABILITY_PIPELINE_VERSION = (
     f"+charset/{_CHARSET_VERSION}+norm/{NORM_VERSION}"
 )
 
-_TEXT_PLAIN_TYPES = ("text/plain", "text/markdown")
-_HTML_TYPES = ("text/html", "application/xhtml+xml")
-_PDF_TYPES = ("application/pdf",)
+# 접두 일치는 `text/plaintext`를 plain으로 오분류한다 — 정확히 비교한다 (D-017).
+_TEXT_PLAIN_TYPES = frozenset({"text/plain", "text/markdown", "text/x-markdown"})
+_HTML_TYPES = frozenset({"text/html", "application/xhtml+xml"})
+_PDF_TYPES = frozenset({"application/pdf", "application/x-pdf"})
 
 
 @dataclass(frozen=True)
@@ -62,16 +63,16 @@ def decode_bytes(raw: bytes) -> str:
 def to_normalized(raw: bytes, content_type: str) -> NormalizedDoc:
     media_type = content_type.split(";", 1)[0].strip().lower()
 
-    if media_type.startswith(_TEXT_PLAIN_TYPES):
+    if media_type in _TEXT_PLAIN_TYPES:
         text = decode_bytes(raw)
         return NormalizedDoc(
             text=normalize_text(text), title=None, pipeline_version=PLAIN_PIPELINE_VERSION
         )
 
-    if media_type.startswith(_PDF_TYPES):
+    if media_type in _PDF_TYPES:
         return _from_pdf(raw)
 
-    if media_type and not media_type.startswith(_HTML_TYPES):
+    if media_type and media_type not in _HTML_TYPES:
         raise UnsupportedContent(f"Unsupported content type — 처리하지 않는 콘텐츠 유형: {media_type}")
 
     html = decode_bytes(raw)
@@ -125,8 +126,11 @@ def _from_pdf(raw: bytes) -> NormalizedDoc:
 
     title: str | None = None
     try:
-        if reader.metadata is not None and reader.metadata.title:
-            title = str(reader.metadata.title)
+        raw_title = reader.metadata.title if reader.metadata is not None else None
+        # 문자열이 아닌 값(null·숫자·배열)을 str()로 감싸면 'NullObject' 같은
+        # 내부 표현이 제목으로 저장된다 (D-018).
+        if isinstance(raw_title, str) and raw_title.strip():
+            title = raw_title.strip()
     except Exception:
         title = None
 

@@ -10,8 +10,10 @@ from __future__ import annotations
 import os
 import sys
 import tomllib
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
+
+from anchor.errors import ConfigError
 
 DEFAULT_CONFIG_PATH = Path("~/.anchor/config.toml")
 DEFAULT_DB_PATH = Path("~/.anchor/store.db")
@@ -50,68 +52,168 @@ class Config:
     server_transport: str = "stdio"  # stdio | http
 
 
+def _require(value: object, kind: type, key: str) -> object:
+    """TOML 값의 타입을 확인한다. `bool("no")`가 True가 되는 식의 조용한
+    오해석을 막는다 (D-031)."""
+    if kind is bool:
+        if not isinstance(value, bool):
+            raise ConfigError(
+                f"[{key}] must be a boolean (true/false), got {value!r} — "
+                f"[{key}]는 참/거짓이어야 합니다 (따옴표 없는 true/false)"
+            )
+        return value
+    if kind is float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError(
+                f"[{key}] must be a number, got {value!r} — [{key}]는 숫자여야 합니다"
+            )
+        return float(value)
+    if kind is int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ConfigError(
+                f"[{key}] must be an integer, got {value!r} — [{key}]는 정수여야 합니다"
+            )
+        return value
+    if kind is str:
+        if not isinstance(value, str):
+            raise ConfigError(
+                f"[{key}] must be a string, got {value!r} — [{key}]는 문자열이어야 합니다"
+            )
+        return value
+    return value
+
+
+# 환경변수 이름 → Config 필드. SPEC §9 "환경변수가 항상 우선한다" (D-032).
+_ENV_OVERRIDES: dict[str, tuple[str, type]] = {
+    "ANCHOR_DB_PATH": ("db_path", Path),
+    "ANCHOR_KEEP_VERSIONS": ("keep_versions", int),
+    "ANCHOR_USER_AGENT": ("user_agent", str),
+    "ANCHOR_RESPECT_ROBOTS": ("respect_robots", bool),
+    "ANCHOR_TIMEOUT_SECONDS": ("timeout_seconds", float),
+    "ANCHOR_MAX_REDIRECTS": ("max_redirects", int),
+    "ANCHOR_MAX_CONTENT_MB": ("max_content_bytes", float),
+    "ANCHOR_DEFAULT_MAX_AGE": ("default_max_age", int),
+    "ANCHOR_RATE_LIMIT_RPS": ("rate_limit_rps", float),
+    "ANCHOR_RATE_LIMIT_BURST": ("rate_limit_burst", int),
+    "ANCHOR_ARCHIVE_FALLBACK_ENABLED": ("archive_fallback_enabled", bool),
+    "ANCHOR_ARCHIVE_AGGREGATOR": ("archive_aggregator", str),
+    "ANCHOR_TIME_BUDGET_MS": ("time_budget_ms", int),
+    "ANCHOR_SERVER_TRANSPORT": ("server_transport", str),
+}
+
+
+def _coerce_env(raw: str, kind: type, name: str) -> object:
+    try:
+        if kind is bool:
+            lowered = raw.strip().lower()
+            if lowered in ("1", "true", "yes", "on"):
+                return True
+            if lowered in ("0", "false", "no", "off"):
+                return False
+            raise ValueError(raw)
+        if kind is Path:
+            return Path(raw)
+        return kind(raw)
+    except (TypeError, ValueError) as error:
+        raise ConfigError(
+            f"{name}={raw!r} is not a valid {kind.__name__} — "
+            f"{name} 값을 해석할 수 없습니다"
+        ) from error
+
+
 def load_config(path: Path | None = None) -> Config:
     config = Config()
 
     config_path = (path or DEFAULT_CONFIG_PATH).expanduser()
     if config_path.is_file():
-        with config_path.open("rb") as fp:
-            data = tomllib.load(fp)
+        try:
+            with config_path.open("rb") as fp:
+                data = tomllib.load(fp)
+        except tomllib.TOMLDecodeError as error:
+            raise ConfigError(
+                f"{config_path} is not valid TOML: {error} — 설정 파일 문법 오류"
+            ) from error
+        except OSError as error:
+            raise ConfigError(
+                f"cannot read {config_path}: {error} — 설정 파일을 읽을 수 없습니다"
+            ) from error
+
         storage = data.get("storage", {})
         fetch = data.get("fetch", {})
         rate = fetch.get("rate_limit", {})
-        overrides: dict[str, object] = {}
-        if "db_path" in storage:
-            overrides["db_path"] = Path(storage["db_path"])
-        if "keep_versions" in storage:
-            overrides["keep_versions"] = int(storage["keep_versions"])
-        if "user_agent" in fetch:
-            overrides["user_agent"] = fetch["user_agent"]
-        if "respect_robots" in fetch:
-            overrides["respect_robots"] = bool(fetch["respect_robots"])
-        if "timeout_seconds" in fetch:
-            overrides["timeout_seconds"] = float(fetch["timeout_seconds"])
-        if "max_redirects" in fetch:
-            overrides["max_redirects"] = int(fetch["max_redirects"])
-        if "max_content_mb" in fetch:
-            overrides["max_content_bytes"] = int(fetch["max_content_mb"]) * 1024 * 1024
-        if "default_max_age" in fetch:
-            overrides["default_max_age"] = int(fetch["default_max_age"])
-        if "requests_per_second" in rate:
-            overrides["rate_limit_rps"] = float(rate["requests_per_second"])
-        if "burst" in rate:
-            overrides["rate_limit_burst"] = int(rate["burst"])
         fallback = fetch.get("archive_fallback", {})
-        if "enabled" in fallback:
-            overrides["archive_fallback_enabled"] = bool(fallback["enabled"])
-        if "aggregator" in fallback:
-            overrides["archive_aggregator"] = str(fallback["aggregator"])
-        if "archive_list" in fallback:
-            overrides["archive_list"] = str(fallback["archive_list"])
-        if "timeout_seconds" in fallback:
-            overrides["archive_timeout_seconds"] = float(fallback["timeout_seconds"])
         anchor_section = data.get("anchor", {})
-        if "context_chars" in anchor_section:
-            overrides["context_chars"] = int(anchor_section["context_chars"])
-        if "max_edit_ratio" in anchor_section:
-            overrides["max_edit_ratio"] = float(anchor_section["max_edit_ratio"])
-        if "min_quote_chars" in anchor_section:
-            overrides["min_quote_chars"] = int(anchor_section["min_quote_chars"])
-        if "short_quote_chars" in anchor_section:
-            overrides["short_quote_chars"] = int(anchor_section["short_quote_chars"])
-        if "time_budget_ms" in anchor_section:
-            overrides["time_budget_ms"] = int(anchor_section["time_budget_ms"])
-        if "max_document_bytes" in anchor_section:
-            overrides["max_match_chars"] = int(anchor_section["max_document_bytes"])
         server_section = data.get("server", {})
-        if "transport" in server_section:
-            overrides["server_transport"] = str(server_section["transport"])
+        overrides: dict[str, object] = {}
+
+        simple: list[tuple[dict, str, str, type]] = [
+            (storage, "keep_versions", "storage.keep_versions", int),
+            (fetch, "user_agent", "fetch.user_agent", str),
+            (fetch, "respect_robots", "fetch.respect_robots", bool),
+            (fetch, "timeout_seconds", "fetch.timeout_seconds", float),
+            (fetch, "max_redirects", "fetch.max_redirects", int),
+            (fetch, "default_max_age", "fetch.default_max_age", int),
+            (rate, "requests_per_second", "fetch.rate_limit.requests_per_second", float),
+            (rate, "burst", "fetch.rate_limit.burst", int),
+            (fallback, "enabled", "fetch.archive_fallback.enabled", bool),
+            (fallback, "aggregator", "fetch.archive_fallback.aggregator", str),
+            (fallback, "archive_list", "fetch.archive_fallback.archive_list", str),
+            (fallback, "timeout_seconds", "fetch.archive_fallback.timeout_seconds", float),
+            (anchor_section, "context_chars", "anchor.context_chars", int),
+            (anchor_section, "max_edit_ratio", "anchor.max_edit_ratio", float),
+            (anchor_section, "min_quote_chars", "anchor.min_quote_chars", int),
+            (anchor_section, "short_quote_chars", "anchor.short_quote_chars", int),
+            (anchor_section, "time_budget_ms", "anchor.time_budget_ms", int),
+            (anchor_section, "max_document_bytes", "anchor.max_document_bytes", int),
+            (server_section, "transport", "server.transport", str),
+        ]
+        field_names = {
+            "keep_versions": "keep_versions",
+            "user_agent": "user_agent",
+            "respect_robots": "respect_robots",
+            "timeout_seconds": "timeout_seconds",
+            "max_redirects": "max_redirects",
+            "default_max_age": "default_max_age",
+            "requests_per_second": "rate_limit_rps",
+            "burst": "rate_limit_burst",
+            "enabled": "archive_fallback_enabled",
+            "aggregator": "archive_aggregator",
+            "archive_list": "archive_list",
+            "context_chars": "context_chars",
+            "max_edit_ratio": "max_edit_ratio",
+            "min_quote_chars": "min_quote_chars",
+            "short_quote_chars": "short_quote_chars",
+            "time_budget_ms": "time_budget_ms",
+            "max_document_bytes": "max_match_chars",
+            "transport": "server_transport",
+        }
+        for section, key, label, kind in simple:
+            if key not in section:
+                continue
+            value = _require(section[key], kind, label)
+            if section is fallback and key == "timeout_seconds":
+                overrides["archive_timeout_seconds"] = value
+            else:
+                overrides[field_names[key]] = value
+
+        if "db_path" in storage:
+            overrides["db_path"] = Path(_require(storage["db_path"], str, "storage.db_path"))
+        if "max_content_mb" in fetch:
+            # 소수를 받을 수 있어야 한다 — int()로 절삭하면 0.5가 0바이트가 된다 (D-029).
+            megabytes = _require(fetch["max_content_mb"], float, "fetch.max_content_mb")
+            overrides["max_content_bytes"] = int(float(megabytes) * 1024 * 1024)
         config = replace(config, **overrides)
 
-    if env_db := os.environ.get("ANCHOR_DB_PATH"):
-        config = replace(config, db_path=Path(env_db))
-    if env_ua := os.environ.get("ANCHOR_USER_AGENT"):
-        config = replace(config, user_agent=env_ua)
+    for name, (field_name, kind) in _ENV_OVERRIDES.items():
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        value = _coerce_env(raw, kind, name)
+        if field_name == "max_content_bytes":
+            value = int(float(value) * 1024 * 1024)
+        config = replace(config, **{field_name: value})
+
+    _validate(config)
 
     if not config.respect_robots:
         print(
@@ -119,3 +221,26 @@ def load_config(path: Path | None = None) -> Config:
             file=sys.stderr,
         )
     return config
+
+
+def _validate(config: Config) -> None:
+    """값의 범위를 로드 시점에 확인한다 — 첫 페치 도중 죽지 않도록 (D-010/D-029)."""
+    checks: list[tuple[bool, str]] = [
+        (config.rate_limit_rps > 0, "fetch.rate_limit.requests_per_second must be > 0"),
+        (config.rate_limit_burst >= 1, "fetch.rate_limit.burst must be >= 1"),
+        (config.max_content_bytes > 0, "fetch.max_content_mb must be > 0"),
+        (config.timeout_seconds > 0, "fetch.timeout_seconds must be > 0"),
+        (config.max_redirects >= 0, "fetch.max_redirects must be >= 0"),
+        (config.default_max_age >= 0, "fetch.default_max_age must be >= 0"),
+        (config.keep_versions >= 1, "storage.keep_versions must be >= 1"),
+        (config.min_quote_chars >= 1, "anchor.min_quote_chars must be >= 1"),
+        (config.time_budget_ms > 0, "anchor.time_budget_ms must be > 0"),
+        (config.max_edit_ratio > 0, "anchor.max_edit_ratio must be > 0"),
+        (
+            config.server_transport in ("stdio", "http"),
+            "server.transport must be 'stdio' or 'http'",
+        ),
+    ]
+    for ok, message in checks:
+        if not ok:
+            raise ConfigError(f"{message} — 설정값 범위 오류")

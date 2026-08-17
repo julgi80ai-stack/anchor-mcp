@@ -1,5 +1,5 @@
 -- SPDX-License-Identifier: Apache-2.0
--- Anchor 스키마 v4 — 신규 DB용 전체 스키마 (SPEC §4.1 + robots 캐시).
+-- Anchor 스키마 v5 — 신규 DB용 전체 스키마 (SPEC §4.1 + robots 캐시).
 -- 기존 DB는 migrations/ 아래의 증분 SQL로 따라온다.
 
 -- 논리적 문서 (Memento: Original Resource / URI-R). URL 정규화 후 유일.
@@ -34,7 +34,8 @@ CREATE TABLE versions (
     http_status      INTEGER NOT NULL,
     source           TEXT NOT NULL DEFAULT 'live',-- live | archive
     source_uri       TEXT,                        -- 아카이브에서 온 경우 URI-M
-    UNIQUE (document_id, text_hash)
+    -- 같은 본문이라도 출처가 다르면 별개의 memento다 (v5).
+    UNIQUE (document_id, text_hash, source)
 );
 
 -- 네트워크 회계. 절감 효과 측정용.

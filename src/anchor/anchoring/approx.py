@@ -26,12 +26,19 @@ class ApproxMatch:
     edit_distance: int
 
 
-def bounded_edit_distance(a: str, b: str, k: int) -> int | None:
-    """편집거리가 k 이하면 그 값을, 넘으면 None을 반환한다."""
+def bounded_edit_distance(a: str, b: str, k: int, budget=None) -> int | None:
+    """편집거리가 k 이하면 그 값을, 넘으면 None을 반환한다.
+
+    `budget`을 주면 행마다 확인해 예산 초과 시 TimeoutError를 낸다 —
+    이 DP는 O(len(a)·len(b))라 긴 인용문에서 예산을 통째로 넘길 수 있다
+    (실측: 4000자에서 7.7초, 예산의 38배) (D-045).
+    """
     if abs(len(a) - len(b)) > k:
         return None
     previous = list(range(len(b) + 1))
     for i, char_a in enumerate(a, 1):
+        if budget is not None and i % 64 == 0 and budget.exhausted():
+            raise TimeoutError("bounded_edit_distance 예산 소진")
         current = [i] + [0] * len(b)
         row_min = i
         for j, char_b in enumerate(b, 1):
@@ -96,13 +103,20 @@ def myers_scan(text: str, pattern: str, k: int, budget) -> tuple[int, int] | Non
     return best_score, best_end
 
 
-def best_substring_match(pattern: str, window: str, k: int) -> tuple[int, int, int] | None:
+def best_substring_match(
+    pattern: str, window: str, k: int, budget=None
+) -> tuple[int, int, int] | None:
     """window 안에서 pattern과 가장 가까운 부분 문자열을 찾는다 (준전역 DP,
-    시작 위치 추적 포함). 반환: (편집거리, 시작, 끝) — k 초과면 None."""
+    시작 위치 추적 포함). 반환: (편집거리, 시작, 끝) — k 초과면 None.
+
+    `budget`을 주면 행마다 확인한다 (D-045).
+    """
     m, n = len(pattern), len(window)
     previous = [0] * (n + 1)
     previous_start = list(range(n + 1))
     for i in range(1, m + 1):
+        if budget is not None and i % 64 == 0 and budget.exhausted():
+            raise TimeoutError("best_substring_match 예산 소진")
         char_p = pattern[i - 1]
         current = [i] + [0] * n
         current_start = [0] * (n + 1)
@@ -162,7 +176,7 @@ def fuzzy_search_myers(text: str, exact: str, k: int, budget) -> ApproxMatch | N
         if budget.exhausted():
             raise TimeoutError("fuzzy_search_myers 예산 소진")
         window = text[window_start:window_end]
-        refined = best_substring_match(exact, window, k)
+        refined = best_substring_match(exact, window, k, budget)
         if refined is None:
             continue
         distance, relative_start, relative_end = refined

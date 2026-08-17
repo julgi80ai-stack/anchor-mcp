@@ -31,6 +31,7 @@ class Selector:
     suffix: str
     position_hint: int
     quality: Quality
+    occurrences: int = 1  # 생성 시점에 원문에서 몇 번 나왔는가
 
 
 def scale_for_script(threshold: int, text: str) -> int:
@@ -69,6 +70,7 @@ def build_selector(
     offset = text.find(exact)
     if offset == -1:
         raise QuoteNotFound("Quote not found in the source text; nonexistent citations are never recorded — 인용문이 원문에 없어 기록하지 않습니다")
+    occurrences = _count_occurrences(text, exact)
 
     return Selector(
         exact=exact,
@@ -76,4 +78,24 @@ def build_selector(
         suffix=text[offset + len(exact) : offset + len(exact) + context_chars],
         position_hint=offset,
         quality=Quality.SHORT if len(exact) < short_limit else Quality.OK,
+        occurrences=occurrences,
     )
+
+
+def _count_occurrences(text: str, exact: str, limit: int = 8) -> int:
+    """인용문이 원문에 몇 번 나오는지 센다 (limit에서 멈춘다).
+
+    중복 출현은 앵커가 어느 인스턴스를 가리키는지 모호하게 만든다. SPEC
+    §6.2의 1·2단계는 단순 완전 일치라 첫 출현을 잡으므로, 사용자가 인용한
+    인스턴스가 삭제돼도 다른 인스턴스 때문에 INTACT가 될 수 있다 (D-047).
+    호출자에게 경고할 수 있도록 개수를 남긴다.
+    """
+    count = 0
+    start = 0
+    while count < limit:
+        found = text.find(exact, start)
+        if found == -1:
+            break
+        count += 1
+        start = found + 1
+    return count

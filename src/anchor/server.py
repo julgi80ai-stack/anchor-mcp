@@ -37,7 +37,7 @@ from mcp_types import (
 
 from anchor import __version__
 from anchor.config import Config, load_config
-from anchor.models import utcnow_iso, uuid7
+from anchor.models import parse_iso, utcnow_iso, uuid7
 from anchor.service import Anchor
 
 _INVALID_PARAMS = -32602
@@ -81,8 +81,16 @@ class AnchorTasksExtension(Extension):
         )
 
     async def intercept_tool_call(self, params, ctx, call_next):
-        if params.task is None or params.name not in TASKABLE_TOOLS:
+        if params.task is None:
             return await call_next(ctx)
+        if params.name not in TASKABLE_TOOLS:
+            # 조용히 동기 실행하면 클라이언트는 task 기술자도 거부 사유도
+            # 받지 못한다 (D-041). 무엇이 task로 실행 가능한지 알려준다.
+            raise MCPError(
+                _INVALID_PARAMS,
+                f"{params.name} cannot run as a task; taskable tools: "
+                f"{', '.join(sorted(TASKABLE_TOOLS))} — 이 도구는 task로 실행할 수 없습니다",
+            )
 
         now = utcnow_iso()
         task = Task(
@@ -93,6 +101,7 @@ class AnchorTasksExtension(Extension):
             ttl=params.task.ttl,
             poll_interval=500,
         )
+        self.prune()
         entry = _TaskEntry(task=task)
         with self._entries_lock:
             self._entries[task.task_id] = entry
@@ -151,6 +160,21 @@ class AnchorTasksExtension(Extension):
                 update["status_message"] = message
             entry.task = entry.task.model_copy(update=update)
 
+    def prune(self) -> None:
+        """ttl이 지난 종결 task를 정리한다 (D-037).
+
+        `_entries`에 삭제 경로가 없어 장기 실행 서버에서 무한히 쌓였다.
+        각 항목이 verify 리포트 전문을 붙들고 있어 비용이 작지 않다.
+        """
+        now = utcnow_iso()
+        with self._entries_lock:
+            for task_id, entry in list(self._entries.items()):
+                if entry.task.status == "working" or entry.task.ttl is None:
+                    continue
+                age_ms = (parse_iso(now) - parse_iso(entry.task.last_updated_at)).total_seconds()
+                if age_ms * 1000 >= entry.task.ttl:
+                    del self._entries[task_id]
+
     def shutdown(self, timeout: float = 10.0) -> None:
         """진행 중인 task에 중단을 알리고 워커가 끝나기를 기다린다.
 
@@ -207,6 +231,7 @@ class AnchorTasksExtension(Extension):
         return CancelTaskResult(**entry.task.model_dump())
 
     async def _on_list(self, ctx, params: PaginatedRequestParams | None) -> ListTasksResult:
+        self.prune()
         with self._entries_lock:
             return ListTasksResult(tasks=[entry.task for entry in self._entries.values()])
 
@@ -235,8 +260,12 @@ def build_server(
                 should_stop=should_stop,
             )
         payload = asdict(report)
-        payload["network"] = {"requests": report.requests, "bytes_down": report.bytes_down}
-        del payload["requests"], payload["bytes_down"]
+        payload["network"] = {
+            "requests": report.requests,
+            "not_modified": report.not_modified,
+            "bytes_down": report.bytes_down,
+        }
+        del payload["requests"], payload["bytes_down"], payload["not_modified"]
         return payload
 
     def _run_tool(name: str, arguments: dict[str, Any], should_stop: Any) -> dict[str, Any]:
@@ -307,6 +336,11 @@ def build_server(
             },
         }
         if include_content and result.content is not None:
+            if start_index < 0 or max_length < 0:
+                raise ValueError(
+                    f"start_index and max_length must be >= 0, got {start_index}/{max_length}"
+                    " — 음수는 허용되지 않습니다"
+                )
             end = start_index + max_length if max_length > 0 else len(result.content)
             payload["content"] = result.content[start_index:end]
             truncated = end < len(result.content)

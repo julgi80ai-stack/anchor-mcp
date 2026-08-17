@@ -47,7 +47,7 @@ class MatchResult:
     edit_distance: int | None = None
     found_offset: int | None = None
     found_text: str | None = None
-    truncated: bool = False
+    truncated: bool = False  # 문서가 상한에서 잘렸다 — 판정의 신뢰도를 낮춘다
 
 
 def match_anchor(
@@ -66,6 +66,8 @@ def match_anchor(
     budget = Budget(budget_ms)
     truncated = len(text) > max_chars
     if truncated:
+        # 잘라낸 뒤 못 찾으면 "사라졌다"가 아니라 "다 보지 못했다"이다.
+        # 아래에서 MISSING/ALTERED 판정을 UNRESOLVED로 낮춘다 (D-046).
         text = text[:max_chars]
     # 편집거리 상한도 문자 체계를 반영한다 (D-049). 같은 성격의 개정(단어
     # 하나 교체)이 일본어·중국어에서는 훨씬 적은 글자로 표현되므로, 글자
@@ -91,7 +93,10 @@ def match_anchor(
         return MatchResult(UNRESOLVED, truncated=truncated)
 
     # 3단계 — 문맥 기반 후보 비교
-    context_result = _match_by_context(text, exact, prefix, suffix, k, budget, truncated)
+    try:
+        context_result = _match_by_context(text, exact, prefix, suffix, k, budget, truncated)
+    except TimeoutError:
+        return MatchResult(UNRESOLVED, truncated=truncated)
     if context_result is not None:
         return context_result
 
@@ -107,7 +112,8 @@ def match_anchor(
     except TimeoutError:
         return MatchResult(UNRESOLVED, truncated=truncated)
     if approx is None:
-        return MatchResult(MISSING, truncated=truncated)
+        # 문서를 다 보지 못했다면 "인용문이 사라졌다"고 단정할 수 없다.
+        return MatchResult(UNRESOLVED if truncated else MISSING, truncated=truncated)
     return MatchResult(
         ALTERED,
         score=_score(approx.edit_distance, exact),
@@ -146,7 +152,9 @@ def _match_by_context(
         suffix_at = text.find(suffix, body_start, search_end)
         if suffix_at != -1:
             candidate = text[body_start:suffix_at]
-            distance = bounded_edit_distance(exact, candidate, min(k, best_distance - 1))
+            distance = bounded_edit_distance(
+                exact, candidate, min(k, best_distance - 1), budget
+            )
             if distance is not None and distance < best_distance:
                 best_distance = distance
                 if distance == 0:

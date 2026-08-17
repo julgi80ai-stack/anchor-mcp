@@ -180,3 +180,42 @@ def test_rollback_is_not_defeated_by_concurrent_commit(tmp_path):
     repository.close()
     assert "should_rollback" not in outcomes, f"롤백된 행이 남았다: {outcomes}"
     assert "committed" in outcomes
+
+
+# -- D-021 / D-022 저장소 방어 ------------------------------------------------
+
+
+def test_gc_rejects_keep_below_one(tmp_path):
+    """`--keep 0`이 모든 버전을 지우던 문제 (D-021)."""
+    from anchor.config import Config
+    from anchor.service import Anchor
+
+    config = Config(db_path=tmp_path / "gc.db")
+    with Anchor(db_path=config.db_path, config=config) as anchor:
+        for keep in (0, -1):
+            with pytest.raises(ValueError):
+                anchor.collect_garbage(keep=keep)
+
+
+def test_empty_id_list_selects_nothing(tmp_path):
+    """빈 리스트는 '선택 없음'이다 — 전체 재검증으로 증폭되면 안 된다 (D-022)."""
+    repository = Repository(tmp_path / "sel.db")
+    document = repository.create_document(
+        url="https://example.invalid/a", original_url="https://example.invalid/a",
+        title=None, now="2026-08-17T00:00:00Z",
+    )
+    version = repository.insert_version(
+        document_id=document.id, text_hash="b3:t", raw_hash="b3:r",
+        pipeline_version="p", captured_at="2026-08-17T00:00:00Z", byte_size=1,
+        normalized_text="본문", http_status=200,
+    )
+    repository.insert_anchor(
+        document_id=document.id, created_version=version.id, exact="본문",
+        prefix="", suffix="", position_hint=0, exact_hash="b3:e", quality="ok",
+        note=None, created_at="2026-08-17T00:00:00Z",
+    )
+
+    assert len(repository.select_anchors()) == 1          # None = 전체
+    assert repository.select_anchors(anchor_ids=[]) == []  # [] = 선택 없음
+    assert repository.select_anchors(document_ids=[]) == []
+    repository.close()

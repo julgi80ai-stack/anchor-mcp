@@ -145,6 +145,7 @@ class AttentionItem:
     after: str | None
     match_score: float | None
     edit_distance: int | None
+    truncated: bool = False  # 문서가 상한에서 잘려 일부만 검사했다
 
 
 @dataclass(frozen=True)
@@ -155,6 +156,7 @@ class VerifyReport:
     anchor_ids: tuple[str, ...]  # 이번에 검증한 앵커들 (SPEC §8 예시의 재내보내기용)
     stopped_early: bool  # 취소·종료 신호로 중도 종료됐는가 (부분 결과)
     requests: int
+    not_modified: int  # 304로 끝난 요청 수 (SPEC §7.3 network)
     bytes_down: int
 
 

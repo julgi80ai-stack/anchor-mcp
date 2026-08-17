@@ -44,6 +44,10 @@ from anchor.store.repository import Repository
 
 _STATUS_BY_HTTP = {402: "paywalled", 403: "forbidden", 404: "gone", 410: "gone"}
 
+# 아직 문서로 등록되지 않은 URL의 실패를 기록할 때 쓰는 자리표시자.
+# `fetch_log.document_id`가 NOT NULL이라 빈 값을 넣을 수 없다 (D-014).
+_UNREGISTERED = "-"
+
 # 아카이브 폴백으로 이어지는 원본 실패 (SPEC §5.2 5→6단계).
 _ARCHIVE_FALLBACK_STATUSES = frozenset({402, 403, 404, 410, 429})
 
@@ -194,9 +198,16 @@ class Anchor:
                 )
                 if result is not None:
                     return result
+                bytes_down += hit.bytes_down  # 폴백은 무산됐지만 받은 건 받았다
 
-        if document:
-            self._log(document.id, "error", response.status, bytes_down, started)
+        # 문서가 아직 없어도 실패는 회계에 남긴다 (D-014).
+        self._log(
+            document.id if document else _UNREGISTERED,
+            "error",
+            response.status,
+            bytes_down,
+            started,
+        )
         raise FetchFailed(
             f"HTTP {response.status}: {norm_url}", http_status=response.status
         )
@@ -229,13 +240,23 @@ class Anchor:
             note=note,
             created_at=now,
         )
-        warnings: tuple[str, ...] = ()
+        warnings_list: list[str] = []
         if selector.quality == QUALITY_SHORT:
-            warnings = (
+            warnings_list.append(
                 f"Quote is under {self._config.short_quote_chars} chars: re-verification accuracy "
                 "drops and the time budget is halved; one complete sentence is recommended "
-                "— 인용문이 짧아 재검증 정확도가 낮을 수 있고 시간 예산이 절반으로 적용됩니다.",
+                "— 인용문이 짧아 재검증 정확도가 낮을 수 있고 시간 예산이 절반으로 적용됩니다."
             )
+        if selector.occurrences > 1:
+            # 앵커는 첫 출현에 붙는다. 인용한 인스턴스가 지워져도 다른
+            # 인스턴스 때문에 INTACT로 보일 수 있다 (D-047).
+            warnings_list.append(
+                f"This quote appears {selector.occurrences}+ times in the document; the anchor "
+                "binds to the first occurrence and re-verification may match another one "
+                f"— 인용문이 원문에 {selector.occurrences}회 이상 나옵니다. 앵커는 첫 출현에 "
+                "묶이므로 재검증이 다른 인스턴스를 잡을 수 있습니다."
+            )
+        warnings = tuple(warnings_list)
         return CiteResult(
             anchor_id=anchor.id,
             document_id=document.id,
@@ -274,6 +295,7 @@ class Anchor:
         summary = {state: 0 for state in matcher.ALL_STATES}
         attention: list[AttentionItem] = []
         requests = 0
+        not_modified = 0
         bytes_down = 0
 
         by_document: dict[str, list[AnchorRecord]] = {}
@@ -293,6 +315,8 @@ class Anchor:
                 fetch_result = self.fetch(document.url, max_age=0, include_content=False)
                 requests += 1
                 bytes_down += fetch_result.network.bytes_down
+                if fetch_result.outcome == "not_modified":
+                    not_modified += 1
             except FetchFailed as error:
                 requests += 1
                 failure_state = (
@@ -380,6 +404,7 @@ class Anchor:
                             after=result.found_text if result.state == matcher.ALTERED else None,
                             match_score=result.score,
                             edit_distance=result.edit_distance,
+                            truncated=result.truncated,
                         )
                     )
 
@@ -391,6 +416,7 @@ class Anchor:
             anchor_ids=tuple(anchor.id for anchor in anchors),
             stopped_early=stopped_early,
             requests=requests,
+            not_modified=not_modified,
             bytes_down=bytes_down,
         )
 
@@ -525,6 +551,13 @@ class Anchor:
         """고아 버전 정리 (SPEC §4.2). 앵커가 가리키는 버전은 절대 삭제하지 않는다."""
         if keep is None:
             keep = self._config.keep_versions
+        if keep < 1:
+            # 0이나 음수는 "모든 버전 삭제"로 동작해 앵커 없는 문서의 최신본까지
+            # 지운다. 어떤 해석으로도 유효하지 않으므로 거부한다 (D-021).
+            raise ValueError(
+                f"keep must be at least 1, got {keep} — "
+                "보존 버전 수는 1 이상이어야 합니다 (0은 전체 삭제입니다)"
+            )
         deleted, freed = self._repository.collect_garbage_versions(keep=keep)
         return {"deleted_versions": deleted, "freed_bytes_estimate": freed, "keep": keep}
 
@@ -682,7 +715,12 @@ class Anchor:
                 document.id, status_label or document.status, now
             )
 
-        version = self._repository.find_version_by_text_hash(document.id, text_hash)
+        # 본문이 같아도 아카이브 관측은 별개의 memento다 — 시각도 URI-M도
+        # 다르다. 기존 live 행을 재사용하면 "아카이브에서 확인됨"이라는
+        # 표시가 통째로 사라진다 (D-013). 출처까지 같을 때만 재사용한다.
+        version = self._repository.find_version_by_text_hash(
+            document.id, text_hash, source="archive"
+        )
         if version is None:
             version = self._repository.insert_version(
                 document_id=document.id,
