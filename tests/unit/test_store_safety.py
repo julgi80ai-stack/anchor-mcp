@@ -8,9 +8,6 @@
 from __future__ import annotations
 
 import sqlite3
-import subprocess
-import sys
-import textwrap
 import threading
 from pathlib import Path
 
@@ -18,17 +15,7 @@ import pytest
 
 from anchor.store.repository import SCHEMA_VERSION, Repository
 
-SRC = str(Path(__file__).resolve().parents[2] / "src")
-
-
-def run_in_subprocess(code: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [sys.executable, "-c", textwrap.dedent(code)],
-        capture_output=True,
-        text=True,
-        env={"PYTHONPATH": SRC, "PATH": "/usr/bin:/bin"},
-        timeout=180,
-    )
+from tests.subprocess_helper import run_python as run_in_subprocess
 
 
 # -- D-019 원자적 마이그레이션 ------------------------------------------------

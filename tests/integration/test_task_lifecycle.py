@@ -7,9 +7,6 @@
 
 from __future__ import annotations
 
-import subprocess
-import sys
-import textwrap
 import threading
 import time
 from pathlib import Path
@@ -30,10 +27,10 @@ from mcp_types import (
 
 from anchor.config import Config
 from anchor.server import build_server
+from tests.subprocess_helper import run_python
 
 pytestmark = pytest.mark.anyio
 
-SRC = str(Path(__file__).resolve().parents[2] / "src")
 QUOTE = "링크는 살아 있지만 내용이 바뀌는 인용 표류가 가장 위험하다."
 
 
@@ -143,45 +140,42 @@ async def test_cancelled_task_result_is_recoverable(fixture_server, task_server)
 
 def test_shutdown_during_background_task_does_not_crash(tmp_path):
     """D-034: 워커가 도는 중 종료해도 프로세스가 죽지 않아야 한다."""
-    result = subprocess.run(
-        [sys.executable, "-c", textwrap.dedent(f"""
-            import threading, time
-            from anchor.config import Config
-            from anchor.server import build_server
+    db_path = str(tmp_path / "shutdown.db")
+    result = run_python(f"""
+        import threading, time
+        from mcp_types import Task
 
-            config = Config(db_path={str(tmp_path / "shutdown.db")!r})
-            server, service = build_server(db_path=config.db_path, config=config)
-            extension = server.anchor_tasks
+        from anchor.config import Config
+        from anchor.server import build_server, _TaskEntry
 
-            # 저장소를 계속 두드리는 워커를 8개 띄운 뒤 곧바로 종료 절차를 밟는다.
-            def busy(stop):
-                while not stop():
-                    service._repository.log_fetch(
-                        document_id="d", requested_at="2026-08-17T00:00:00Z",
-                        outcome="cache_hit", http_status=200, bytes_down=0, elapsed_ms=1,
-                    )
+        config = Config(db_path={db_path!r})
+        server, service = build_server(db_path=config.db_path, config=config)
+        extension = server.anchor_tasks
 
-            from anchor.server import _TaskEntry
-            from mcp_types import Task
-            for index in range(8):
-                entry = _TaskEntry(task=Task(
-                    task_id=f"t{{index}}", status="working",
-                    created_at="2026-08-17T00:00:00Z", last_updated_at="2026-08-17T00:00:00Z",
-                    ttl=None,
-                ))
-                entry.worker = threading.Thread(target=busy, args=(entry.cancel.is_set,))
-                extension._entries[entry.task.task_id] = entry
-                entry.worker.start()
+        # 저장소를 계속 두드리는 워커를 8개 띄운 뒤 곧바로 종료 절차를 밟는다.
+        def busy(stop):
+            while not stop():
+                service._repository.log_fetch(
+                    document_id="d", requested_at="2026-08-17T00:00:00Z",
+                    outcome="cache_hit", http_status=200, bytes_down=0, elapsed_ms=1,
+                )
 
-            time.sleep(0.3)
-            extension.shutdown()      # 워커 정리가 먼저
-            service.close()           # 그 다음 커넥션 해제
-            print("clean shutdown")
-        """)],
-        capture_output=True, text=True,
-        env={"PYTHONPATH": SRC, "PATH": "/usr/bin:/bin"}, timeout=180,
-    )
+        for index in range(8):
+            entry = _TaskEntry(task=Task(
+                task_id=f"t{{index}}", status="working",
+                created_at="2026-08-17T00:00:00Z",
+                last_updated_at="2026-08-17T00:00:00Z", ttl=None,
+            ))
+            entry.worker = threading.Thread(target=busy, args=(entry.cancel.is_set,))
+            extension._entries[entry.task.task_id] = entry
+            entry.worker.start()
+
+        time.sleep(0.3)
+        extension.shutdown()      # 워커 정리가 먼저
+        service.close()           # 그 다음 커넥션 해제
+        print("clean shutdown")
+    """)
     assert result.returncode == 0, (
-        f"종료 중 프로세스가 죽었다 (rc={result.returncode}, segfault=-11): {result.stderr[-500:]}"
+        f"종료 중 프로세스가 죽었다 (rc={result.returncode}): {result.stderr[-500:]}"
     )
     assert "clean shutdown" in result.stdout
