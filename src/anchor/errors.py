@@ -24,6 +24,18 @@ class ExtractionFailed(AnchorError):
     """본문 추출기가 문서에서 본문을 찾지 못했다."""
 
 
+class QuoteNotFound(AnchorError):
+    """인용문이 원문에 없다. 존재하지 않는 인용은 기록하지 않는다 (SPEC §6.1)."""
+
+
+class QuoteTooShort(AnchorError):
+    """인용문이 최소 길이(기본 12자) 미만 — 병리적 매칭 케이스 차단."""
+
+
+class DocumentNotFound(AnchorError):
+    """주어진 id 또는 URL에 해당하는 문서가 캐시에 없다."""
+
+
 class FetchFailed(AnchorError):
     """HTTP 획득 실패. http_status에 서버가 준 상태를 그대로 담는다."""
 

@@ -79,6 +79,81 @@ def fetch(
         typer.echo(result.content)
 
 
+@app.command()
+def cite(
+    document: str = typer.Argument(..., help="문서 id 또는 URL (먼저 fetch 되어 있어야 함)"),
+    quote: str = typer.Argument(..., help="인용문 (완결된 문장 하나 권장, 최소 12자)"),
+    note: Optional[str] = typer.Option(None, "--note", help="사용자 메모"),
+    json_out: bool = typer.Option(False, "--json", help="결과를 JSON으로 출력"),
+    db: Optional[Path] = typer.Option(None, "--db", help="SQLite 경로"),
+) -> None:
+    """인용문에 앵커를 부여한다. 원문에 없는 인용은 기록하지 않는다."""
+    try:
+        with Anchor(db_path=db) as anchor:
+            result = anchor.cite(document, quote, note=note)
+    except AnchorError as error:
+        typer.secho(f"실패: {error}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if json_out:
+        typer.echo(json.dumps(dataclasses.asdict(result), ensure_ascii=False, indent=2))
+        return
+    typer.secho("앵커 생성", fg=typer.colors.GREEN, bold=True, nl=False)
+    typer.echo(f"  {result.anchor_id}")
+    typer.echo(f"  버전   {result.version_id}  오프셋 {result.offset}  품질 {result.quality}")
+    for warning in result.warnings:
+        typer.secho(f"  경고: {warning}", fg=typer.colors.YELLOW)
+
+
+def _parse_older_than(value: str) -> float:
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    if value and value[-1] in units:
+        return float(value[:-1]) * units[value[-1]]
+    return float(value)
+
+
+@app.command()
+def verify(
+    anchor_ids: Optional[list[str]] = typer.Option(None, "--anchor", help="특정 앵커 id (반복 가능)"),
+    older_than: Optional[str] = typer.Option(
+        None, "--older-than", help="이 기간 내 검증된 앵커는 건너뜀 (예: 7d, 12h, 3600s)"
+    ),
+    budget_ms: Optional[int] = typer.Option(None, "--budget-ms", help="앵커당 매칭 시간 예산(ms)"),
+    json_out: bool = typer.Option(False, "--json", help="결과를 JSON으로 출력"),
+    db: Optional[Path] = typer.Option(None, "--db", help="SQLite 경로"),
+) -> None:
+    """앵커들을 현재 원문 대비 재검증한다. 조건이 없으면 전체."""
+    try:
+        with Anchor(db_path=db) as anchor:
+            report = anchor.verify(
+                anchor_ids=anchor_ids or None,
+                older_than_seconds=_parse_older_than(older_than) if older_than else None,
+                time_budget_ms=budget_ms,
+            )
+    except AnchorError as error:
+        typer.secho(f"실패: {error}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if json_out:
+        typer.echo(json.dumps(dataclasses.asdict(report), ensure_ascii=False, indent=2))
+        return
+
+    summary_line = " · ".join(f"{state} {count}" for state, count in report.summary.items())
+    typer.echo(f"검증 {report.checked}건: {summary_line}")
+    typer.echo(f"네트워크: 요청 {report.requests}건, {report.bytes_down:,} bytes down")
+    if not report.attention:
+        return
+    typer.secho("\n주의 필요:", bold=True)
+    for item in report.attention:
+        typer.secho(f"[{item.state}] ", fg=typer.colors.YELLOW, bold=True, nl=False)
+        typer.echo(item.url)
+        typer.echo(f"  이전: {item.before}")
+        if item.after is not None:
+            typer.echo(f"  현재: {item.after}")
+        if item.match_score is not None:
+            typer.echo(f"  (score {item.match_score:.2f}, 편집거리 {item.edit_distance})")
+
+
 @app.command("list")
 def list_command(
     db: Optional[Path] = typer.Option(None, "--db", help="SQLite 경로"),

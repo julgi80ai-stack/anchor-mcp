@@ -7,7 +7,7 @@ import secrets
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 def uuid7() -> str:
@@ -34,6 +34,12 @@ def parse_iso(value: str) -> datetime:
 
 def age_seconds(since_iso: str) -> float:
     return (datetime.now(timezone.utc) - parse_iso(since_iso)).total_seconds()
+
+
+def iso_ago(seconds: float) -> str:
+    """현재로부터 seconds 이전 시각의 ISO 8601 UTC 문자열."""
+    moment = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    return moment.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 @dataclass(frozen=True)
@@ -63,6 +69,56 @@ class Version:
     http_status: int
     source: str  # live | archive
     source_uri: str | None
+
+
+@dataclass(frozen=True)
+class AnchorRecord:
+    id: str
+    document_id: str
+    created_version: str
+    exact: str
+    prefix: str
+    suffix: str
+    position_hint: int
+    exact_hash: str
+    quality: str  # ok | short
+    note: str | None
+    created_at: str
+
+
+@dataclass(frozen=True)
+class CiteResult:
+    """SPEC §7.2 `cite` 출력에 대응."""
+
+    anchor_id: str
+    document_id: str
+    version_id: str
+    offset: int
+    quality: str
+    warnings: tuple[str, ...]
+    created_at: str
+
+
+@dataclass(frozen=True)
+class AttentionItem:
+    """조치가 필요한 검증 결과 (SPEC §7.3 attention)."""
+
+    anchor_id: str
+    url: str
+    state: str
+    before: str
+    after: str | None
+    match_score: float | None
+    edit_distance: int | None
+
+
+@dataclass(frozen=True)
+class VerifyReport:
+    checked: int
+    summary: dict[str, int]
+    attention: tuple[AttentionItem, ...]
+    requests: int
+    bytes_down: int
 
 
 @dataclass(frozen=True)

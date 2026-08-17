@@ -19,7 +19,7 @@ DEFAULT_DB_PATH = Path("~/.anchor/store.db")
 @dataclass(frozen=True)
 class Config:
     db_path: Path = DEFAULT_DB_PATH
-    user_agent: str = "Anchor/0.1 (+https://github.com/julgi80ai-stack/anchor-mcp)"
+    user_agent: str = "Anchor/0.2 (+https://github.com/julgi80ai-stack/anchor-mcp)"
     respect_robots: bool = True
     timeout_seconds: float = 30.0
     max_redirects: int = 5
@@ -29,6 +29,15 @@ class Config:
     rate_limit_burst: int = 3
     retry_backoff_base: float = 1.0
     robots_ttl_seconds: int = 86400
+    # [anchor] (SPEC §9)
+    context_chars: int = 48
+    max_edit_ratio: float = 0.15
+    max_edit_distance: int = 64
+    min_quote_chars: int = 12
+    short_quote_chars: int = 32
+    time_budget_ms: int = 200
+    hint_radius: int = 500
+    max_match_chars: int = 2_097_152
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -60,6 +69,19 @@ def load_config(path: Path | None = None) -> Config:
             overrides["rate_limit_rps"] = float(rate["requests_per_second"])
         if "burst" in rate:
             overrides["rate_limit_burst"] = int(rate["burst"])
+        anchor_section = data.get("anchor", {})
+        if "context_chars" in anchor_section:
+            overrides["context_chars"] = int(anchor_section["context_chars"])
+        if "max_edit_ratio" in anchor_section:
+            overrides["max_edit_ratio"] = float(anchor_section["max_edit_ratio"])
+        if "min_quote_chars" in anchor_section:
+            overrides["min_quote_chars"] = int(anchor_section["min_quote_chars"])
+        if "short_quote_chars" in anchor_section:
+            overrides["short_quote_chars"] = int(anchor_section["short_quote_chars"])
+        if "time_budget_ms" in anchor_section:
+            overrides["time_budget_ms"] = int(anchor_section["time_budget_ms"])
+        if "max_document_bytes" in anchor_section:
+            overrides["max_match_chars"] = int(anchor_section["max_document_bytes"])
         config = replace(config, **overrides)
 
     if env_db := os.environ.get("ANCHOR_DB_PATH"):

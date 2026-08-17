@@ -4,7 +4,7 @@
 
 > Anchor는 AI가 사용한 웹 근거를 시간에 걸쳐 다시 검증할 수 있게 한다.
 
-사양·철학·판단 근거·라이선스 대장이 먼저 확정됐고, 그 위에 v0.1(fetch + 해시 + 변경 감지, CLI)이 구현된 상태다. 다음 단계는 SPEC.md §13 로드맵의 v0.2(앵커 생성·재검증)다.
+사양·철학·판단 근거·라이선스 대장이 먼저 확정됐고, 그 위에 v0.2(fetch + 변경 감지 + 앵커 재검증, CLI)까지 구현된 상태다. 다음 단계는 SPEC.md §13 로드맵의 v0.3(MCP 서버)이다.
 
 ```bash
 # 설치 (Python 3.11+)
@@ -13,6 +13,9 @@ uv venv --python 3.12 && uv pip install -e .
 # 사용
 anchor fetch https://www.rfc-editor.org/rfc/rfc7089.html   # created
 anchor fetch https://www.rfc-editor.org/rfc/rfc7089.html   # cache_hit — 네트워크 0바이트
+anchor cite  https://www.rfc-editor.org/rfc/rfc7089.html \
+  "The HTTP-based Memento framework bridges the present and past Web."
+anchor verify        # INTACT | MOVED | ALTERED | MISSING | GONE | UNREACHABLE | UNRESOLVED
 anchor list
 ```
 
@@ -91,7 +94,7 @@ Memento는 틀려서 죽은 게 아니라 **중앙 서비스로 지어졌기 때
 | 선행기술 조사 | 완료 (ADR-0001) |
 | 라이선스 감사 | 완료 — 런타임 15건 전수 확인, 카피레프트 0건 (ADR-0002) |
 | PyPI `anchor-mcp` | 사용 가능 (2026-08-16 확인) |
-| 구현 | **v0.1 완료** (2026-08-17) — fetch + 이중 해시 + 변경 감지, CLI. 다음은 v0.2 앵커 엔진 |
+| 구현 | **v0.2 완료** (2026-08-17) — fetch + 이중 해시 + 변경 감지 + 앵커 재검증(7상태), CLI. 다음은 v0.3 MCP 서버 |
 
 ### 알려진 미해결 항목
 

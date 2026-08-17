@@ -10,10 +10,15 @@ from pathlib import Path
 
 import zstandard
 
-from anchor.models import Document, Version, uuid7
+from anchor.models import AnchorRecord, Document, Version, uuid7
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 ZSTD_LEVEL = 6
+
+# 증분 마이그레이션: {목표 버전: SQL 파일}. 신규 DB는 schema.sql 전체를 쓴다.
+MIGRATION_FILES: dict[int, str] = {
+    2: "migrations/0002_anchors.sql",
+}
 
 
 @dataclass(frozen=True)
@@ -49,16 +54,32 @@ class Repository:
             with self._connection:
                 self._connection.executescript(_load_schema())
                 self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        elif current != SCHEMA_VERSION:
+            return
+        if current > SCHEMA_VERSION:
             raise RuntimeError(
-                f"지원하지 않는 스키마 버전 {current} (기대값 {SCHEMA_VERSION})"
+                f"DB 스키마 버전 {current}이 코드가 아는 버전 {SCHEMA_VERSION}보다 높습니다"
             )
+        for target in range(current + 1, SCHEMA_VERSION + 1):
+            sql = (
+                resources.files("anchor.store")
+                .joinpath(MIGRATION_FILES[target])
+                .read_text("utf-8")
+            )
+            with self._connection:
+                self._connection.executescript(sql)
+                self._connection.execute(f"PRAGMA user_version = {target}")
 
     # -- documents ---------------------------------------------------------
 
     def get_document_by_url(self, url: str) -> Document | None:
         row = self._connection.execute(
             "SELECT * FROM documents WHERE url = ?", (url,)
+        ).fetchone()
+        return self._to_document(row) if row else None
+
+    def get_document(self, document_id: str) -> Document | None:
+        row = self._connection.execute(
+            "SELECT * FROM documents WHERE id = ?", (document_id,)
         ).fetchone()
         return self._to_document(row) if row else None
 
@@ -209,6 +230,122 @@ class Repository:
                 (document_id, requested_at, outcome, http_status, bytes_down, elapsed_ms),
             )
 
+    # -- anchors -----------------------------------------------------------
+
+    def insert_anchor(
+        self,
+        *,
+        document_id: str,
+        created_version: str,
+        exact: str,
+        prefix: str,
+        suffix: str,
+        position_hint: int,
+        exact_hash: str,
+        quality: str,
+        note: str | None,
+        created_at: str,
+    ) -> AnchorRecord:
+        anchor_id = uuid7()
+        with self._connection:
+            self._connection.execute(
+                """INSERT INTO anchors
+                   (id, document_id, created_version, exact, prefix, suffix,
+                    position_hint, exact_hash, quality, note, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    anchor_id,
+                    document_id,
+                    created_version,
+                    exact,
+                    prefix,
+                    suffix,
+                    position_hint,
+                    exact_hash,
+                    quality,
+                    note,
+                    created_at,
+                ),
+            )
+        anchor = self.get_anchor(anchor_id)
+        assert anchor is not None
+        return anchor
+
+    def get_anchor(self, anchor_id: str) -> AnchorRecord | None:
+        row = self._connection.execute(
+            "SELECT * FROM anchors WHERE id = ?", (anchor_id,)
+        ).fetchone()
+        return self._to_anchor(row) if row else None
+
+    def select_anchors(
+        self,
+        *,
+        anchor_ids: list[str] | None = None,
+        document_ids: list[str] | None = None,
+        not_verified_since: str | None = None,
+    ) -> list[AnchorRecord]:
+        """검증 대상 앵커를 고른다. 조건이 모두 None이면 전체.
+
+        not_verified_since: 이 시각 이후의 검증 기록이 없는 앵커만
+        (한 번도 검증되지 않은 앵커 포함).
+        """
+        clauses: list[str] = []
+        params: list[object] = []
+        if anchor_ids:
+            clauses.append(f"a.id IN ({','.join('?' * len(anchor_ids))})")
+            params.extend(anchor_ids)
+        if document_ids:
+            clauses.append(f"a.document_id IN ({','.join('?' * len(document_ids))})")
+            params.extend(document_ids)
+        if not_verified_since is not None:
+            clauses.append(
+                """NOT EXISTS (
+                     SELECT 1 FROM verifications v
+                     WHERE v.anchor_id = a.id AND v.checked_at > ?
+                   )"""
+            )
+            params.append(not_verified_since)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._connection.execute(
+            f"SELECT a.* FROM anchors a {where} ORDER BY a.created_at", params
+        ).fetchall()
+        return [self._to_anchor(row) for row in rows]
+
+    # -- verifications -----------------------------------------------------
+
+    def insert_verification(
+        self,
+        *,
+        anchor_id: str,
+        checked_version: str | None,
+        checked_at: str,
+        state: str,
+        match_score: float | None,
+        edit_distance: int | None,
+        found_offset: int | None,
+        found_text: str | None,
+        elapsed_ms: int,
+    ) -> None:
+        with self._connection:
+            self._connection.execute(
+                """INSERT INTO verifications
+                   (id, anchor_id, checked_version, checked_at, state, match_score,
+                    edit_distance, found_offset, found_text, elapsed_ms)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    uuid7(),
+                    anchor_id,
+                    checked_version,
+                    checked_at,
+                    state,
+                    match_score,
+                    edit_distance,
+                    found_offset,
+                    found_text,
+                    elapsed_ms,
+                ),
+            )
+
     # -- robots_cache ------------------------------------------------------
 
     def get_robots(self, origin: str) -> RobotsEntry | None:
@@ -251,6 +388,22 @@ class Repository:
             etag=row["etag"],
             last_modified=row["last_modified"],
             robots_allowed=bool(row["robots_allowed"]),
+        )
+
+    @staticmethod
+    def _to_anchor(row: sqlite3.Row) -> AnchorRecord:
+        return AnchorRecord(
+            id=row["id"],
+            document_id=row["document_id"],
+            created_version=row["created_version"],
+            exact=row["exact"],
+            prefix=row["prefix"],
+            suffix=row["suffix"],
+            position_hint=row["position_hint"],
+            exact_hash=row["exact_hash"],
+            quality=row["quality"],
+            note=row["note"],
+            created_at=row["created_at"],
         )
 
     @staticmethod

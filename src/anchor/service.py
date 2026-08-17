@@ -12,13 +12,27 @@ from types import TracebackType
 
 import httpx
 
+from anchor.anchoring import matcher
+from anchor.anchoring.selector import QUALITY_SHORT, build_selector
 from anchor.config import Config, load_config
-from anchor.errors import FetchFailed, RobotsDisallowed
+from anchor.errors import AnchorError, DocumentNotFound, FetchFailed, RobotsDisallowed
 from anchor.fetcher.client import ConditionalFetcher, FetchResponse
 from anchor.fetcher.ratelimit import HostRateLimiter
 from anchor.fetcher.robots import RobotsGate
 from anchor.fetcher.urlnorm import normalize_url
-from anchor.models import Document, FetchResult, Network, Version, age_seconds, utcnow_iso
+from anchor.models import (
+    AnchorRecord,
+    AttentionItem,
+    CiteResult,
+    Document,
+    FetchResult,
+    Network,
+    VerifyReport,
+    Version,
+    age_seconds,
+    iso_ago,
+    utcnow_iso,
+)
 from anchor.normalize import extract
 from anchor.normalize.hashing import hash_bytes, hash_text
 from anchor.store.repository import Repository
@@ -142,11 +156,193 @@ class Anchor:
             f"HTTP {response.status}: {norm_url}", http_status=response.status
         )
 
+    def cite(self, document_ref: str, quote: str, note: str | None = None) -> CiteResult:
+        """인용문에 앵커를 부여한다 (SPEC §7.2). document_ref는 문서 id 또는 URL."""
+        document = self._resolve_document(document_ref)
+        latest = self._repository.latest_version(document.id)
+        if latest is None:
+            raise DocumentNotFound(f"문서에 저장된 버전이 없습니다: {document.url}")
+        text = self._repository.get_version_text(latest.id)
+
+        selector = build_selector(
+            text,
+            quote,
+            context_chars=self._config.context_chars,
+            min_quote_chars=self._config.min_quote_chars,
+            short_quote_chars=self._config.short_quote_chars,
+        )
+        now = utcnow_iso()
+        anchor = self._repository.insert_anchor(
+            document_id=document.id,
+            created_version=latest.id,
+            exact=selector.exact,
+            prefix=selector.prefix,
+            suffix=selector.suffix,
+            position_hint=selector.position_hint,
+            exact_hash=hash_text(selector.exact),
+            quality=selector.quality,
+            note=note,
+            created_at=now,
+        )
+        warnings: tuple[str, ...] = ()
+        if selector.quality == QUALITY_SHORT:
+            warnings = (
+                f"인용문이 {self._config.short_quote_chars}자 미만 — 재검증 정확도가 낮을 수 "
+                "있고 시간 예산이 절반으로 적용됩니다. 완결된 문장 하나를 권장합니다.",
+            )
+        return CiteResult(
+            anchor_id=anchor.id,
+            document_id=document.id,
+            version_id=latest.id,
+            offset=selector.position_hint,
+            quality=selector.quality,
+            warnings=warnings,
+            created_at=now,
+        )
+
+    def verify(
+        self,
+        *,
+        anchor_ids: list[str] | None = None,
+        document_ids: list[str] | None = None,
+        older_than_seconds: float | None = None,
+        time_budget_ms: float | None = None,
+    ) -> VerifyReport:
+        """앵커들을 현재 원문 대비 재검증한다 (SPEC §7.3). 조건이 없으면 전체."""
+        cutoff = iso_ago(older_than_seconds) if older_than_seconds is not None else None
+        anchors = self._repository.select_anchors(
+            anchor_ids=anchor_ids, document_ids=document_ids, not_verified_since=cutoff
+        )
+
+        summary = {state: 0 for state in matcher.ALL_STATES}
+        attention: list[AttentionItem] = []
+        requests = 0
+        bytes_down = 0
+
+        by_document: dict[str, list[AnchorRecord]] = {}
+        for anchor in anchors:
+            by_document.setdefault(anchor.document_id, []).append(anchor)
+
+        for document_id, document_anchors in by_document.items():
+            document = self._repository.get_document(document_id)
+            assert document is not None, "앵커는 문서 없이 존재할 수 없다 (FK)"
+
+            failure_state: str | None = None
+            try:
+                fetch_result = self.fetch(document.url, max_age=0, include_content=False)
+                requests += 1
+                bytes_down += fetch_result.network.bytes_down
+            except FetchFailed as error:
+                requests += 1
+                failure_state = (
+                    matcher.GONE if error.http_status in (404, 410) else matcher.UNREACHABLE
+                )
+            except AnchorError:
+                # robots 거부, 추출 실패 등 — 확인 불가이지 인용 무효가 아니다.
+                requests += 1
+                failure_state = matcher.UNREACHABLE
+
+            if failure_state is not None:
+                for anchor in document_anchors:
+                    self._repository.insert_verification(
+                        anchor_id=anchor.id,
+                        checked_version=None,
+                        checked_at=utcnow_iso(),
+                        state=failure_state,
+                        match_score=None,
+                        edit_distance=None,
+                        found_offset=None,
+                        found_text=None,
+                        elapsed_ms=0,
+                    )
+                    summary[failure_state] += 1
+                    if failure_state == matcher.GONE:
+                        attention.append(
+                            AttentionItem(
+                                anchor_id=anchor.id,
+                                url=document.url,
+                                state=failure_state,
+                                before=anchor.exact,
+                                after=None,
+                                match_score=None,
+                                edit_distance=None,
+                            )
+                        )
+                continue
+
+            latest = self._repository.latest_version(document_id)
+            assert latest is not None
+            text = self._repository.get_version_text(latest.id)
+
+            for anchor in document_anchors:
+                budget_ms = (
+                    time_budget_ms if time_budget_ms is not None else self._config.time_budget_ms
+                )
+                if anchor.quality == QUALITY_SHORT:
+                    budget_ms = budget_ms / 2
+                match_started = time.monotonic()
+                result = matcher.match_anchor(
+                    text,
+                    exact=anchor.exact,
+                    prefix=anchor.prefix,
+                    suffix=anchor.suffix,
+                    position_hint=anchor.position_hint,
+                    budget_ms=budget_ms,
+                    max_edit_ratio=self._config.max_edit_ratio,
+                    max_edit_distance=self._config.max_edit_distance,
+                    hint_radius=self._config.hint_radius,
+                    max_chars=self._config.max_match_chars,
+                )
+                elapsed_ms = int((time.monotonic() - match_started) * 1000)
+                self._repository.insert_verification(
+                    anchor_id=anchor.id,
+                    checked_version=latest.id,
+                    checked_at=utcnow_iso(),
+                    state=result.state,
+                    match_score=result.score,
+                    edit_distance=result.edit_distance,
+                    found_offset=result.found_offset,
+                    found_text=result.found_text,
+                    elapsed_ms=elapsed_ms,
+                )
+                summary[result.state] += 1
+                if result.state in (matcher.ALTERED, matcher.MISSING, matcher.UNRESOLVED):
+                    attention.append(
+                        AttentionItem(
+                            anchor_id=anchor.id,
+                            url=document.url,
+                            state=result.state,
+                            before=anchor.exact,
+                            after=result.found_text if result.state == matcher.ALTERED else None,
+                            match_score=result.score,
+                            edit_distance=result.edit_distance,
+                        )
+                    )
+
+        return VerifyReport(
+            checked=len(anchors),
+            summary=summary,
+            attention=tuple(attention),
+            requests=requests,
+            bytes_down=bytes_down,
+        )
+
     def list_documents(self) -> list[Document]:
         return self._repository.list_documents()
 
     def get_version_text(self, version_id: str) -> str:
         return self._repository.get_version_text(version_id)
+
+    def _resolve_document(self, document_ref: str) -> Document:
+        if document_ref.startswith(("http://", "https://")):
+            document = self._repository.get_document_by_url(normalize_url(document_ref))
+        else:
+            document = self._repository.get_document(document_ref)
+        if document is None:
+            raise DocumentNotFound(
+                f"문서를 찾을 수 없습니다: {document_ref} — 먼저 fetch 하세요"
+            )
+        return document
 
     # -- internals ---------------------------------------------------------
 
