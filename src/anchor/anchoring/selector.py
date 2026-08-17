@@ -45,12 +45,12 @@ def build_selector(
     exact = normalize_text(quote)
     if len(exact) < min_quote_chars:
         raise QuoteTooShort(
-            f"인용문이 {len(exact)}자 — 최소 {min_quote_chars}자 필요. 완결된 문장 하나를 권장"
+            f"Quote is {len(exact)} chars; at least {min_quote_chars} required, one complete sentence recommended — 인용문이 {len(exact)}자 (최소 {min_quote_chars}자 필요)"
         )
 
     offset = text.find(exact)
     if offset == -1:
-        raise QuoteNotFound("인용문이 원문에 없습니다. 존재하지 않는 인용은 기록하지 않습니다")
+        raise QuoteNotFound("Quote not found in the source text; nonexistent citations are never recorded — 인용문이 원문에 없어 기록하지 않습니다")
 
     return Selector(
         exact=exact,

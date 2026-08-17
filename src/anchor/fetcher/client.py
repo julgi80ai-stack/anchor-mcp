@@ -85,7 +85,7 @@ class ConditionalFetcher:
                     declared = response.headers.get("Content-Length")
                     if declared and declared.isdigit() and int(declared) > self._max_content_bytes:
                         raise ContentTooLarge(
-                            f"Content-Length {declared}가 상한 {self._max_content_bytes}를 초과"
+                            f"Content-Length {declared} exceeds the {self._max_content_bytes}-byte limit — 본문 크기 상한 초과"
                         )
                     chunks: list[bytes] = []
                     total = 0
@@ -93,7 +93,7 @@ class ConditionalFetcher:
                         total += len(chunk)
                         if total > self._max_content_bytes:
                             raise ContentTooLarge(
-                                f"본문이 상한 {self._max_content_bytes}바이트를 초과"
+                                f"Body exceeds the {self._max_content_bytes}-byte limit — 본문 크기 상한 초과"
                             )
                         chunks.append(chunk)
                     content = b"".join(chunks)
@@ -113,8 +113,8 @@ class ConditionalFetcher:
                     elapsed_ms=0,
                 )
         except httpx.TimeoutException as error:
-            raise FetchFailed(f"타임아웃: {url}") from error
+            raise FetchFailed(f"Timeout — 타임아웃: {url}") from error
         except httpx.TooManyRedirects as error:
-            raise FetchFailed(f"리다이렉트 한도 초과: {url}") from error
+            raise FetchFailed(f"Too many redirects — 리다이렉트 한도 초과: {url}") from error
         except httpx.HTTPError as error:
-            raise FetchFailed(f"네트워크 오류: {url} ({error})") from error
+            raise FetchFailed(f"Network error — 네트워크 오류: {url} ({error})") from error

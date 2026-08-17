@@ -59,7 +59,7 @@ def parse_iso_duration(value: str) -> float:
         )
     match = _DURATION_RE.match(value.strip().upper())
     if not match or not any(match.groupdict().values()):
-        raise ValueError(f"ISO 8601 기간 형식이 아닙니다: {value!r} (예: P7D, PT12H)")
+        raise ValueError(f"Not an ISO 8601 duration: {value!r} (e.g. P7D, PT12H) — ISO 8601 기간 형식이 아닙니다")
     parts = {key: float(group or 0) for key, group in match.groupdict().items()}
     return (
         parts["weeks"] * 604800

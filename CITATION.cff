@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use this software in your research, please cite it as below. — 연구에서 이 소프트웨어를 사용했다면 아래와 같이 인용해 주세요."
+title: "Anchor"
+type: software
+authors:
+  - family-names: "Kang"
+    given-names: "Julgi"
+license: Apache-2.0
+repository-code: "https://github.com/julgi80ai-stack/anchor-mcp"
+version: 1.0.3
+date-released: "2026-08-17"
+abstract: >-
+  A temporal and provenance integrity layer for the web evidence AI relies on:
+  a local-first fetch cache with citation anchoring and re-verification,
+  implemented as a local client of Memento (RFC 7089).
+keywords:
+  - reference rot
+  - citation drift
+  - memento
+  - rfc7089
+  - web archiving
+  - provenance
+  - model context protocol

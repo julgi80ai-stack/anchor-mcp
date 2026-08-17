@@ -140,7 +140,7 @@ class AnchorTasksExtension(Extension):
     def _entry(self, task_id: str) -> _TaskEntry:
         entry = self._entries.get(task_id)
         if entry is None:
-            raise MCPError(_TASK_NOT_FOUND, f"task 없음: {task_id}")
+            raise MCPError(_TASK_NOT_FOUND, f"task not found — task 없음: {task_id}")
         return entry
 
     async def _on_get(self, ctx, params: GetTaskRequestParams) -> GetTaskResult:
@@ -152,7 +152,7 @@ class AnchorTasksExtension(Extension):
         if entry.result is None:
             raise MCPError(
                 _INVALID_PARAMS,
-                f"task가 아직 종료되지 않았습니다 (status={entry.task.status})",
+                f"task has not finished yet — task가 아직 종료되지 않았습니다 (status={entry.task.status})",
             )
         return entry.result
 
@@ -163,7 +163,7 @@ class AnchorTasksExtension(Extension):
             entry.task = entry.task.model_copy(
                 update={
                     "status": "cancelled",
-                    "status_message": "클라이언트 요청으로 취소됨",
+                    "status_message": "cancelled by client request — 클라이언트 요청으로 취소됨",
                     "last_updated_at": utcnow_iso(),
                 }
             )

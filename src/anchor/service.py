@@ -128,7 +128,7 @@ class Anchor:
             if document:
                 self._repository.set_robots_allowed(document.id, False)
                 self._log(document.id, "error", None, verdict.bytes_down, started)
-            raise RobotsDisallowed(f"robots.txt가 페치를 거부: {norm_url}")
+            raise RobotsDisallowed(f"Fetch disallowed by robots.txt — robots.txt가 페치를 거부: {norm_url}")
 
         self._ratelimit.acquire(httpx.URL(norm_url).host or "")
         response = self._fetcher.get(
@@ -142,7 +142,7 @@ class Anchor:
             assert document is not None, "304는 저장된 검증자가 있어야만 온다"
             latest = self._repository.latest_version(document.id)
             if latest is None:
-                raise FetchFailed("304를 받았으나 저장된 버전이 없습니다", http_status=304)
+                raise FetchFailed("Got 304 but no stored version exists — 304를 받았으나 저장된 버전이 없습니다", http_status=304)
             self._repository.update_document_checked(
                 document.id,
                 now=utcnow_iso(),
@@ -193,7 +193,7 @@ class Anchor:
         document = self._resolve_document(document_ref)
         latest = self._repository.latest_version(document.id)
         if latest is None:
-            raise DocumentNotFound(f"문서에 저장된 버전이 없습니다: {document.url}")
+            raise DocumentNotFound(f"Document has no stored version — 저장된 버전이 없습니다: {document.url}")
         text = self._repository.get_version_text(latest.id)
 
         selector = build_selector(
@@ -219,8 +219,9 @@ class Anchor:
         warnings: tuple[str, ...] = ()
         if selector.quality == QUALITY_SHORT:
             warnings = (
-                f"인용문이 {self._config.short_quote_chars}자 미만 — 재검증 정확도가 낮을 수 "
-                "있고 시간 예산이 절반으로 적용됩니다. 완결된 문장 하나를 권장합니다.",
+                f"Quote is under {self._config.short_quote_chars} chars: re-verification accuracy "
+                "drops and the time budget is halved; one complete sentence is recommended "
+                "— 인용문이 짧아 재검증 정확도가 낮을 수 있고 시간 예산이 절반으로 적용됩니다.",
             )
         return CiteResult(
             anchor_id=anchor.id,
@@ -398,10 +399,10 @@ class Anchor:
         if version_id is not None:
             version = self._repository.get_version(version_id)
             if version is None:
-                raise DocumentNotFound(f"버전을 찾을 수 없습니다: {version_id}")
+                raise DocumentNotFound(f"Version not found — 버전을 찾을 수 없습니다: {version_id}")
         else:
             if document_id is None:
-                raise DocumentNotFound("version_id 또는 document_id를 지정해야 합니다")
+                raise DocumentNotFound("Provide version_id or document_id — version_id 또는 document_id를 지정해야 합니다")
             version = self._resolve_version_ref(document_id, ref)
         return version, self._repository.get_version_text(version.id)
 
@@ -467,7 +468,7 @@ class Anchor:
                 "content_type": "application/json",
                 "body": timemap.to_json_format(document, versions),
             }
-        raise ValueError(f"지원하지 않는 형식: {fmt} (link | json)")
+        raise ValueError(f"Unsupported format — 지원하지 않는 형식: {fmt} (link | json)")
 
     def export_robust_links(
         self, anchor_ids: list[str] | None = None, *, fmt: str = "html"
@@ -475,7 +476,7 @@ class Anchor:
         """Robust Links 내보내기 (SPEC §7.9). anchor_ids가 None이면 전체 앵커."""
         serializer = robustlinks.SERIALIZERS.get(fmt)
         if serializer is None:
-            raise ValueError(f"지원하지 않는 형식: {fmt} (html | markdown | bibtex_note)")
+            raise ValueError(f"Unsupported format — 지원하지 않는 형식: {fmt} (html | markdown | bibtex_note)")
         if anchor_ids is None:
             anchors = self._repository.select_anchors()
         else:
@@ -483,7 +484,7 @@ class Anchor:
             for anchor_id in anchor_ids:
                 anchor = self._repository.get_anchor(anchor_id)
                 if anchor is None:
-                    raise DocumentNotFound(f"앵커를 찾을 수 없습니다: {anchor_id}")
+                    raise DocumentNotFound(f"Anchor not found — 앵커를 찾을 수 없습니다: {anchor_id}")
                 anchors.append(anchor)
         items: list[dict] = []
         for anchor in anchors:
@@ -507,12 +508,12 @@ class Anchor:
             versions = self._repository.list_versions(document_id)
             if not versions or back >= len(versions):
                 raise DocumentNotFound(
-                    f"버전 참조 {ref!r}를 해석할 수 없습니다 (보유 버전 {len(versions)}개)"
+                    f"Cannot resolve version ref {ref!r} ({len(versions)} versions stored) — 버전 참조 해석 불가"
                 )
             return versions[-1 - back]
         version = self._repository.get_version(ref)
         if version is None or version.document_id != document_id:
-            raise DocumentNotFound(f"버전을 찾을 수 없습니다: {ref}")
+            raise DocumentNotFound(f"Version not found — 버전을 찾을 수 없습니다: {ref}")
         return version
 
     def _has_pending_verification(self, document: Document) -> bool:
@@ -533,7 +534,7 @@ class Anchor:
             document = self._repository.get_document(document_ref)
         if document is None:
             raise DocumentNotFound(
-                f"문서를 찾을 수 없습니다: {document_ref} — 먼저 fetch 하세요"
+                f"Document not found; fetch it first — 문서를 찾을 수 없습니다 (먼저 fetch 필요): {document_ref}"
             )
         return document
 

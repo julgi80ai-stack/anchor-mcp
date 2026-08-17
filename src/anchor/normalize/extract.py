@@ -61,7 +61,7 @@ def to_normalized(raw: bytes, content_type: str) -> NormalizedDoc:
         return _from_pdf(raw)
 
     if media_type and not media_type.startswith(_HTML_TYPES):
-        raise UnsupportedContent(f"처리하지 않는 콘텐츠 유형: {media_type}")
+        raise UnsupportedContent(f"Unsupported content type — 처리하지 않는 콘텐츠 유형: {media_type}")
 
     html = decode_bytes(raw)
     extracted = trafilatura.extract(html, output_format="markdown")
@@ -70,7 +70,7 @@ def to_normalized(raw: bytes, content_type: str) -> NormalizedDoc:
         extracted = _readability_fallback(html)
         pipeline_version = READABILITY_PIPELINE_VERSION
     if not extracted:
-        raise ExtractionFailed("본문 추출 실패 — trafilatura와 readability 모두 본문을 찾지 못했습니다")
+        raise ExtractionFailed("Extraction failed: neither trafilatura nor readability found body text — 본문 추출 실패 (두 추출기 모두 본문을 찾지 못함)")
 
     title: str | None = None
     try:
@@ -105,12 +105,12 @@ def _from_pdf(raw: bytes) -> NormalizedDoc:
         reader = pypdf.PdfReader(io.BytesIO(raw))
         pages = [page.extract_text() or "" for page in reader.pages]
     except Exception as error:
-        raise ExtractionFailed(f"PDF 파싱 실패: {error}") from error
+        raise ExtractionFailed(f"PDF parsing failed — PDF 파싱 실패: {error}") from error
 
     text = normalize_text("\n\n".join(pages))
     if not text:
         # 텍스트 레이어가 없는 스캔 PDF. OCR은 범위 밖이다 (SPEC §5.3).
-        raise UnsupportedContent("텍스트 레이어가 없는 PDF (스캔본 추정) — OCR은 범위 밖")
+        raise UnsupportedContent("PDF has no text layer (likely scanned); OCR is out of scope — 텍스트 레이어가 없는 PDF (스캔본 추정), OCR은 범위 밖")
 
     title: str | None = None
     try:

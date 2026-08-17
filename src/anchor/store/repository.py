@@ -232,7 +232,7 @@ class Repository:
             "SELECT content_blob FROM versions WHERE id = ?", (version_id,)
         ).fetchone()
         if row is None:
-            raise KeyError(f"버전 없음: {version_id}")
+            raise KeyError(f"version not found — 버전 없음: {version_id}")
         return self._decompressor.decompress(row["content_blob"]).decode("utf-8")
 
     # -- fetch_log ---------------------------------------------------------
