@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+# 라이선스 게이트 (SPEC §12.2, THIRD-PARTY.md §5). 사람의 기억으로 막을 수
+# 없는 것을 CI가 막는다 — 카피레프트 유입, trafilatura 하한.
+name: license-audit
+on: [push, pull_request]
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install . pip-licenses packaging
+      - name: 카피레프트 의존성 차단
+        run: |
+          pip-licenses --format=csv --with-urls > licenses.csv
+          cat licenses.csv
+          # GPL/AGPL/LGPL이 트랜지티브로라도 유입되면 빌드 실패
+          if grep -Ei 'GNU General Public|Affero|LGPL|GPLv[23]' licenses.csv; then
+            echo "::error::카피레프트 라이선스가 감지되었습니다. THIRD-PARTY.md를 확인하세요."
+            exit 1
+          fi
+      - name: trafilatura 하한 및 대장 재현 감사
+        run: python tools/audit_licenses.py --fail-on-copyleft --check-floors

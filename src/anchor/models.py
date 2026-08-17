@@ -8,6 +8,14 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from enum import StrEnum
+
+
+class Quality(StrEnum):
+    """앵커 품질 (SPEC §6.1). SHORT는 32자 미만 — 시간 예산 절반 적용."""
+
+    OK = "ok"
+    SHORT = "short"
 
 
 def uuid7() -> str:
@@ -120,7 +128,7 @@ class CiteResult:
     document_id: str
     version_id: str
     offset: int
-    quality: str
+    quality: Quality
     warnings: tuple[str, ...]
     created_at: str
 
@@ -143,6 +151,7 @@ class VerifyReport:
     checked: int
     summary: dict[str, int]
     attention: tuple[AttentionItem, ...]
+    anchor_ids: tuple[str, ...]  # 이번에 검증한 앵커들 (SPEC §8 예시의 재내보내기용)
     requests: int
     bytes_down: int
 
@@ -168,3 +177,8 @@ class FetchResult:
     source: str
     network: Network
     content: str | None = field(default=None, repr=False)
+
+    @property
+    def id(self) -> str:
+        """SPEC §8 예시(`doc.id`) 호환 — document_id의 별칭."""
+        return self.document_id

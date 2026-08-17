@@ -6,7 +6,7 @@
 |---|---|
 | 프로젝트 | Anchor (`anchor-mcp`) |
 | 배포 라이선스 | **Apache-2.0** |
-| 최종 확인일 | **2026-08-16** |
+| 최종 확인일 | **2026-08-17** |
 | 확인 방법 | PyPI JSON API, npm 레지스트리, 각 저장소 `LICENSE` 원문 (§5 스크립트로 재현 가능) |
 | 미확인 항목 | **없음** |
 
@@ -39,12 +39,26 @@
 | `charset-normalizer` | 3.5.1 | **MIT** | `license` 필드 | ✅ |
 | `pypdf` | 6.16.1 | **BSD-3-Clause** | `license-expression` | ✅ |
 | `httpx` | 0.28.1 | **BSD-3-Clause** | `license` 필드 + classifier | ✅ |
-| `pydantic` | 2.13.4 | **MIT** | `license-expression` | ✅ |
-| `pydantic-settings` | 2.15.0 | **MIT** | `license-expression` + classifier | ✅ |
+| `pydantic` | 2.13.4 | **MIT** | `license-expression` | ✅ (`mcp` 트랜지티브 — 직접 사용 없음) |
 | `typer` | 0.27.1 | **MIT** | `license-expression` | ✅ |
 | `mcp` (Python SDK) | 2.0.0 | **MIT** | `license` 필드 + classifier | ✅ |
+| `beautifulsoup4` | 4.15.0 | **MIT** | `license` 필드 | ✅ (`markdownify` 트랜지티브) |
+| `soupsieve` | 2.9.2 | **MIT** | `license-expression` | ✅ (`beautifulsoup4` 트랜지티브) |
 
-라이선스 종류별 집계: MIT 6, BSD-3-Clause 5, Apache-2.0 3, 복합 2.
+라이선스 종류별 집계: MIT 7, BSD-3-Clause 5, Apache-2.0 2, 복합 2 (총 16).
+
+> v1.0 변경: `pydantic-settings` 제거 — 설정 로딩은 표준 라이브러리(tomllib)로 구현되어 실제로 설치되지 않는다. `pydantic`은 `mcp` SDK의 트랜지티브 의존성으로만 배포물에 포함된다.
+
+### 2.1 개발 의존성 (배포물 미포함)
+
+테스트·감사 전용이며 배포 아티팩트에 포함되지 않으므로 Apache-2.0 배포와 무관하다. MPL-2.0은 파일 단위 카피레프트로, ADR-0002 원칙 B의 허용 목록에 있으며 배포물에 안 들어가므로 이중으로 문제없다.
+
+| 패키지 | 확인 버전 | 라이선스 |
+|---|---|---|
+| `pytest` | 9.1.1 | MIT |
+| `packaging` | 26.3 | Apache-2.0 OR BSD-2-Clause |
+| `hypothesis` | 6.165.10 | **MPL-2.0** (dev 전용) |
+| `pytest-cov` | 7.1.0 | MIT |
 
 ---
 
@@ -194,4 +208,5 @@ python3 tools/audit_licenses.py --fail-on-copyleft --check-floors # CI 게이트
 
 | 날짜 | 변경 |
 |---|---|
+| 2026-08-17 | v1.0: `pydantic-settings` 제거(미설치 — 설정은 stdlib), `pydantic`을 mcp 트랜지티브로 재분류, `beautifulsoup4`·`soupsieve` 추가(markdownify 트랜지티브), 개발 의존성 절(§2.1) 신설 (hypothesis MPL-2.0 dev 전용 포함). 런타임 16건, 미확인 0건 |
 | 2026-08-16 | 최초 작성. 런타임 의존성 15건, 참조 대상 10건, 명세 5건 확인 완료. 미확인 0건 |

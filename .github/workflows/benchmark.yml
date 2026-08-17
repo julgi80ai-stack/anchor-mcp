@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: Apache-2.0
+# 앵커 벤치마크 게이트 (SPEC §12). C등급 데이터(공개 주석)를 런타임에
+# 수집하므로 네트워크가 필요하다 — 선택 실행이되, 실행되면 게이트다
+# (ADR-0002 결과 절). 로컬 마이크로 벤치마크(§10 지표)는 네트워크 없이 돈다.
+name: benchmark
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1"  # 매주 월요일 03:00 UTC
+
+jobs:
+  micro:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - name: 캐시 히트 지연 / 매처 최악 사례 (SPEC §10)
+        run: python benchmarks/run_micro.py
+
+  anchoring:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - name: Hypothesis 공개 주석 기반 앵커링 벤치마크 (네트워크 필요)
+        run: python benchmarks/anchoring/run_benchmark.py --max-documents 8 --pages 3

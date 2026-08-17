@@ -39,10 +39,11 @@ RUNTIME_PACKAGES: tuple[str, ...] = (
     "blake3",
     "zstandard",
     "pypdf",
-    "pydantic",
-    "pydantic-settings",
+    "pydantic",  # mcp 트랜지티브 — 직접 사용 없음
     "typer",
     "mcp",
+    "beautifulsoup4",  # markdownify 트랜지티브
+    "soupsieve",  # beautifulsoup4 트랜지티브
 )
 
 # 라이선스 변경 이력이 있어 버전 하한이 필요한 패키지.

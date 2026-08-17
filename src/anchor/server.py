@@ -37,7 +37,7 @@ from mcp_types import (
 
 from anchor import __version__
 from anchor.config import Config, load_config
-from anchor.models import parse_iso_duration, utcnow_iso, uuid7
+from anchor.models import utcnow_iso, uuid7
 from anchor.service import Anchor
 
 _INVALID_PARAMS = -32602
@@ -186,12 +186,11 @@ def build_server(
     lock = threading.Lock()
 
     def _verify_payload(arguments: dict[str, Any]) -> dict[str, Any]:
-        older_than = arguments.get("older_than")
         with lock:
             report = service.verify(
                 anchor_ids=arguments.get("anchor_ids"),
                 document_ids=arguments.get("document_ids"),
-                older_than_seconds=parse_iso_duration(older_than) if older_than else None,
+                older_than=arguments.get("older_than"),
                 time_budget_ms=arguments.get("time_budget_ms"),
             )
         payload = asdict(report)

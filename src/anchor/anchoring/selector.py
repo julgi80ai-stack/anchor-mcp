@@ -11,10 +11,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from anchor.errors import QuoteNotFound, QuoteTooShort
+from anchor.models import Quality
 from anchor.normalize.text import normalize_text
 
-QUALITY_OK = "ok"
-QUALITY_SHORT = "short"
+QUALITY_OK = Quality.OK
+QUALITY_SHORT = Quality.SHORT
 
 
 @dataclass(frozen=True)
@@ -29,7 +30,7 @@ class Selector:
     prefix: str
     suffix: str
     position_hint: int
-    quality: str  # QUALITY_OK | QUALITY_SHORT
+    quality: Quality
 
 
 def build_selector(
@@ -56,5 +57,5 @@ def build_selector(
         prefix=text[max(0, offset - context_chars) : offset],
         suffix=text[offset + len(exact) : offset + len(exact) + context_chars],
         position_hint=offset,
-        quality=QUALITY_SHORT if len(exact) < short_quote_chars else QUALITY_OK,
+        quality=Quality.SHORT if len(exact) < short_quote_chars else Quality.OK,
     )

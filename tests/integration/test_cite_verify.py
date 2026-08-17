@@ -114,5 +114,5 @@ def test_older_than_skips_recently_verified(fixture_server, anchor):
     first = anchor.verify()
     assert first.checked == 1
     # 방금 검증했으므로 24시간 조건에서는 대상이 없어야 한다.
-    second = anchor.verify(older_than_seconds=86400)
+    second = anchor.verify(older_than="P1D")  # ISO 8601 기간 (SPEC §7.3/§8)
     assert second.checked == 0

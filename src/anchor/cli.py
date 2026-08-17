@@ -127,7 +127,7 @@ def verify(
         with Anchor(db_path=db) as anchor:
             report = anchor.verify(
                 anchor_ids=anchor_ids or None,
-                older_than_seconds=_parse_older_than(older_than) if older_than else None,
+                older_than=_parse_older_than(older_than) if older_than else None,
                 time_budget_ms=budget_ms,
             )
     except AnchorError as error:
@@ -248,8 +248,8 @@ def serve(
         None, "--transport", help="stdio | http (기본: 설정 파일, 없으면 stdio)"
     ),
     db: Optional[Path] = typer.Option(None, "--db", help="SQLite 경로"),
-) -> None:
-    """MCP 서버를 시작한다 (도구 9종). Claude Desktop 연동은 `anchor-mcp` 참조."""
+) -> None:  # pragma: no cover — 이벤트 루프를 점유하는 장기 실행 진입점
+    """MCP 서버를 시작한다 (도구 9종). MCP 클라이언트 등록은 `anchor-mcp` 참조."""
     from anchor.config import load_config
     from anchor.server import build_server
 

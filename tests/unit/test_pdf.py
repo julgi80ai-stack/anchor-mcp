@@ -12,7 +12,7 @@ from anchor.errors import UnsupportedContent
 from anchor.normalize.extract import PDF_PIPELINE_VERSION, to_normalized
 
 
-def build_text_pdf(text: str) -> bytes:
+def build_text_pdf(text: str, *, title: str | None = None) -> bytes:
     """텍스트 한 줄이 든 최소 PDF를 바이트 오프셋까지 계산해 조립한다."""
     stream = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET".encode("latin-1")
     objects = [
@@ -23,6 +23,8 @@ def build_text_pdf(text: str) -> bytes:
         b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream",
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     ]
+    if title is not None:
+        objects.append(f"<< /Title ({title}) >>".encode("latin-1"))
     out = io.BytesIO()
     out.write(b"%PDF-1.4\n")
     offsets = []
@@ -34,8 +36,9 @@ def build_text_pdf(text: str) -> bytes:
     out.write(b"0000000000 65535 f \n")
     for offset in offsets:
         out.write(f"{offset:010d} 00000 n \n".encode())
+    info = f" /Info {len(objects)} 0 R" if title is not None else ""
     out.write(
-        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R{info} >>\n"
         f"startxref\n{xref_at}\n%%EOF\n".encode()
     )
     return out.getvalue()
@@ -61,6 +64,12 @@ def test_pdf_text_extraction():
 def test_scanned_pdf_is_unsupported():
     with pytest.raises(UnsupportedContent):
         to_normalized(build_blank_pdf(), "application/pdf")
+
+
+def test_pdf_metadata_title_extracted():
+    raw = build_text_pdf("Body text for the titled PDF.", title="Fixture Title")
+    doc = to_normalized(raw, "application/pdf")
+    assert doc.title == "Fixture Title"
 
 
 def test_pdf_content_type_with_parameters():

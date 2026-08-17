@@ -138,8 +138,8 @@ def test_altered_found_even_when_context_also_changed():
     assert result.state == ALTERED
 
 
-def test_unresolved_when_budget_exhausted():
-    quote = QUOTES[3]
+@pytest.mark.parametrize("quote", QUOTES)
+def test_unresolved_when_budget_exhausted(quote):
     removed = BASE_TEXT.replace(quote, "")
     result = run_match(removed, quote, budget_ms=0)
     assert result.state == UNRESOLVED

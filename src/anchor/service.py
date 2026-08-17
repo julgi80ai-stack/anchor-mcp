@@ -32,6 +32,7 @@ from anchor.models import (
     Version,
     age_seconds,
     iso_ago,
+    parse_iso_duration,
     utcnow_iso,
 )
 from anchor.export import diff as export_diff
@@ -236,11 +237,17 @@ class Anchor:
         *,
         anchor_ids: list[str] | None = None,
         document_ids: list[str] | None = None,
-        older_than_seconds: float | None = None,
+        older_than: str | float | None = None,
         time_budget_ms: float | None = None,
     ) -> VerifyReport:
-        """앵커들을 현재 원문 대비 재검증한다 (SPEC §7.3). 조건이 없으면 전체."""
-        cutoff = iso_ago(older_than_seconds) if older_than_seconds is not None else None
+        """앵커들을 현재 원문 대비 재검증한다 (SPEC §7.3). 조건이 없으면 전체.
+
+        older_than: ISO 8601 기간 문자열("P7D") 또는 초. 그 안에 검증된
+        앵커는 건너뛴다.
+        """
+        if isinstance(older_than, str):
+            older_than = parse_iso_duration(older_than)
+        cutoff = iso_ago(older_than) if older_than is not None else None
         anchors = self._repository.select_anchors(
             anchor_ids=anchor_ids, document_ids=document_ids, not_verified_since=cutoff
         )
@@ -354,6 +361,7 @@ class Anchor:
             checked=len(anchors),
             summary=summary,
             attention=tuple(attention),
+            anchor_ids=tuple(anchor.id for anchor in anchors),
             requests=requests,
             bytes_down=bytes_down,
         )

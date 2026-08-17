@@ -19,8 +19,8 @@ Apache License 2.0 components:
 
 BSD and MIT licensed components:
   - lxml, protego, zstandard, pypdf, httpx (BSD-3-Clause)
-  - markdownify, charset-normalizer, pydantic, pydantic-settings, typer,
-    mcp Python SDK (MIT)
+  - markdownify, charset-normalizer, pydantic, typer, mcp Python SDK,
+    beautifulsoup4, soupsieve (MIT)
 
 Dual-licensed components:
   - blake3, offered under "CC0-1.0 OR Apache-2.0".

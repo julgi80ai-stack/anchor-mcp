@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "anchor-mcp"
-version = "0.5.0"
+version = "1.0.0"
 description = "AI가 사용한 웹 근거의 시간적·출처적 무결성 계층 — Memento(RFC 7089)의 로컬 클라이언트"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -14,6 +14,9 @@ dependencies = [
     # 라이선스 하한은 1.8.0 — 미만은 GPLv3+이며 Apache-2.0 배포와 충돌한다. 낮추지 말 것.
     # 기능 하한은 1.9.0 — markdown 출력(output_format="markdown")이 이 버전에서 추가됐다.
     "trafilatura>=1.9.0",
+    "readability-lxml",  # 본문 추출 폴백 (SPEC §5.3)
+    "lxml",
+    "markdownify",  # readability 폴백 경로의 마크다운 변환
     "httpx",
     "protego",
     "charset-normalizer",
@@ -30,6 +33,9 @@ dependencies = [
 dev = [
     "pytest",
     "packaging",
+    # 속성 테스트 (SPEC §12). MPL-2.0 — dev 전용, 배포물 미포함 (THIRD-PARTY §2.1)
+    "hypothesis",
+    "pytest-cov",
 ]
 
 [project.scripts]

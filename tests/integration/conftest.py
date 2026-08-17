@@ -46,6 +46,7 @@ class FixtureState:
         # 아카이브 에뮬레이션: 설정 시 CDX·MemGator API·/web/ 재생이 살아난다.
         self.archive_html: str | None = None
         self.archive_timestamp: str = "20260801123456"
+        self.response_delay: float = 0.0  # 문서 응답 지연(초) — 타임아웃 테스트용
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -66,6 +67,11 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path.startswith(("/cdx/search/cdx", "/web/", "/api/json/")):
             self._serve_archive(state)
             return
+
+        if state.response_delay:
+            import time as _time
+
+            _time.sleep(state.response_delay)
 
         if state.status_override is not None:
             self.send_response(state.status_override)
