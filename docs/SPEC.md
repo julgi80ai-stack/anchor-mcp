@@ -1,4 +1,4 @@
-# Anchor — 출처 추적형 페치 캐시
+# Anchor — 출처 추적형 페치 캐시 (KR)
 
 **기술사양서 v1.5 (완성 시점 기준)**
 
@@ -331,7 +331,7 @@ CREATE INDEX idx_fetchlog_time     ON fetch_log(requested_at DESC);
    403/429 → 지수 백오프 재시도 (최대 3회) → 실패 시 6단계
    404/410 → status = gone → 6단계
 
-6. 아카이브 폴백 (설정으로 활성화, 기본 on)
+6. 아카이브 폴백 (설정으로 명시적 활성화 — 기본 off. §9, 외부 서비스 무의존)
    └ Memento 애그리게이터 또는 Wayback CDX에 URI-R 조회
      └ URI-M 발견 → 본문 취득 → source='archive'로 버전 삽입
         (source_uri에 URI-M 기록, live 버전과 명확히 구분)
