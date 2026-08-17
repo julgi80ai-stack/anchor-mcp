@@ -20,13 +20,24 @@ from charset_normalizer import from_bytes
 from readability import Document as ReadabilityDocument
 
 from anchor.errors import ExtractionFailed, UnsupportedContent
-from anchor.normalize.text import NORM_VERSION, normalize_text
+from anchor.normalize.text import NORM_VERSION, dehyphenate, normalize_text
 
-PIPELINE_VERSION = f"trafilatura/{trafilatura.__version__}+norm/{NORM_VERSION}"
+_CHARSET_VERSION = _metadata.version("charset-normalizer")
+
+# pipeline_version은 text_hash의 숨은 입력을 전부 담아야 한다 (SPEC §5.3).
+# 경로마다 실제로 쓰인 도구가 다르므로 문자열도 달라야 한다 — 같은 값을
+# 쓰면 Content-Type이 흔들릴 때 원문이 그대로인데 `changed`로 오보한다
+# (D-015). 인코딩 판별기도 모든 경로의 숨은 입력이므로 포함한다.
+PIPELINE_VERSION = (
+    f"trafilatura/{trafilatura.__version__}"
+    f"+charset/{_CHARSET_VERSION}+norm/{NORM_VERSION}"
+)
 PDF_PIPELINE_VERSION = f"pypdf/{pypdf.__version__}+norm/{NORM_VERSION}"
+PLAIN_PIPELINE_VERSION = f"plain+charset/{_CHARSET_VERSION}+norm/{NORM_VERSION}"
 READABILITY_PIPELINE_VERSION = (
     f"readability-lxml/{_metadata.version('readability-lxml')}"
-    f"+markdownify/{_metadata.version('markdownify')}+norm/{NORM_VERSION}"
+    f"+markdownify/{_metadata.version('markdownify')}"
+    f"+charset/{_CHARSET_VERSION}+norm/{NORM_VERSION}"
 )
 
 _TEXT_PLAIN_TYPES = ("text/plain", "text/markdown")
@@ -54,7 +65,7 @@ def to_normalized(raw: bytes, content_type: str) -> NormalizedDoc:
     if media_type.startswith(_TEXT_PLAIN_TYPES):
         text = decode_bytes(raw)
         return NormalizedDoc(
-            text=normalize_text(text), title=None, pipeline_version=PIPELINE_VERSION
+            text=normalize_text(text), title=None, pipeline_version=PLAIN_PIPELINE_VERSION
         )
 
     if media_type.startswith(_PDF_TYPES):
@@ -107,7 +118,7 @@ def _from_pdf(raw: bytes) -> NormalizedDoc:
     except Exception as error:
         raise ExtractionFailed(f"PDF parsing failed — PDF 파싱 실패: {error}") from error
 
-    text = normalize_text("\n\n".join(pages))
+    text = normalize_text(dehyphenate("\n\n".join(pages)))
     if not text:
         # 텍스트 레이어가 없는 스캔 PDF. OCR은 범위 밖이다 (SPEC §5.3).
         raise UnsupportedContent("PDF has no text layer (likely scanned); OCR is out of scope — 텍스트 레이어가 없는 PDF (스캔본 추정), OCR은 범위 밖")

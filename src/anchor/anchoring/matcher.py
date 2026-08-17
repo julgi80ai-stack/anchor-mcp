@@ -15,12 +15,15 @@ from dataclasses import dataclass
 
 from anchor.anchoring.approx import bounded_edit_distance, fuzzy_search, fuzzy_search_myers
 from anchor.anchoring.budget import Budget
+from anchor.normalize.text import WORDLESS_INFORMATION_RATIO, is_wordless_text
 
-# regex 퍼지는 편집거리 상한이 이보다 크면 미발견 시 지수적으로 느려진다
-# (실측: k=11, 1천 자 문서에서 5초 초과). 그 위로는 k와 무관하게 O(n)인
-# Myers 경로를 쓴다 (SPEC §6.2 폴백). 영어 인용문은 같은 문장이라도 글자
-# 수가 길어 k가 커지므로 이 분기가 실질적으로 언어 간 형평을 만든다.
-_REGEX_MAX_K = 6
+# regex 퍼지는 k가 커질수록 미발견 시 지수적으로 느려진다(k 1 증가마다 약 ×3).
+# 실측으로 k=4부터 이미 Myers보다 느리고, k=6·7KB 한국어 기사에서 200ms 예산을
+# 소진해 UNRESOLVED가 났다 — 같은 입력을 Myers로 돌리면 56~67배 빠르다.
+# 짧은 인용문(=CJK 완결 문장)이 느린 경로에 고정되던 문제이므로 상한을 낮춘다
+# (D-048). 두 경로의 판정이 일치한다는 것은 200회 차분 비교로 확인됐고,
+# 64자 이하 인용문은 코어가 하나뿐이라 D-042의 실패 모드도 없다.
+_REGEX_MAX_K = 3
 
 INTACT = "INTACT"
 MOVED = "MOVED"
@@ -64,7 +67,13 @@ def match_anchor(
     truncated = len(text) > max_chars
     if truncated:
         text = text[:max_chars]
-    k = max(1, min(int(len(exact) * max_edit_ratio), max_edit_distance))
+    # 편집거리 상한도 문자 체계를 반영한다 (D-049). 같은 성격의 개정(단어
+    # 하나 교체)이 일본어·중국어에서는 훨씬 적은 글자로 표현되므로, 글자
+    # 수에 고정 비율을 곱하면 ALTERED가 MISSING으로 떨어진다.
+    effective_ratio = max_edit_ratio
+    if is_wordless_text(exact):
+        effective_ratio *= WORDLESS_INFORMATION_RATIO
+    k = max(1, min(int(len(exact) * effective_ratio), max_edit_distance))
 
     # 1단계 — 힌트 주변 완전 일치
     window_start = max(0, position_hint - hint_radius)
