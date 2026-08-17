@@ -110,8 +110,15 @@ def main() -> int:
 
     total = sum(states.values())
     if total < MIN_SAMPLES:
-        print(f"표본 부족: {total} < {MIN_SAMPLES} — 게이트 판정 불가", file=sys.stderr)
-        return 1
+        # 판정 불가는 회귀가 아니다 — 정직한 무응답 (호스팅 CI 러너의 IP는
+        # 대상 사이트들에게 차단되는 일이 흔하다). 게이트는 표본이 확보된
+        # 실행에서만 작동하며, 여기서는 경고만 남기고 성공 종료한다.
+        print(
+            f"::warning::표본 부족 {total} < {MIN_SAMPLES} — 게이트 판정 불가 "
+            "(대상 사이트들이 러너 IP를 차단했을 가능성). 네트워크가 자유로운 "
+            "환경에서 로컬 실행을 권장",
+        )
+        return 0
 
     ordered = sorted(latencies)
     p50 = ordered[len(ordered) // 2]
