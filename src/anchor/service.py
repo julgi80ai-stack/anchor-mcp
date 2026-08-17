@@ -6,6 +6,7 @@ v0.1 완료 기준: 같은 URL 두 번 호출 시 두 번째가 네트워크 0�
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -51,6 +52,25 @@ _UNREGISTERED = "-"
 # 아카이브 폴백으로 이어지는 원본 실패 (SPEC §5.2 5→6단계).
 _ARCHIVE_FALLBACK_STATUSES = frozenset({402, 403, 404, 410, 429})
 
+# URL별 직렬화용 스트라이프 락 개수. 서로 다른 URL이 같은 락을 쓰는 충돌은
+# 성능 손해일 뿐 정확성 문제가 아니므로, 무한히 늘어나는 URL별 락 사전
+# 대신 고정 크기 배열을 쓴다.
+_URL_LOCK_STRIPES = 64
+
+
+class _StripedLocks:
+    """URL을 해시해 고정 개수의 락에 배분한다 (D-038).
+
+    페치의 "조회 → 판단 → 생성" 구간은 같은 URL끼리만 직렬화하면 된다.
+    전역 락으로 묶으면 서로 무관한 문서의 페치와 읽기 전용 조회까지 멈춘다.
+    """
+
+    def __init__(self, stripes: int = _URL_LOCK_STRIPES) -> None:
+        self._locks = [threading.RLock() for _ in range(stripes)]
+
+    def for_key(self, key: str) -> threading.RLock:
+        return self._locks[hash(key) % len(self._locks)]
+
 
 class Anchor:
     """SQLite 연결과 HTTP 세션을 함께 관리하는 컨텍스트 매니저 (SPEC §8)."""
@@ -80,6 +100,7 @@ class Anchor:
         self._ratelimit = HostRateLimiter(
             rate=self._config.rate_limit_rps, burst=self._config.rate_limit_burst
         )
+        self._url_locks = _StripedLocks()
         self._archive = ArchiveFallback(
             self._client,
             enabled=self._config.archive_fallback_enabled,
@@ -118,6 +139,21 @@ class Anchor:
             max_age = self._config.default_max_age
         started = time.monotonic()
         norm_url = normalize_url(url)
+        # 같은 URL의 "조회 → 판단 → 생성"만 직렬화한다. 두 스레드가 동시에
+        # "문서 없음"으로 판단하면 documents.url UNIQUE에 걸린다 (D-038).
+        with self._url_locks.for_key(norm_url):
+            return self._fetch_locked(
+                norm_url, max_age, force_refresh, include_content, started
+            )
+
+    def _fetch_locked(
+        self,
+        norm_url: str,
+        max_age: int,
+        force_refresh: bool,
+        include_content: bool,
+        started: float,
+    ) -> FetchResult:
         document = self._repository.get_document_by_any_url(norm_url)
 
         # 캐시 조회 — 순수 로컬 경로. 네트워크 요청이 없으므로 robots 판정보다

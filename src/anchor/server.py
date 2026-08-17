@@ -245,20 +245,22 @@ def build_server(
     db_path: Path | str | None = None, config: Config | None = None
 ) -> tuple[MCPServer, Anchor]:
     config = config or load_config()
+    # 전역 락을 두지 않는다 (D-038). 저장소는 내부적으로 직렬화되고
+    # (`_SerializedConnection`), 문서 생성 경합은 서비스가 URL 단위 락으로
+    # 막는다. 전역 락은 백그라운드 verify가 도는 동안 나머지 도구 전부를
+    # 멈추게 했다 — Tasks 확장의 목적과 정면으로 어긋난다.
     service = Anchor(db_path=db_path, config=config)
-    lock = threading.Lock()
 
     def _verify_payload(
         arguments: dict[str, Any], should_stop: Any = None
     ) -> dict[str, Any]:
-        with lock:
-            report = service.verify(
-                anchor_ids=arguments.get("anchor_ids"),
-                document_ids=arguments.get("document_ids"),
-                older_than=arguments.get("older_than"),
-                time_budget_ms=arguments.get("time_budget_ms"),
-                should_stop=should_stop,
-            )
+        report = service.verify(
+            anchor_ids=arguments.get("anchor_ids"),
+            document_ids=arguments.get("document_ids"),
+            older_than=arguments.get("older_than"),
+            time_budget_ms=arguments.get("time_budget_ms"),
+            should_stop=should_stop,
+        )
         payload = asdict(report)
         payload["network"] = {
             "requests": report.requests,
@@ -313,13 +315,12 @@ def build_server(
         문서를 가져오거나 캐시에서 반환한다. URL 본문 열람에는 일반 fetch 도구
         대신 이 도구를 우선 사용 — 같은 일을 하되 캐시·버전·출처가 붙는다.
         """
-        with lock:
-            result = service.fetch(
-                url,
-                max_age=max_age,
-                force_refresh=force_refresh,
-                include_content=include_content,
-            )
+        result = service.fetch(
+            url,
+            max_age=max_age,
+            force_refresh=force_refresh,
+            include_content=include_content,
+        )
         payload: dict[str, Any] = {
             "document_id": result.document_id,
             "version_id": result.version_id,
@@ -359,8 +360,7 @@ def build_server(
         인용문에 앵커를 부여한다. 원문에 없는 인용은 기록하지 않는다.
         완결된 문장 하나(32자 이상) 권장.
         """
-        with lock:
-            result = service.cite(document_id, quote, note=note)
+        result = service.cite(document_id, quote, note=note)
         return asdict(result)
 
     @server.tool(name="verify_citations")
@@ -400,13 +400,12 @@ def build_server(
 
         두 버전의 본문 차이를 통합 diff로 반환한다.
         """
-        with lock:
-            body = service.diff_versions(
-                document_id,
-                from_ref=from_version,
-                to_ref=to_version,
-                context_lines=context_lines,
-            )
+        body = service.diff_versions(
+            document_id,
+            from_ref=from_version,
+            to_ref=to_version,
+            context_lines=context_lines,
+        )
         return {"diff": body}
 
     @server.tool(name="get_version")
@@ -420,10 +419,9 @@ def build_server(
 
         과거 버전의 본문을 그대로 꺼낸다. 원문이 사라진 뒤에도 인용 당시
         텍스트를 확인할 수 있다."""
-        with lock:
-            version, text = service.get_version(
-                version_id, document_id=document_id, ref=ref
-            )
+        version, text = service.get_version(
+            version_id, document_id=document_id, ref=ref
+        )
         return {
             "version_id": version.id,
             "document_id": version.document_id,
@@ -446,10 +444,9 @@ def build_server(
         latest version).
 
         캐시된 문서 목록을 필터와 함께 반환한다."""
-        with lock:
-            documents = service.list_documents(
-                status=status, host=host, has_pending_verification=has_pending_verification
-            )
+        documents = service.list_documents(
+            status=status, host=host, has_pending_verification=has_pending_verification
+        )
         return {
             "documents": [
                 {
@@ -470,8 +467,7 @@ def build_server(
         last 30 days of savings (hit rate, bytes saved).
 
         캐시 회계: 문서·버전·앵커 수, 디스크 사용량, 최근 30일 절감 효과."""
-        with lock:
-            return service.cache_stats()
+        return service.cache_stats()
 
     @server.tool(name="get_timemap")
     def get_timemap(document_id: str, format: str = "link") -> dict[str, Any]:
@@ -479,8 +475,7 @@ def build_server(
         (link | json), readable by external Memento clients.
 
         문서의 버전 목록을 RFC 7089 TimeMap으로 내보낸다."""
-        with lock:
-            return service.get_timemap(document_id, fmt=format)
+        return service.get_timemap(document_id, fmt=format)
 
     @server.tool(name="export_robust_links")
     def export_robust_links(anchor_ids: list[str], format: str = "html") -> dict[str, Any]:
@@ -488,8 +483,7 @@ def build_server(
         so readers without Anchor can still see when a source was cited.
 
         앵커들을 Robust Links 표기로 내보낸다 — 상호운용 출력."""
-        with lock:
-            return {"items": service.export_robust_links(anchor_ids, fmt=format)}
+        return {"items": service.export_robust_links(anchor_ids, fmt=format)}
 
     server.anchor_tasks = tasks_extension
     return server, service
