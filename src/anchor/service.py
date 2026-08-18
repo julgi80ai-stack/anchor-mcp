@@ -116,6 +116,8 @@ class Anchor:
             user_agent=self._config.user_agent,
             ttl_seconds=self._config.robots_ttl_seconds,
             respect_robots=self._config.respect_robots,
+            max_content_bytes=self._config.max_content_bytes,
+            timeout_seconds=self._config.timeout_seconds,
         )
         self._ratelimit = HostRateLimiter(
             rate=self._config.rate_limit_rps, burst=self._config.rate_limit_burst
@@ -128,6 +130,7 @@ class Anchor:
             timeout_seconds=self._config.archive_timeout_seconds,
             user_agent=self._config.user_agent,
             ratelimit=self._ratelimit,
+            robots=self._robots,
         )
 
     def __enter__(self) -> Anchor:

@@ -51,6 +51,14 @@ class Config:
     # [server] (SPEC §9)
     server_transport: str = "stdio"  # stdio | http
 
+    def __post_init__(self) -> None:
+        """만드는 순간 검증한다 (D-098).
+
+        `load_config`를 지나야만 검증되면, SPEC §8이 약속한 라이브러리 직접
+        사용 경로가 검증 없이 통과한다 — 같은 보장을 받아야 한다.
+        """
+        _validate(self)
+
 
 def _require(value: object, kind: type, key: str) -> object:
     """TOML 값의 타입을 확인한다. `bool("no")`가 True가 되는 식의 조용한
@@ -236,6 +244,10 @@ def _validate(config: Config) -> None:
         (config.min_quote_chars >= 1, "anchor.min_quote_chars must be >= 1"),
         (config.time_budget_ms > 0, "anchor.time_budget_ms must be > 0"),
         (config.max_edit_ratio > 0, "anchor.max_edit_ratio must be > 0"),
+        # 자기를 밝히지 않는 요청은 보내지 않는다 (D-098, SPEC §5.4). 빈 UA는
+        # robots 매칭도 빈 토큰으로 하게 만든다 — 규칙을 지키겠다면서 누구인지
+        # 말하지 않는 것이다.
+        (bool(config.user_agent.strip()), "fetch.user_agent must not be blank"),
         (
             config.server_transport in ("stdio", "http"),
             "server.transport must be 'stdio' or 'http'",

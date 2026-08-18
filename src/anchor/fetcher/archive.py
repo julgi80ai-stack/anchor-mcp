@@ -42,6 +42,7 @@ class ArchiveFallback:
         timeout_seconds: float,
         user_agent: str,
         ratelimit=None,  # HostRateLimiter 호환: acquire(host)
+        robots=None,  # RobotsGate 호환: check(url) -> RobotsVerdict
     ) -> None:
         self.enabled = enabled
         self._client = client
@@ -49,6 +50,11 @@ class ArchiveFallback:
         self._timeout = timeout_seconds
         self._headers = {"User-Agent": user_agent}
         self._ratelimit = ratelimit
+        # 애그리게이터가 지목했다는 이유로 아무 URI나 가져오지 않는다 (D-090).
+        # 직접 페치가 `RobotsDisallowed(explicit)`로 막히는 경로를 애그리게이터
+        # 한 겹으로 우회할 수 있으면, "explicit은 어떤 우회도 하지 않는다"
+        # (SPEC §5.2)가 말뿐이 된다. 우리가 가져오는 것에는 전부 판정을 건다.
+        self._robots = robots
 
     def _get(self, url: str, **kwargs) -> httpx.Response:
         if self._ratelimit is not None:
@@ -68,6 +74,8 @@ class ArchiveFallback:
             if found is None:
                 return None
             uri_m, memento_datetime, lookup_bytes = found
+            if self._robots is not None and not self._robots.check(uri_m).allowed:
+                return None
 
             response = self._get(uri_m)
             if response.status_code != 200 or not response.content:

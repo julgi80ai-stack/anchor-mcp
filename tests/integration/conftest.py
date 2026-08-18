@@ -41,6 +41,12 @@ class FixtureState:
         self.html: str = article_html()
         self.etag: str | None = '"v1"'
         self.robots: str = "User-agent: *\nDisallow: /private\n"
+        # robots.txt도 평범하게 200만 주지 않는다 — 3xx·BOM·거대 본문·지연이
+        # 실제 사이트의 평범한 모습이고, 거기가 계약이 깨지는 자리다.
+        self.robots_status: int = 200
+        self.robots_location: str | None = None   # 3xx일 때의 Location
+        self.robots_body_override: bytes | None = None  # BOM·크기 시험용 원바이트
+        self.robots_delay: float = 0.0
         self.status_override: int | None = None
         self.requests: list[str] = []  # 수신한 경로 순서
         # 아카이브 에뮬레이션: 설정 시 CDX·MemGator API·/web/ 재생이 살아난다.
@@ -61,9 +67,23 @@ class _Handler(BaseHTTPRequestHandler):
         state: FixtureState = self.server.state  # type: ignore[attr-defined]
         state.requests.append(self.path)
 
-        if self.path == "/robots.txt":
-            body = state.robots.encode("utf-8")
-            self.send_response(200)
+        if self.path == "/robots.txt" or self.path.startswith("/robots-"):
+            if state.robots_delay:
+                import time as _time
+
+                _time.sleep(state.robots_delay)
+            if state.robots_location is not None and self.path == "/robots.txt":
+                self.send_response(state.robots_status)
+                self.send_header("Location", state.robots_location)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            body = (
+                state.robots_body_override
+                if state.robots_body_override is not None
+                else state.robots.encode("utf-8")
+            )
+            self.send_response(200 if self.path != "/robots.txt" else state.robots_status)
             self.send_header("Content-Type", "text/plain")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()

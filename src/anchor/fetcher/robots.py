@@ -20,6 +20,11 @@ from anchor.models import age_seconds, utcnow_iso
 # RFC 9309 §2.3.1.4 "unavailable" — 규칙을 알 수 없으므로 전면 거부.
 _UNAVAILABLE_TTL_SECONDS = 300
 
+# RFC 9309 §2.3.1.2는 최소 5홉 추종을 요구한다. 따라가지 않으면 흔한 구성
+# (http→https, CDN 이관, 캐노니컬 정리)에서 규칙이 통째로 사라진다 (D-094).
+_MAX_ROBOTS_REDIRECTS = 5
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
 
 def _is_unavailable(status: int) -> bool:
     return status >= 500
@@ -43,12 +48,19 @@ class RobotsGate:
         user_agent: str,
         ttl_seconds: int = 86400,
         respect_robots: bool = True,
+        max_content_bytes: int = 10 * 1024 * 1024,
+        timeout_seconds: float = 30.0,
     ) -> None:
         self._repository = repository
         self._client = client
         self._user_agent = user_agent
         self._ttl_seconds = ttl_seconds
         self._respect_robots = respect_robots
+        # robots.txt도 응답이다 — 크기 상한과 타임아웃이 여기만 비켜갈 이유가
+        # 없다. 비켜가면 20MB robots.txt가 통째로 캐시 DB에 들어앉고, 설정
+        # 1초짜리 타임아웃이 10초를 기다린다 (D-096, SPEC §5.4).
+        self._max_content_bytes = max_content_bytes
+        self._timeout_seconds = timeout_seconds
 
     def check(self, url: str) -> RobotsVerdict:
         if not self._respect_robots:
@@ -64,13 +76,57 @@ class RobotsGate:
         if body is None:
             return RobotsVerdict(allowed=True, bytes_down=bytes_down)
 
-        parser = Protego.parse(body)
+        # 선두 BOM을 지운다. 남으면 파서가 `﻿User-agent:`를 지시자로 읽지
+        # 못해 **규칙 그룹 전체를 버린다** — Windows 편집기로 저장된
+        # robots.txt에서 흔하고, RFC 9309 §2.3은 선두 BOM 무시를 규정한다
+        # (D-095). 결과는 소유자가 쓴 금지가 없는 것이 되는 것이다.
+        parser = Protego.parse(body.lstrip("\ufeff"))
         allowed = parser.can_fetch(url, self._user_agent)
         return RobotsVerdict(
             allowed=allowed,
             bytes_down=bytes_down,
             reason="allowed" if allowed else "explicit",
         )
+
+    def _request_robots(self, origin: str) -> tuple[int | None, str, int]:
+        """robots.txt를 받는다. 리다이렉트를 따라가고 크기 상한을 적용한다.
+
+        반환: (상태, 본문, 내려받은 바이트). 상태가 None이면 추종 한도 초과.
+        """
+        url = f"{origin}/robots.txt"
+        bytes_down = 0
+        # 홉 한도가 루프까지 함께 막는다 — 자기 자신을 가리키는 리다이렉트도
+        # 한도에서 끝나 "규칙을 알 수 없음"이 된다. 방문 집합을 따로 두는
+        # 것은 요청 몇 번을 아낄 뿐 판정을 바꾸지 않아 두지 않는다.
+        for _ in range(_MAX_ROBOTS_REDIRECTS + 1):
+            status, body, hop_bytes, location = self._one_hop(url)
+            bytes_down += hop_bytes
+            if status not in _REDIRECT_STATUSES or not location:
+                return status, body, bytes_down
+            url = str(httpx.URL(url).join(location))
+        return None, "", bytes_down
+
+    def _one_hop(self, url: str) -> tuple[int, str, int, str | None]:
+        with self._client.stream(
+            "GET",
+            url,
+            headers={"User-Agent": self._user_agent},
+            timeout=self._timeout_seconds,
+        ) as response:
+            chunks: list[bytes] = []
+            total = 0
+            for chunk in response.iter_bytes():
+                total += len(chunk)
+                if total > self._max_content_bytes:
+                    # 상한을 넘긴 robots.txt는 **읽은 데까지만** 쓴다.
+                    # 규칙을 통째로 버리면 소유자의 금지가 사라지므로,
+                    # 버리는 쪽보다 부분 적용이 정직에 가깝다.
+                    break
+                chunks.append(chunk)
+            content = b"".join(chunks)[: self._max_content_bytes]
+            status = response.status_code
+            body = content.decode("utf-8", errors="replace") if status == 200 else ""
+            return status, body, len(content), response.headers.get("Location")
 
     @staticmethod
     def _origin(url: str) -> str:
@@ -93,19 +149,15 @@ class RobotsGate:
             )
 
         try:
-            response = self._client.get(
-                f"{origin}/robots.txt",
-                headers={"User-Agent": self._user_agent},
-                timeout=10.0,
-            )
-            status = response.status_code
-            body = response.text if status == 200 else ""
-            bytes_down = len(response.content)
+            status, body, bytes_down = self._request_robots(origin)
         except httpx.HTTPError:
             # robots.txt에 접근조차 못 했다 → 판정 불능. 캐시하지 않아 다음
             # 호출에서 다시 시도하되, 이번 요청은 보류한다 (RFC 9309 §2.3.1.4).
             return None, 0, True
 
+        if status is None:
+            # 추종 한도를 넘겼다 = 규칙을 물어보지 못했다. 캐시하지 않는다.
+            return None, bytes_down, True
         # 5xx는 짧게만 캐시한다 — 일시 장애로 하루 동안 막히면 안 된다.
         self._repository.set_robots(origin, body, status, utcnow_iso())
         # RFC 9309 §2.3.1.3: 4xx는 "제한 없음"으로 취급한다.
