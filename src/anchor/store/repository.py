@@ -477,14 +477,6 @@ class Repository:
         ).fetchall()
         return [self._to_version(row) for row in rows]
 
-    def set_current_version(self, document_id: str, version_id: str) -> None:
-        """포인터만 옮긴다 (마이그레이션·복구용). 관측은 observe_version이다."""
-        with self._connection:
-            self._connection.execute(
-                "UPDATE documents SET current_version = ? WHERE id = ?",
-                (version_id, document_id),
-            )
-
     def current_version(self, document_id: str) -> Version | None:
         """원문의 현재 본문에 해당하는 버전 (D-011/D-012/D-024).
 
@@ -522,16 +514,6 @@ class Repository:
             (document_id,),
         ).fetchall()
         return [self._to_version(row) for row in rows]
-
-    def find_version_by_text_hash(
-        self, document_id: str, text_hash: str, *, source: str = "live"
-    ) -> Version | None:
-        """본문 해시로 기존 버전을 찾는다. 출처가 다르면 별개의 memento다."""
-        row = self._connection.execute(
-            "SELECT * FROM versions WHERE document_id = ? AND text_hash = ? AND source = ?",
-            (document_id, text_hash, source),
-        ).fetchone()
-        return self._to_version(row) if row else None
 
     def insert_version(
         self,
@@ -759,14 +741,6 @@ class Repository:
             (anchor_id,),
         ).fetchone()
         return (row["checked_at"], row["checked_version"]) if row else None
-
-    def latest_verification_time(self, anchor_id: str) -> str | None:
-        row = self._connection.execute(
-            """SELECT checked_at FROM verifications WHERE anchor_id = ?
-               ORDER BY checked_at DESC LIMIT 1""",
-            (anchor_id,),
-        ).fetchone()
-        return row["checked_at"] if row else None
 
     # -- anchors -----------------------------------------------------------
 

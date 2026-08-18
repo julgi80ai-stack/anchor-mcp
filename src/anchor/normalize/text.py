@@ -133,10 +133,6 @@ def is_wordless_script(char: str) -> bool:
     return _in_ranges(char, _WORDLESS_RANGES)
 
 
-def is_hangul(char: str) -> bool:
-    return _in_ranges(char, _HANGUL_RANGES)
-
-
 _DENSITY_NOISE = re.compile(r"<[^<>]*>|`[^`]*`")
 
 

@@ -64,7 +64,7 @@ def test_gc_keeps_the_version_the_document_currently_serves(tmp_path):
     repository = Repository(tmp_path / "gc.db")
     try:
         document_id, version_ids = _seed(repository, "https://e.test/a", 5)
-        repository.set_current_version(document_id, version_ids[0])  # 가장 오래된 것
+        repository.observe_version(document_id, version_ids[0], utcnow_iso())  # 가장 오래된 것
 
         deleted, _ = repository.collect_garbage_versions(keep=2)
 
@@ -86,7 +86,7 @@ def test_one_reverted_document_does_not_block_collection_everywhere(tmp_path):
     try:
         normal_id, _ = _seed(repository, "https://e.test/normal", 6)
         reverted_id, reverted_versions = _seed(repository, "https://e.test/reverted", 6)
-        repository.set_current_version(reverted_id, reverted_versions[0])
+        repository.observe_version(reverted_id, reverted_versions[0], utcnow_iso())
 
         deleted, _ = repository.collect_garbage_versions(keep=2)
 
@@ -104,7 +104,7 @@ def test_gc_is_repeatable(tmp_path):
     repository = Repository(tmp_path / "gc-twice.db")
     try:
         document_id, version_ids = _seed(repository, "https://e.test/a", 5)
-        repository.set_current_version(document_id, version_ids[1])
+        repository.observe_version(document_id, version_ids[1], utcnow_iso())
         repository.collect_garbage_versions(keep=2)
         repository.collect_garbage_versions(keep=2)  # 예외 없이
         assert repository.current_version(document_id) is not None
@@ -125,7 +125,7 @@ def test_concurrent_writes_and_gc_do_not_raise(tmp_path):
     errors: list[str] = []
     try:
         document_id, version_ids = _seed(repository, "https://e.test/a", 30)
-        repository.set_current_version(document_id, version_ids[-1])
+        repository.observe_version(document_id, version_ids[-1], utcnow_iso())
         stop = threading.Event()
 
         def writer(tag: str) -> None:
@@ -300,7 +300,7 @@ def test_gc_reclaims_free_pages_left_by_a_table_rebuild(tmp_path):
     repository = Repository(path)
     try:
         document_id, version_ids = _seed(repository, "https://e.test/a", 40, body=_bulk(20_000))
-        repository.set_current_version(document_id, version_ids[-1])
+        repository.observe_version(document_id, version_ids[-1], utcnow_iso())
         # gc를 거치지 않고 직접 지워 빈 페이지를 만든다 (표 재작성이 남기는 상태)
         repository._connection.execute("DELETE FROM versions WHERE id != ?", (version_ids[-1],))
         (free_before,) = repository._connection.execute("PRAGMA freelist_count").fetchone()
@@ -333,7 +333,7 @@ def test_vacuum_runs_on_its_own_connection(tmp_path, monkeypatch):
         document_id, version_ids = _seed(
             repository, "https://e.test/a", 40, body=_bulk(20_000)
         )
-        repository.set_current_version(document_id, version_ids[-1])
+        repository.observe_version(document_id, version_ids[-1], utcnow_iso())
         monkeypatch.setattr(repository_module.sqlite3, "connect", spy)
         repository.collect_garbage_versions(keep=1)
     finally:
@@ -354,7 +354,7 @@ def test_reference_created_between_select_and_delete_is_respected(tmp_path):
     repository = Repository(tmp_path / "window.db")
     try:
         document_id, version_ids = _seed(repository, "https://e.test/a", 8)
-        repository.set_current_version(document_id, version_ids[-1])
+        repository.observe_version(document_id, version_ids[-1], utcnow_iso())
 
         wrapper = repository._connection
         original = wrapper.execute
@@ -403,7 +403,7 @@ def test_reuse_and_point_is_atomic(tmp_path, source):
     other = Repository(path)
     try:
         document_id, version_ids = _seed(repository, "https://e.test/a", 3, source=source)
-        repository.set_current_version(document_id, version_ids[-1])
+        repository.observe_version(document_id, version_ids[-1], utcnow_iso())
         target = repository.get_version(version_ids[0])
         assert target is not None
 
