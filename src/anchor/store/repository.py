@@ -67,10 +67,31 @@ class _SerializedConnection:
 
     def __exit__(self, exc_type, exc, tb) -> bool:
         try:
-            self._connection.execute("ROLLBACK" if exc_type else "COMMIT")
+            if exc_type is not None:
+                # 원래 예외를 덮지 않는다. SQLITE_FULL이면 SQLite가 트랜잭션을
+                # 스스로 폐기하므로 ROLLBACK이 "no transaction is active"로
+                # 실패하는데, 그것이 "디스크가 찼다"를 가려서는 안 된다 (D-127).
+                self._rollback_quietly()
+            else:
+                try:
+                    self._connection.execute("COMMIT")
+                except BaseException:
+                    # COMMIT이 실패하면 트랜잭션이 열린 채 남는다. 그대로 두면
+                    # 이후 모든 BEGIN IMMEDIATE가 죽어 프로세스가 사는 동안
+                    # **쓰기가 영구히 막힌다** — 읽기는 되므로 조용하다 (D-124).
+                    self._rollback_quietly()
+                    raise
         finally:
             self._lock.release()
         return False
+
+    def _rollback_quietly(self) -> None:
+        if not self._connection.in_transaction:
+            return
+        try:
+            self._connection.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
 
     def close(self) -> None:
         with self._lock:
@@ -101,6 +122,8 @@ _WAL_ATTEMPTS = 10
 _WAL_RETRY_SECONDS = 0.05
 # 잠금 대기 상한. 큰 DB의 최초 마이그레이션을 견딜 만큼 넉넉해야 한다.
 _BUSY_TIMEOUT_SECONDS = 60.0
+# 이보다 적게 남은 빈 페이지는 회수 비용이 이득보다 크다.
+_VACUUM_MIN_FREE_PAGES = 16
 
 
 def _enable_wal(connection: sqlite3.Connection) -> None:
@@ -311,7 +334,12 @@ class Repository:
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
                 (document_id, url, original_url, title, now, now, status, etag, last_modified),
             )
-        return self.get_document_by_url(url)  # type: ignore[return-value]
+            # 커밋 뒤 락 밖에서 재조회하면 그 틈에 gc가 지운 경우 `assert`가
+            # 터져, 성공적으로 기록된 행이 실패로 보인다 (D-082).
+            row = self._connection.execute(
+                "SELECT * FROM documents WHERE id = ?", (document_id,)
+            ).fetchone()
+        return self._to_document(row)
 
     def update_document_checked(
         self,
@@ -449,9 +477,10 @@ class Repository:
                     source_uri,
                 ),
             )
-        version = self.get_version(version_id)
-        assert version is not None
-        return version
+            row = self._connection.execute(
+                "SELECT * FROM versions WHERE id = ?", (version_id,)
+            ).fetchone()
+        return self._to_version(row)
 
     def get_version_text(self, version_id: str) -> str:
         row = self._connection.execute(
@@ -492,26 +521,57 @@ class Repository:
 
         반환: (삭제된 버전 수, 회수된 blob 바이트 추정치)
         """
-        rows = self._connection.execute(
-            """SELECT id, LENGTH(content_blob) FROM versions v
-               WHERE (
-                 SELECT COUNT(*) FROM versions newer
-                 WHERE newer.document_id = v.document_id
-                   AND (newer.captured_at > v.captured_at
-                        OR (newer.captured_at = v.captured_at AND newer.id > v.id))
-               ) >= ?
-               AND NOT EXISTS (SELECT 1 FROM anchors a WHERE a.created_version = v.id)
-               AND NOT EXISTS (SELECT 1 FROM verifications f WHERE f.checked_version = v.id)""",
-            (keep,),
-        ).fetchall()
-        if not rows:
-            return 0, 0
-        ids = [row[0] for row in rows]
-        freed = sum(row[1] for row in rows)
-        with self._connection:
-            self._connection.executemany("DELETE FROM versions WHERE id = ?", [(i,) for i in ids])
-        self._connection.execute("VACUUM")
+        # 대상 선정과 삭제는 **한 트랜잭션**이어야 한다. 그 사이에 다른 스레드가
+        # 그 버전을 참조하면(cite·현재 버전 갱신) 둘 다 FK 위반으로 실패한다 (D-081).
+        with self._connection as connection:
+            rows = connection.execute(
+                """SELECT id, LENGTH(content_blob) FROM versions v
+                   WHERE (
+                     SELECT COUNT(*) FROM versions newer
+                     WHERE newer.document_id = v.document_id
+                       AND (newer.captured_at > v.captured_at
+                            OR (newer.captured_at = v.captured_at AND newer.id > v.id))
+                   ) >= ?
+                   AND NOT EXISTS (SELECT 1 FROM anchors a WHERE a.created_version = v.id)
+                   AND NOT EXISTS (SELECT 1 FROM verifications f WHERE f.checked_version = v.id)
+                   -- 원문이 **지금 서빙하는** 본문은 캡처 시각 최대값이 아닐 수 있다
+                   -- (되돌림·아카이브). 보호하지 않으면 FK에 걸려 삭제가 통째로
+                   -- 롤백되고, 되돌림 문서 하나가 저장소 전체의 gc를 마비시킨다 (D-080).
+                   AND NOT EXISTS (
+                     SELECT 1 FROM documents d WHERE d.current_version = v.id
+                   )""",
+                (keep,),
+            ).fetchall()
+            ids = [row[0] for row in rows]
+            freed = sum(row[1] for row in rows)
+            if ids:
+                connection.executemany(
+                    "DELETE FROM versions WHERE id = ?", [(identifier,) for identifier in ids]
+                )
+        self._vacuum_if_fragmented()
         return len(ids), freed
+
+    def _vacuum_if_fragmented(self) -> None:
+        """빈 페이지가 충분히 쌓였을 때만 회수한다.
+
+        VACUUM은 DB 전체를 다시 쓴다. 저장소 락을 쥔 채 돌리면 같은 프로세스의
+        읽기 전용 도구가 그 시간만큼 멈추므로(840MB에서 27초 실측) **별도
+        커넥션**에서 돌려 락 밖에 둔다 (D-126). 삭제가 0건이어도 확인한다 —
+        마이그레이션의 표 재작성이 남긴 빈 페이지도 여기서 회수된다 (D-159).
+        """
+        (free_pages,) = self._connection.execute("PRAGMA freelist_count").fetchone()
+        (total_pages,) = self._connection.execute("PRAGMA page_count").fetchone()
+        if free_pages < _VACUUM_MIN_FREE_PAGES or free_pages * 4 < total_pages:
+            return
+        connection = sqlite3.connect(
+            self._db_path, timeout=_BUSY_TIMEOUT_SECONDS, isolation_level=None
+        )
+        try:
+            connection.execute("VACUUM")
+        except sqlite3.OperationalError:
+            pass  # 다른 프로세스가 쓰는 중이면 다음 기회에
+        finally:
+            connection.close()
 
     # -- stats -------------------------------------------------------------
 
@@ -603,9 +663,10 @@ class Repository:
                     created_at,
                 ),
             )
-        anchor = self.get_anchor(anchor_id)
-        assert anchor is not None
-        return anchor
+            row = self._connection.execute(
+                "SELECT * FROM anchors WHERE id = ?", (anchor_id,)
+            ).fetchone()
+        return self._to_anchor(row)
 
     def get_anchor(self, anchor_id: str) -> AnchorRecord | None:
         row = self._connection.execute(

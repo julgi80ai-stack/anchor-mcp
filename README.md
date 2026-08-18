@@ -141,7 +141,7 @@ The ledger and the decision records serve different purposes: `THIRD-PARTY.md` a
 | 항목 · Item | 상태 · State |
 |---|---|
 | 기술사양서 · Spec | v1.6 (2026-08-18) |
-| 구현 · Implementation | **v1.2.0** (2026-08-18) — 정규화 재설계(NORM_VERSION 3), 구버전 DB 마이그레이션 수정 · normalization redesigned (NORM_VERSION 3), migration of pre-existing databases fixed. 테스트 459개 · 459 tests. CI: 3 OS × Python 3.11–3.13, license gate, benchmark gate |
+| 구현 · Implementation | **v1.2.0** (2026-08-18) — 정규화 재설계(NORM_VERSION 3), 구버전 DB 마이그레이션 수정 · normalization redesigned (NORM_VERSION 3), migration of pre-existing databases fixed. 테스트 470개 · 470 tests. CI: 3 OS × Python 3.11–3.13, license gate, benchmark gate |
 | 실사용 관찰 · Field observation | 30일 hit_rate 관찰 창 진행 중 · 30-day hit-rate window in progress (`anchor stats`) |
 | 라이선스 감사 · License audit | 카피레프트 강제 0건 · zero forced copyleft (선택형 `tld`는 MPL-1.1 선택 · disjunctive `tld` elected as MPL-1.1, THIRD-PARTY §4.4) |
 

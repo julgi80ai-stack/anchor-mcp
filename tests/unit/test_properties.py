@@ -10,7 +10,7 @@ from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from anchor.anchoring.matcher import INTACT, match_anchor
-from anchor.anchoring.selector import build_selector
+from anchor.anchoring.selector import _search_form, build_selector
 from anchor.fetcher.urlnorm import normalize_url
 from anchor.normalize.text import normalize_text
 
@@ -31,7 +31,9 @@ def test_cite_then_verify_same_version_is_intact(data, raw_text):
     start = data.draw(st.integers(0, len(text) - 13))
     length = data.draw(st.integers(12, min(120, len(text) - start)))
     quote = text[start : start + length]
-    assume(len(normalize_text(quote)) >= 12)
+    # 길이 하한은 **실제로 탐색하는 문자열** 기준이다 (D-164). 원 인용문으로
+    # 걸러면 검색형이 12자 미만인 인용문이 통과해 `QuoteTooShort`가 난다.
+    assume(len(_search_form(normalize_text(quote))) >= 12)
     assume(normalize_text(quote) in text)
 
     selector = build_selector(text, quote)
