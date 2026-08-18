@@ -12,6 +12,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "benchmarks"))
 
 from run_micro import judge_cache_hit  # noqa: E402
@@ -30,3 +32,22 @@ def test_slow_disk_judges_the_net_cost():
     assert ok, f"디스크 바닥을 코드 회귀로 오인했다: {detail}"
     ok, detail = judge_cache_hit(p95=118.0, floor=17.0)
     assert not ok, f"예산의 7배 회귀가 판정을 빠져나갔다: {detail}"
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_under_load_gate_fails_when_churn_dies(monkeypatch):
+    """D-198: 부하 게이트는 부하가 실제로 있었는지 스스로 확인해야 한다.
+
+    churn 스레드가 즉사해도 PASS·exit 0이면, 이 게이트가 지키려는 회귀
+    (양보 기제 소실)가 churn 쪽 임포트·시그니처를 깨는 순간 게이트가
+    스스로 무력화된다 — 실증: ImportError로 즉사하는 사본에서 PASS 6.27ms.
+    """
+    import run_micro
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("churn 사망 재현")
+
+    monkeypatch.setattr(run_micro, "match_anchor", boom)
+    monkeypatch.setattr(run_micro, "FAILURES", [])
+    run_micro.bench_cache_hit_under_load()
+    assert run_micro.FAILURES, "churn이 죽었는데 부하 게이트가 통과했다"

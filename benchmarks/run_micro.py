@@ -136,6 +136,8 @@ def bench_cache_hit_under_load() -> None:
     previous_interval = sys.getswitchinterval()
     sys.setswitchinterval(0.001)
 
+    churn_rounds = [0]
+
     def churn() -> None:
         from anchor.anchoring.approx import set_thread_yields
 
@@ -145,6 +147,7 @@ def bench_cache_hit_under_load() -> None:
                 churn_text, exact=missing_quote, prefix="앞", suffix="뒤",
                 position_hint=1000, budget_ms=300,
             )
+            churn_rounds[0] += 1
 
     with tempfile.TemporaryDirectory() as tmp:
         with Anchor(db_path=Path(tmp) / "bench.db", config=Config(db_path=Path(tmp) / "bench.db")) as ax:
@@ -163,43 +166,68 @@ def bench_cache_hit_under_load() -> None:
             time.sleep(0.1)
             try:
                 samples = []
-                for _ in range(100):
+                for _ in range(200):  # 이 머신의 fsync 꼬리 변동을 p95가 견디도록 n을 넉넉히
                     start = time.perf_counter()
                     result = ax.fetch("https://bench.invalid/doc")
                     samples.append((time.perf_counter() - start) * 1000)
                     assert result.outcome == "cache_hit"
             finally:
+                died_early = not worker.is_alive()
                 stop.set()
                 worker.join()
                 sys.setswitchinterval(previous_interval)
+    # 부하가 실제로 있었는지 게이트가 스스로 확인한다 (D-198). churn이
+    # 임포트 오류 등으로 즉사하면 이 벤치는 유휴를 재면서 PASS를 찍는다 —
+    # 지키려는 회귀(양보 기제 소실)가 churn 쪽을 깨는 방식이면 무력화된다.
+    gate(
+        "cache_hit(부하 중) 부하 유효성",
+        churn_rounds[0] >= 3 and not died_early,
+        f"매칭 {churn_rounds[0]}회, 조기 사망={died_early} — 부하 없이 잰 수치는 판정이 아니다",
+    )
     p95 = percentile(samples, 0.95)
     floor = commit_floor_ms()
     ok, detail = judge_cache_hit(p95, floor)
-    gate("cache_hit(부하 중) p95 < 15ms", ok, detail + " (n=100, 매칭 루프 동시 실행)")
+    gate("cache_hit(부하 중) p95 < 15ms", ok, detail + " (n=200, 매칭 루프 동시 실행)")
 
 
-def bench_matcher_worst_case() -> None:
+def bench_matcher_worst_case(polite: bool = False) -> int:
+    """polite=True면 배경 워커와 같은 배치로 잰다 (D-196). 판정 게이트가
+    전경에서만 돌면 배경 경로의 판정 열화를 못 본다 — D-120이 "유휴만 재면
+    숨는다"였던 것과 같은 구조다. 반환: UNRESOLVED 수."""
+    from anchor.anchoring.approx import set_thread_yields
+
+    suffix = " (정중 모드)" if polite else ""
     big_text = "채움 문장이 끝없이 이어지는 대폭 개편 문서다. " * 20000  # ~50만 자
     samples = []
     unresolved = 0
-    for index in range(100):
-        start = time.perf_counter()
-        result = match_anchor(
-            big_text,
-            exact=f"이 문서 어디에도 없는 인용문 {index}번이다, 확실히.",
-            prefix="존재하지 않는 앞 문맥",
-            suffix="존재하지 않는 뒤 문맥",
-            position_hint=len(big_text) // 2,
-            budget_ms=200,
-        )
-        samples.append((time.perf_counter() - start) * 1000)
-        if result.state == UNRESOLVED:
-            unresolved += 1
+    if polite:
+        set_thread_yields(True)
+    try:
+        for index in range(100):
+            start = time.perf_counter()
+            result = match_anchor(
+                big_text,
+                exact=f"이 문서 어디에도 없는 인용문 {index}번이다, 확실히.",
+                prefix="존재하지 않는 앞 문맥",
+                suffix="존재하지 않는 뒤 문맥",
+                position_hint=len(big_text) // 2,
+                budget_ms=200,
+            )
+            samples.append((time.perf_counter() - start) * 1000)
+            if result.state == UNRESOLVED:
+                unresolved += 1
+    finally:
+        if polite:
+            set_thread_yields(False)
     p99 = percentile(samples, 0.99)
-    gate("최악 사례 p99 < 250ms", p99 < 250.0, f"p99={p99:.1f}ms, UNRESOLVED {unresolved}/100")
+    gate(f"최악 사례{suffix} p99 < 250ms", p99 < 250.0, f"p99={p99:.1f}ms, UNRESOLVED {unresolved}/100")
+    return unresolved
 
 
-def bench_normal_corpus() -> None:
+def bench_normal_corpus(polite: bool = False) -> None:
+    from anchor.anchoring.approx import set_thread_yields
+
+    suffix = " (정중 모드)" if polite else ""
     golden = Path(__file__).parent.parent / "tests" / "fixtures" / "golden"
     texts = [p.read_text("utf-8") for p in sorted(golden.glob("*.expected.md"))]
     anchors = []
@@ -215,28 +243,43 @@ def bench_normal_corpus() -> None:
 
     started = time.perf_counter()
     unresolved = 0
-    for text, selector in anchors:
-        result = match_anchor(
-            text,
-            exact=selector.exact,
-            prefix=selector.prefix,
-            suffix=selector.suffix,
-            position_hint=selector.position_hint,
-            budget_ms=200,
-        )
-        if result.state == UNRESOLVED:
-            unresolved += 1
+    if polite:
+        set_thread_yields(True)
+    try:
+        for text, selector in anchors:
+            result = match_anchor(
+                text,
+                exact=selector.exact,
+                prefix=selector.prefix,
+                suffix=selector.suffix,
+                position_hint=selector.position_hint,
+                budget_ms=200,
+            )
+            if result.state == UNRESOLVED:
+                unresolved += 1
+    finally:
+        if polite:
+            set_thread_yields(False)
     elapsed = time.perf_counter() - started
     rate = unresolved / len(anchors)
-    gate("500 앵커 / 60초", elapsed < 60.0, f"{len(anchors)}건 {elapsed:.2f}s")
-    gate("UNRESOLVED < 1%", rate < 0.01, f"{unresolved}/{len(anchors)} ({rate:.2%})")
+    gate(f"500 앵커 / 60초{suffix}", elapsed < 60.0, f"{len(anchors)}건 {elapsed:.2f}s")
+    gate(f"UNRESOLVED < 1%{suffix}", rate < 0.01, f"{unresolved}/{len(anchors)} ({rate:.2%})")
 
 
 def main() -> int:
     bench_cache_hit()
     bench_cache_hit_under_load()
-    bench_matcher_worst_case()
+    foreground_unresolved = bench_matcher_worst_case()
+    polite_unresolved = bench_matcher_worst_case(polite=True)
+    # 판정은 호출 경로와 무관해야 한다 (D-196). 양보 시간이 예산에서
+    # 청구되면 여기가 0/100 vs 59~60/100으로 갈린다.
+    gate(
+        "최악 사례 판정의 경로 무관성",
+        abs(polite_unresolved - foreground_unresolved) <= 15,
+        f"전경 UNRESOLVED {foreground_unresolved}/100 vs 정중 모드 {polite_unresolved}/100",
+    )
     bench_normal_corpus()
+    bench_normal_corpus(polite=True)
     if FAILURES:
         print(f"\n게이트 실패: {', '.join(FAILURES)}", file=sys.stderr)
         return 1

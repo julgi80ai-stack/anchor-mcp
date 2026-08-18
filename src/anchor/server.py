@@ -214,7 +214,9 @@ class AnchorTasksExtension(Extension):
                 # 요청 ttl보다 오래 걸리면 결과가 종결과 동시에 소멸하므로,
                 # 종결 시점에 실제 보존 기간(경과 + 요청 ttl)으로 갱신해
                 # 보고한다 — Task.ttl은 '실제' 보존 기간이라 이 갱신은
-                # 프로토콜이 예정한 서버 재량이다.
+                # 프로토콜이 예정한 서버 재량이다. 따라서 상한(_TASK_MAX_TTL_MS)
+                # 은 **종결 후 보존분**에 대한 것이고, 실행이 길면 생성 기준
+                # 총 보존은 상한을 넘을 수 있다 (D-200, SPEC §7.0).
                 elapsed_ms = int(
                     (parse_iso(now) - parse_iso(entry.task.created_at)).total_seconds() * 1000
                 )
@@ -248,8 +250,11 @@ class AnchorTasksExtension(Extension):
         지나면 워커가 살아 있어도 조용히 반환했고, 호출자가 곧바로 닫은
         저장소 밑에서 워커가 죽어 부분 결과가 통째로 사라졌다 (D-117).
 
-        워커는 문서·앵커 사이마다 중단 신호를 확인하므로(D-119) 대기는 한
-        앵커 예산 안팎이다. grace를 넘기면 stderr로 알리고 계속 기다린다 —
+        워커는 문서·앵커 사이마다 중단 신호를 확인한다(D-119). 대기의
+        상한은 앵커 하나의 예산 + **진행 중인 네트워크 요청 한 건**(타임아웃·
+        재시도 포함)이다 — 네트워크 대기 중에는 신호를 확인하지 않으므로,
+        기본 설정 조합에서는 분 단위가 될 수 있다 (D-197). grace를 넘기면
+        stderr로 알리고 계속 기다린다 —
         인터프리터도 어차피 non-daemon 스레드의 종료를 기다린다: 같은 대기를
         저장소가 열린 채로 할 뿐이다.
         """
@@ -334,9 +339,9 @@ class AnchorTasksExtension(Extension):
     async def _on_cancel(self, ctx, params: CancelTaskRequestParams) -> dict[str, Any]:
         entry = self._entry(params.task_id)
         if entry.task.status == "working":
-            # 중단 신호만 세운다. 워커는 문서 사이에서 이를 확인하고 남은
-            # 작업을 건드리지 않는다 — 상태만 바꾸고 계속 돌던 문제를 고침
-            # (D-035). 실제 종결 상태는 워커가 멈춘 뒤 _finish가 기록한다.
+            # 중단 신호만 세운다. 워커는 문서·앵커 사이에서 이를 확인하고
+            # 남은 작업을 건드리지 않는다 (D-035/D-119). 실제 종결 상태는
+            # 워커가 멈춘 뒤 _finish가 기록한다.
             entry.cancel.set()
             with self._entries_lock:
                 entry.task = entry.task.model_copy(
@@ -374,14 +379,6 @@ def build_server(
     # 막는다. 전역 락은 백그라운드 verify가 도는 동안 나머지 도구 전부를
     # 멈추게 했다 — Tasks 확장의 목적과 정면으로 어긋난다.
     service = Anchor(db_path=db_path, config=config)
-
-    # 백그라운드 verify 워커(순수 파이썬 CPU)와 지연 민감 도구 경로가 한
-    # 프로세스에 공존한다 (D-120). 매칭 루프는 스스로 양보하지만
-    # (anchoring/approx의 _yield_gil), 정규화 등 나머지 CPU 구간의 비자발
-    # 점유도 1ms로 상한을 건다. 이 프로세스는 MCP 서버 전용이므로 전역
-    # 인터프리터 설정을 여기서 정한다 — 라이브러리(Anchor)는 호스트 앱의
-    # 설정을 건드리지 않는다.
-    sys.setswitchinterval(0.001)
 
     def _verify_payload(
         arguments: dict[str, Any], should_stop: Any = None
@@ -626,9 +623,18 @@ def serve_forever(server: MCPServer, service: Anchor, transport: str | None) -> 
     저장소 해제. 순서를 어기면 워커가 쓰는 커넥션을 닫아 부분 결과가 사라진다
     (D-034/D-117). 두 진입점(`anchor-mcp`, `anchor serve`)이 이 계약을 따로
     구현하다 한쪽만 지키는 상태가 D-118이었다 — 공유 경로 하나로 합친다."""
+    # 백그라운드 verify 워커(순수 파이썬 CPU)와 지연 민감 도구 경로가 한
+    # 프로세스에 공존하는 것은 서빙 동안뿐이다 (D-120). 매칭 루프는 스스로
+    # 양보하지만(anchoring/approx의 _yield_gil), 정규화 등 나머지 CPU 구간의
+    # 비자발 점유도 1ms로 상한을 건다. 전역 인터프리터 설정이므로 서빙
+    # 구간에만 걸고 끝나면 되돌린다 — build_server(라이브러리 조립 함수)에서
+    # 걸면 호스트 앱·테스트 프로세스 전체가 영향을 받는다 (D-199).
+    previous_interval = sys.getswitchinterval()
+    sys.setswitchinterval(0.001)
     try:
         server.run(transport="streamable-http" if transport == "http" else "stdio")
     finally:
+        sys.setswitchinterval(previous_interval)
         server.anchor_tasks.shutdown()
         service.close()
 

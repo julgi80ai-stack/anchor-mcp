@@ -6,6 +6,7 @@ v0.1 완료 기준: 같은 URL 두 번 호출 시 두 번째가 네트워크 0�
 
 from __future__ import annotations
 
+import functools
 import threading
 import time
 from collections.abc import Callable
@@ -14,7 +15,7 @@ from types import TracebackType
 
 import httpx
 
-from anchor.anchoring import matcher
+from anchor.anchoring import approx, matcher
 from anchor.anchoring.selector import QUALITY_SHORT, build_selector
 from anchor.config import Config, load_config
 from anchor.errors import AnchorError, DocumentNotFound, FetchFailed, RobotsDisallowed
@@ -93,6 +94,23 @@ class _StripedLocks:
         return self._locks[hash(key) % len(self._locks)]
 
 
+def _foreground(method):
+    """전경(지연 민감) 호출 구간을 표시한다 (D-196).
+
+    배경 워커의 매칭 루프는 이 구간이 열려 있는 동안에만 GIL 양보로
+    잠든다. 배경 워커(정중 스레드) 자신의 재진입은 표시하지 않는다 —
+    자기 자신을 위해 양보하게 만들지 않기 위해서다."""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        if approx.is_polite_thread():
+            return method(self, *args, **kwargs)
+        with approx.foreground_section():
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class Anchor:
     """SQLite 연결과 HTTP 세션을 함께 관리하는 컨텍스트 매니저 (SPEC §8)."""
 
@@ -151,6 +169,7 @@ class Anchor:
 
     # -- public API --------------------------------------------------------
 
+    @_foreground
     def fetch(
         self,
         url: str,
@@ -291,6 +310,7 @@ class Anchor:
             f"HTTP {response.status}: {norm_url}", http_status=response.status
         )
 
+    @_foreground
     def cite(self, document_ref: str, quote: str, note: str | None = None) -> CiteResult:
         """인용문에 앵커를 부여한다 (SPEC §7.2). document_ref는 문서 id 또는 URL.
 
@@ -358,6 +378,7 @@ class Anchor:
             created_at=now,
         )
 
+    @_foreground
     def verify(
         self,
         *,
@@ -372,9 +393,11 @@ class Anchor:
         older_than: ISO 8601 기간 문자열("P7D") 또는 초. 그 안에 검증된
         앵커는 건너뛴다.
 
-        should_stop: 문서 사이마다 확인하는 중단 신호. 참을 돌려주면 남은
-        문서를 건드리지 않고 지금까지의 결과만 반환한다 — 취소와 종료가
-        실제로 작업을 멈추게 하는 유일한 경로다 (D-034/D-035).
+        should_stop: 문서·앵커 사이마다 확인하는 중단 신호 (D-119). 참을
+        돌려주면 남은 작업을 건드리지 않고 지금까지의 결과만 반환한다 —
+        취소와 종료가 실제로 작업을 멈추게 하는 유일한 경로다 (D-034/D-035).
+        네트워크 요청(fetch) 안에서는 확인하지 않는다 — 반응 상한은 앵커
+        하나의 예산 + 진행 중인 요청 한 건이다 (D-197).
         """
         if time_budget_ms is not None and time_budget_ms <= 0:
             # 0·음수 예산은 매칭 3·4단계를 조용히 건너뛰어 실제 개정 인용문을
@@ -545,6 +568,7 @@ class Anchor:
             bytes_down=bytes_down,
         )
 
+    @_foreground
     def list_documents(
         self,
         *,
@@ -572,9 +596,11 @@ class Anchor:
             ]
         return documents
 
+    @_foreground
     def get_version_text(self, version_id: str) -> str:
         return self._repository.get_version_text(version_id)
 
+    @_foreground
     def get_version(
         self,
         version_id: str | None = None,
@@ -593,6 +619,7 @@ class Anchor:
             version = self._resolve_version_ref(document_id, ref)
         return version, self._repository.get_version_text(version.id)
 
+    @_foreground
     def diff_versions(
         self,
         document_ref: str,
@@ -613,6 +640,7 @@ class Anchor:
             context_lines=context_lines,
         )
 
+    @_foreground
     def cache_stats(self, *, window_seconds: float = 30 * 86400) -> dict:
         """캐시 회계 (SPEC §7.7). 절감 효과를 사용자가 직접 확인하는 지표."""
         since = iso_ago(window_seconds)
@@ -641,6 +669,7 @@ class Anchor:
             },
         }
 
+    @_foreground
     def get_timemap(self, document_ref: str, *, fmt: str = "link") -> dict:
         """RFC 7089 TimeMap 내보내기 (SPEC §7.8)."""
         document = self._resolve_document(document_ref)
@@ -657,6 +686,7 @@ class Anchor:
             }
         raise ValueError(f"Unsupported format — 지원하지 않는 형식: {fmt} (link | json)")
 
+    @_foreground
     def export_robust_links(
         self, anchor_ids: list[str] | None = None, *, fmt: str = "html"
     ) -> list[dict]:

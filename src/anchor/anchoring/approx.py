@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import regex
@@ -40,6 +41,33 @@ def _check_period(row_cost: int) -> int:
     return max(1, _BUDGET_CELLS // max(1, row_cost))
 
 
+_foreground_lock = threading.Lock()
+_foreground_count = 0
+
+
+def is_polite_thread() -> bool:
+    """이 스레드가 배경 워커(정중 모드)인가."""
+    return bool(getattr(_yield_state, "polite", False))
+
+
+@contextmanager
+def foreground_section():
+    """전경(지연 민감) 호출이 진행 중임을 표시한다 (D-196).
+
+    배경 워커의 양보는 이 구간이 열려 있을 때만 실제로 잠든다. 굶는 전경
+    호출이 없는데 잠들면 — 잠듦의 참비용(재스케줄·콜드 캐시 재예열)은
+    측정창 밖에서 새어 크레딧으로 상환되지 않으므로 — 순손실이고, 실측으로
+    경계 문서의 판정을 UNRESOLVED로 밀었다(최악 사례 30/100)."""
+    global _foreground_count
+    with _foreground_lock:
+        _foreground_count += 1
+    try:
+        yield
+    finally:
+        with _foreground_lock:
+            _foreground_count -= 1
+
+
 def set_thread_yields(enabled: bool) -> None:
     """이 스레드의 매칭 루프가 GIL을 주기적으로 양보할지 정한다 (D-120).
 
@@ -50,7 +78,7 @@ def set_thread_yields(enabled: bool) -> None:
     _yield_state.polite = enabled
 
 
-def _yield_gil() -> None:
+def _yield_gil(budget=None) -> None:
     """긴 매칭 루프가 GIL을 독점하지 않도록 예산 확인 주기마다 다른
     스레드에 양보한다 (D-120). 배경 verify의 매칭 루프는 순수 파이썬이라
     슬라이스를 통째로 쥐고, 캐시 히트 경로는 GIL을 수십 번 얻어야 하므로
@@ -64,13 +92,27 @@ def _yield_gil() -> None:
     유효한 양보는 대기자가 깨어날 시간을 실제로 주는 sleep(0)이고, 비용은
     1ms당 1회로 배급하며, `set_thread_yields`를 켠 스레드만 낸다. 판별은
     벤치의 부하 중 p95와 최악 사례 UNRESOLVED 수가 함께 지킨다.
+
+    잠듦은 두 겹으로 제한된다 (D-196): ①전경 호출이 실제로 진행 중일 때만
+    잠든다(`foreground_section`) — 굶는 사람이 없는 양보는 순손실이며 그
+    참비용(콜드 캐시 재예열)은 측정창 밖에서 새어 크레딧으로 상환되지
+    않는다(실측: 무조건 잠들면 정중 모드 작업이 +12% 부풀어 최악 사례
+    UNRESOLVED 30/100). ②잠든 시간은 `budget.credit`으로 되돌려준다 —
+    양보는 남을 위한 일이지 매칭 작업이 아니다. 예산에서 청구하면 같은
+    앵커의 판정이 호출 경로(동기/task)에 따라 갈린다(0→59~60/100).
     """
     if not getattr(_yield_state, "polite", False):
         return
+    if _foreground_count == 0:
+        # 락 없이 읽는다 — 한 번 놓치거나 한 번 더 잠드는 것은 무해하다.
+        return
     now = time.monotonic()
     if now - getattr(_yield_state, "last", 0.0) >= _YIELD_INTERVAL_S:
-        _yield_state.last = now
         time.sleep(0)
+        woke = time.monotonic()
+        _yield_state.last = woke
+        if budget is not None:
+            budget.credit(woke - now)
 
 
 _YIELD_INTERVAL_S = 0.001
@@ -90,7 +132,7 @@ def bounded_edit_distance(a: str, b: str, k: int, budget=None) -> int | None:
     previous = list(range(len(b) + 1))
     for i, char_a in enumerate(a, 1):
         if i % period == 0:
-            _yield_gil()
+            _yield_gil(budget)
             if budget is not None and budget.exhausted():
                 raise TimeoutError("bounded_edit_distance 예산 소진")
         current = [i] + [0] * len(b)
@@ -182,7 +224,7 @@ def myers_scan_all(text: str, pattern: str, k: int, budget) -> list[tuple[int, i
         if position & 0x3FF == 0:
             # 주기 1024자 ≈ 1ms 안팎의 슬라이스 — 4096자는 슬라이스가 4ms를
             # 넘어 캐시 히트 p95를 여전히 게이트 밖으로 밀었다 (D-120 실측).
-            _yield_gil()
+            _yield_gil(budget)
             if budget.exhausted():
                 raise TimeoutError("myers_scan 예산 소진")
 
@@ -206,7 +248,7 @@ def best_substring_match(
     previous_start = list(range(n + 1))
     for i in range(1, m + 1):
         if i % period == 0:
-            _yield_gil()
+            _yield_gil(budget)
             if budget is not None and budget.exhausted():
                 raise TimeoutError("best_substring_match 예산 소진")
         char_p = pattern[i - 1]

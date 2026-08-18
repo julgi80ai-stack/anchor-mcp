@@ -290,3 +290,53 @@ def test_shutdown_does_not_hang_on_never_started_worker(monkeypatch, tmp_path):
         assert entry.result is not None and entry.result.is_error
     finally:
         service.close()
+
+
+def test_switch_interval_is_scoped_to_serving(tmp_path):
+    """D-199: 스위치 간격 1ms는 서버가 실제로 서빙하는 동안만 건다.
+
+    build_server(라이브러리 조립 함수)가 프로세스 전역 설정을 바꾸고
+    되돌리지 않으면, 같은 프로세스의 호스트 앱·테스트 전체가 영향을 받는다
+    — "라이브러리는 호스트 앱의 설정을 건드리지 않는다"는 선언과 모순.
+    """
+    import sys as _sys
+
+    from anchor.server import serve_forever
+
+    baseline = _sys.getswitchinterval()
+    observed = {}
+    try:
+        _sys.setswitchinterval(0.005)
+        config = Config(db_path=tmp_path / "si.db")
+        server, service = build_server(db_path=config.db_path, config=config)
+        try:
+            assert _sys.getswitchinterval() == pytest.approx(0.005), (
+                "build_server가 전역 스위치 간격을 바꿨다"
+            )
+        finally:
+            server.anchor_tasks.shutdown()
+            service.close()
+
+        class FakeTasks:
+            def shutdown(self, *args, **kwargs):
+                pass
+
+        class FakeServer:
+            anchor_tasks = FakeTasks()
+
+            def run(self, transport):
+                observed["during"] = _sys.getswitchinterval()
+
+        class FakeService:
+            def close(self):
+                pass
+
+        serve_forever(FakeServer(), FakeService(), "stdio")
+        assert observed["during"] == pytest.approx(0.001), (
+            "서빙 동안에는 1ms여야 한다 (D-120)"
+        )
+        assert _sys.getswitchinterval() == pytest.approx(0.005), (
+            "서빙이 끝났는데 스위치 간격을 되돌리지 않았다"
+        )
+    finally:
+        _sys.setswitchinterval(baseline)

@@ -12,12 +12,17 @@
 
 from __future__ import annotations
 
+import time
+
 from anchor.anchoring import approx, matcher
+from anchor.anchoring.budget import Budget
 
 
 def _count_yields(monkeypatch) -> dict:
     calls = {"n": 0}
-    monkeypatch.setattr(approx, "_yield_gil", lambda: calls.__setitem__("n", calls["n"] + 1))
+    monkeypatch.setattr(
+        approx, "_yield_gil", lambda *a, **k: calls.__setitem__("n", calls["n"] + 1)
+    )
     return calls
 
 
@@ -58,11 +63,53 @@ def test_yield_is_gated_by_thread_politeness(monkeypatch):
     monkeypatch.setattr("time.sleep", lambda s: sleeps.__setitem__("n", sleeps["n"] + 1))
     approx._yield_state.last = 0.0
     try:
+        with approx.foreground_section():  # 굶는 전경 호출이 있는 상황
+            approx.set_thread_yields(False)
+            approx._yield_gil()
+            assert sleeps["n"] == 0, "전경 스레드가 양보 비용을 냈다"
+            approx.set_thread_yields(True)
+            approx._yield_gil()
+            assert sleeps["n"] == 1, "배경 워커의 양보가 일어나지 않았다"
+    finally:
         approx.set_thread_yields(False)
-        approx._yield_gil()
-        assert sleeps["n"] == 0, "전경 스레드가 양보 비용을 냈다"
-        approx.set_thread_yields(True)
-        approx._yield_gil()
-        assert sleeps["n"] == 1, "배경 워커의 양보가 일어나지 않았다"
+
+
+def test_yield_time_is_not_charged_to_the_anchor_budget(monkeypatch):
+    """D-196: 배경 워커가 양보로 잠든 시간이 앵커 예산에서 청구되면 같은
+    앵커가 동기 경로에서는 MISSING, task 경로에서는 UNRESOLVED가 된다 —
+    §7.3이 task를 기본 경로로 정하므로 낮은 한계가 기본이 된다. 양보는
+    잠든 만큼 예산을 뒤로 민다(판정은 호출 경로와 무관해야 한다)."""
+    real_sleep = time.sleep
+    monkeypatch.setattr("time.sleep", lambda s: real_sleep(0.02))  # 양보가 20ms를 잠들었다고 치자
+    approx._yield_state.last = 0.0
+    approx.set_thread_yields(True)
+    try:
+        with approx.foreground_section():
+            budget = Budget(1000.0)
+            before = budget.remaining_seconds()
+            approx._yield_gil(budget)
+            after = budget.remaining_seconds()
+        assert after > before - 0.005, (
+            f"양보로 잠든 20ms가 예산에서 빠졌다 (남은 예산 {before*1000:.1f}ms → {after*1000:.1f}ms)"
+        )
+    finally:
+        approx.set_thread_yields(False)
+
+
+def test_no_sleep_when_no_foreground_call_is_active(monkeypatch):
+    """D-196: 굶는 전경 호출이 없으면 배경 워커는 잠들지 않는다.
+
+    잠듦의 참비용(재스케줄·콜드 캐시 재예열)은 측정창 밖에서 새어
+    크레딧으로 상환되지 않는다 — 무의미한 양보가 정중 모드 작업을 +12%
+    부풀려 경계 문서의 판정을 UNRESOLVED로 밀었다(최악 사례 30/100).
+    양보가 잠드는 것은 `foreground_section`이 열려 있는 동안뿐이다.
+    """
+    sleeps = {"n": 0}
+    monkeypatch.setattr("time.sleep", lambda s: sleeps.__setitem__("n", sleeps["n"] + 1))
+    approx._yield_state.last = 0.0
+    approx.set_thread_yields(True)
+    try:
+        approx._yield_gil(Budget(1000.0))
+        assert sleeps["n"] == 0, "전경 호출이 없는데 배경 워커가 잠들었다"
     finally:
         approx.set_thread_yields(False)

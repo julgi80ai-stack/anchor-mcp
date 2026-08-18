@@ -16,3 +16,10 @@ class Budget:
 
     def exhausted(self) -> bool:
         return time.monotonic() >= self._deadline
+
+    def credit(self, seconds: float) -> None:
+        """예산을 seconds만큼 뒤로 민다. 배경 워커가 GIL 양보로 잠든 시간은
+        매칭 작업이 아니므로 앵커 예산에서 청구하지 않는다 — 청구하면 같은
+        앵커의 판정이 동기 경로(MISSING)와 task 경로(UNRESOLVED)로 갈리고,
+        §7.3이 task를 기본 경로로 정하므로 낮은 한계가 기본이 된다 (D-196)."""
+        self._deadline += seconds
