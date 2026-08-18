@@ -1,6 +1,6 @@
 # Anchor — A Provenance-Tracking Fetch Cache (EN)
 
-**Technical Specification v1.6 (as of completion)**
+**Technical Specification v1.8 (as of completion)**
 
 > **Translation note**: This is an English translation of `SPEC.md`. The Korean
 > version is normative — if the two ever disagree, the Korean text governs.
@@ -18,17 +18,21 @@
 | Governing specs | RFC 7089, RFC 9110 (conditional requests), W3C Web Annotation Data Model, MCP 2026-07-28 |
 | Design rationale | `docs/decisions/0001` (prior art and positioning), `docs/decisions/0002` (licensing and reuse) |
 
-> **v1.5 → v1.6 change summary**: Reflects stage 1 (normalization) of the remediation for the 101 defects demonstrated in the second parallel audit. **The normalization rules were redesigned and NORM_VERSION was raised to 3** (§5.3) — lines and blocks are recognized first, and rules that delete anything apply only inside prose lines. Quote lookup was made tolerant of block separators (§6.1), the golden corpus is now required to actually exercise the normalization rules (§12), and migrating an older database *that contains rows* was made an explicit test target (§12). See §15 for the full list.
+> **v1.7 → v1.8 change summary**: Reflects stage 4 of the remediation (the honest-client contract, cluster 2) plus the audit of that stage's own remediation code. robots.txt redirects are now followed, a leading BOM is ignored, and the size cap, timeout, and declared charset apply to robots.txt as well (§5.2, §5.4); a blank User-Agent is rejected at configuration time and validation moved to `Config` construction over the final merged state (§5.4, §9); the URI-M an aggregator points at also gets a robots verdict (§5.2). **So that redirects cannot corrupt a document's identity**, permanent and temporary redirects are distinguished, rules were established for alias retirement, document merging (earliest-capture keeper, observation renumbering, accounting transfer), registered-document moves, and idempotent creation (§5.1); validators ride only on the canonical hop, compared in normalized form, and `https → http` downgrades and unfollowable `Location` values are refused (§5.4, §5.2). URL normalization gained RFC 3986 equivalence and input validation with a domain exception (§5.1). See §15 for the full list.
 >
-> **v1.4 → v1.5 change summary**: Reflects the remediation of 52 defects demonstrated in a parallel audit. The schema was raised to v5 to introduce a "current live version" pointer, redirect aliases, and per-source version uniqueness (§4.1); the normalization rules were revised so that quotes copied off the screen actually resolve (§5.3, NORM_VERSION 2); robots is now evaluated at every redirect hop and a robots 5xx became a denial (§5.2); anchor thresholds and the edit-distance ratio now account for the writing system (§6.1, §6.2); the budget is enforced inside the matching stages (§6.2); and the global lock was narrowed to per-URL scope (§10). See §16 for the full list.
+> **v1.6 → v1.7 change summary**: Reflects stage 3 of the remediation (judgment accuracy, cluster 5). The approximate search now takes **every position within distance k** as a candidate per core (§6.2); when stage 3 hits its candidate cap it defers to stage 4 instead of committing (§6.2); stage 4 results pass a **context-corroboration gate** so a sibling paragraph from another section is never presented as "the current form of your quote" (§6.2); the writing-system factor on the edit-distance cap became a continuous function (§6.2); the budget check period is measured in DP cells (§6.2); and truncation now holds `ALTERED` back too (§6.3). The effective document-length limit of stage 4 was made explicit (§6.2, §10). **The schema was raised to v6 to introduce the observation timeline** (§4.1) and `latest~N` was defined on that axis (§7.4). See §16 for the full list.
 >
-> **v1.3 → v1.4 change summary**: Cleanup at the v1.0 release point. Configuration loading was settled on the standard library and `pydantic-settings` was removed from the dependencies (§9, §11); the conditions for optionally running the anchor benchmark were made explicit (§12); and the development-dependency policy was delegated to the ledger (§11.2). See §17 for the full list.
+> **v1.5 → v1.6 change summary**: Reflects stage 1 (normalization) of the remediation for the 101 defects demonstrated in the second parallel audit. **The normalization rules were redesigned and NORM_VERSION was raised to 3** (§5.3) — lines and blocks are recognized first, and rules that delete anything apply only inside prose lines. Quote lookup was made tolerant of block separators (§6.1), the golden corpus is now required to actually exercise the normalization rules (§12), and migrating an older database *that contains rows* was made an explicit test target (§12). See §17 for the full list.
 >
-> **v1.2 → v1.3 change summary**: Reflects what was settled during the v0.1–v0.4 implementation. The `versions.pipeline_version` column and the `renormalized` and `unchanged` outcomes were formalized (§4.1, §5.2, §5.3, §7.1); the tracking-parameter removal list in URL normalization was narrowed (§5.1); robots cache persistence and the request order were clarified (§4.1, §5.2); `mcp-server-fetch`-compatible chunked reading was added (§7.1); and the SDK constraint on the Tasks wire format was recorded (§7.0). See §18 for the full list.
+> **v1.4 → v1.5 change summary**: Reflects the remediation of 52 defects demonstrated in a parallel audit. The schema was raised to v5 to introduce a "current live version" pointer, redirect aliases, and per-source version uniqueness (§4.1); the normalization rules were revised so that quotes copied off the screen actually resolve (§5.3, NORM_VERSION 2); robots is now evaluated at every redirect hop and a robots 5xx became a denial (§5.2); anchor thresholds and the edit-distance ratio now account for the writing system (§6.1, §6.2); the budget is enforced inside the matching stages (§6.2); and the global lock was narrowed to per-URL scope (§10). See §18 for the full list.
 >
-> **v1.1 → v1.2 change summary**: Reflects the results of the license audit. The `trafilatura>=1.8.0` lower bound was made mandatory (§11); MemGator operating guidance was made explicit (§5.2, §9); the provenance policy for test fixtures was split into three grades (§12); and a license gate was added to CI (§12). See §19 for the full list.
+> **v1.3 → v1.4 change summary**: Cleanup at the v1.0 release point. Configuration loading was settled on the standard library and `pydantic-settings` was removed from the dependencies (§9, §11); the conditions for optionally running the anchor benchmark were made explicit (§12); and the development-dependency policy was delegated to the ledger (§11.2). See §19 for the full list.
 >
-> **v1.0 → v1.1 change summary**: Reflects the results of the prior-art survey by introducing Memento compatibility (§2, §5.2, §7.8), replacing the anchor matching algorithm with a performance-safe approach (§6.2), expanding the verification states to seven (§6.3), and adopting the Tasks extension of the latest MCP spec (§7.0). See §20 for the full list.
+> **v1.2 → v1.3 change summary**: Reflects what was settled during the v0.1–v0.4 implementation. The `versions.pipeline_version` column and the `renormalized` and `unchanged` outcomes were formalized (§4.1, §5.2, §5.3, §7.1); the tracking-parameter removal list in URL normalization was narrowed (§5.1); robots cache persistence and the request order were clarified (§4.1, §5.2); `mcp-server-fetch`-compatible chunked reading was added (§7.1); and the SDK constraint on the Tasks wire format was recorded (§7.0). See §20 for the full list.
+>
+> **v1.1 → v1.2 change summary**: Reflects the results of the license audit. The `trafilatura>=1.8.0` lower bound was made mandatory (§11); MemGator operating guidance was made explicit (§5.2, §9); the provenance policy for test fixtures was split into three grades (§12); and a license gate was added to CI (§12). See §21 for the full list.
+>
+> **v1.0 → v1.1 change summary**: Reflects the results of the prior-art survey by introducing Memento compatibility (§2, §5.2, §7.8), replacing the anchor matching algorithm with a performance-safe approach (§6.2), expanding the verification states to seven (§6.3), and adopting the Tasks extension of the latest MCP spec (§7.0). See §22 for the full list.
 
 ---
 
@@ -106,7 +110,7 @@ Memento (RFC 7089) terms are given alongside. Anchor's local concepts map 1:1 on
 | **Document** | Original Resource (URI-R) | The logical object corresponding to one URL. It has multiple Versions |
 | **Version** | Memento (URI-M) | A content snapshot at a particular point in time. Identified by `text_hash` |
 | **Version list** | TimeMap (URI-T) | An enumeration of all Versions of one Document together with their capture times |
-| `captured_at` | Memento-Datetime | The time at which that version was obtained |
+| `captured_at` | Memento-Datetime | The time at which that version was **first** obtained |
 | **Anchor** | — (W3C Annotation Selector) | A position descriptor for finding one quote again inside the source |
 | **Verification** | — | A record of the result of re-verifying a particular Anchor against a particular Version |
 | **Normalized text** | — | The string obtained by extracting only the main content from HTML, converting it to markdown, and normalizing whitespace and Unicode. The basis of every hash and anchor |
@@ -215,6 +219,16 @@ CREATE TABLE versions (
     http_status      INTEGER NOT NULL,
     source           TEXT NOT NULL DEFAULT 'live',-- live | archive
     source_uri       TEXT,                        -- the URI-M, if it came from an archive
+    -- When this body was **last observed** at the origin, and in what order (v1.7).
+    -- Deduplicating by text_hash folds the observation timeline — in A→B→A, A is
+    -- one row, so "the edition served just before this one" cannot be answered
+    -- from captured_at. captured_at is the Memento-Datetime and must not change,
+    -- so the last observation is kept separately. The timestamp is a fact for
+    -- humans; the sequence number is an ordering for machines: using the clock
+    -- as the order fails to separate two observations within the same second,
+    -- and a clock that steps backwards would invert the order.
+    last_observed_at  TEXT NOT NULL,
+    last_observed_seq INTEGER NOT NULL,
     -- Even with identical content, a different source is a separate memento (v1.5).
     -- Reusing an existing live row just because content recovered from an archive
     -- matches it wipes out source, source_uri, and Memento-Datetime entirely.
@@ -272,6 +286,7 @@ CREATE TABLE robots_cache (
 );
 
 CREATE INDEX idx_versions_doc      ON versions(document_id, captured_at DESC);
+CREATE INDEX idx_versions_observed ON versions(document_id, last_observed_seq DESC);
 CREATE INDEX idx_anchors_doc       ON anchors(document_id);
 CREATE INDEX idx_verif_anchor      ON verifications(anchor_id, checked_at DESC);
 CREATE INDEX idx_fetchlog_time     ON fetch_log(requested_at DESC);
@@ -295,7 +310,19 @@ To prevent duplicate registration of the same document, normalize in the followi
 2. Remove the fragment (`#...`)
 3. Remove tracking parameters — only the unambiguous ones such as `utm_*`, `fbclid`, `gclid`, `dclid`, `msclkid`, `twclid`, `yclid`, `igshid`, `mc_eid` (extensible by configuration). **`ref` and `s` are not removed** — depending on the site they are part of the real path, and removing them merges distinct documents into one (v1.3)
 4. Sort the remaining query parameters by key
+4-1. **RFC 3986 equivalence** (v1.8): percent-encodings of unreserved characters are decoded (`/%7Euser/` = `/~user/` — undecoded, the same document registers twice, §6.2.2.2). Remaining percent triplets have their hex digits uppercased (§6.2.2.1). Reserved characters (`%2F` etc.) are preserved, since decoding them yields a different URL. **No `=` is appended to valueless query parameters** — the normalized URL is also the request URL, so appending one is not cache-key tidying but sending the server a request different from what the user gave.
+
+4-2. **Input validation** (v1.8): input without an http(s) scheme and host, or with an invalid port, is rejected with the domain exception `InvalidURL`. Let through, a port error leaks as a bare `ValueError`, and scheme-less input flows all the way to the robots verdict where **the user's typo is reported as "the site owner refused"** — the worst kind of violation of the fact-reporting principle.
+
 5. The trailing slash of a path is **not normalized; it is left to the redirect response** (v1.5). Only the server knows whether `/a` and `/a/` are the same document or different ones, and the server says so with a redirect. For a document reached via a redirect, the input URL is registered in `document_aliases` so the next lookup finds the cache — that is the practical implementation of this step.
+
+> **Redirects and document identity (v1.8)**: this tool meets redirects more often than anything else. If that path answers "whose document does this body belong to?" wrongly, the user receives, as evidence, **the body of a document they never cited** — worse than a wrong verdict, because the object of the verdict itself has changed, and no re-verification can reveal it.
+>
+> - **Only permanent redirects (301·308) change the canonical URL.** 302 and 307 mean "look elsewhere for now" and 303 means "look at a different resource" — neither is grounds to rewrite `documents.url`. This keeps a consent-wall or region-gate interstitial URL from hardening into the Memento URI-R.
+> - **An old alias that starts serving its own content retires the alias.** A URL that stopped redirecting is no longer the same resource; kept, it pushes another resource's body into the target document's history as a new version. The test is **"it answered 200 with no redirect"** (corrected in v1.8) — testing "the redirect was not permanent" destroys an alias reached through a *temporary* redirect, which is still redirecting. That a body received over a 302 lands in the canonical document's observation history is not contested: per RFC 9110 it is the current representation of the requested resource.
+> - **Two documents unified by a permanent redirect are merged.** If A and B were registered separately and an A→B 301 appears later, then unless they are merged, A's anchors get checked against B's body while the verification record holds another document's version id. The old URL survives as an alias. Merge details (v1.8): ① identical (body, source) on both sides keeps the **earliest capture** — 301 declares "same resource", so that body's Memento-Datetime is its first observation across both URLs, and deleting either side changes the citation's `data-versiondate` to a different snapshot ② observation sequence numbers are **renumbered** — each document numbered from 1, so merely moving rows makes `latest~N` show transitions that never happened ③ accounting (fetch_log) moves along ④ the merge is the **only** path that deletes a `documents` row, so access to a vanished document answers with a domain error and consumers (verify, cite) follow the relocated anchors.
+> - **A registered document that moves via 301 has its canonical URL moved** (v1.8). Even with no document at the destination, `documents.url` follows and the old address becomes an alias — so the rule above does not hold for new documents only.
+> - **Document and version creation are idempotent.** The lock is keyed on the input URL while creation uses the final URL, so two different URLs redirecting to one target both decide "no document". Instead of stacking locks, creation is idempotent so any ordering converges on one row.
 
 > **IPv6 literals** (v1.5): Preserve the brackets in the host. Stripping them produces a syntactically invalid URL and re-normalization fails — normalization must be idempotent.
 
@@ -313,6 +340,22 @@ To prevent duplicate registration of the same document, normalize in the followi
      only 5 minutes so a transient outage does not block a whole day. 4xx remains
      "no restrictions" as before. Note that this denial applies **only to the original
      request** — see step 6.
+   └ **3xx → follow it** (RFC 9309 §2.3.1.2, at least 5 hops, v1.8). Discarding the
+     body because the status is not 200 makes even `Disallow: /` vanish — http→https,
+     CDN migrations, and canonical cleanups are all ordinary configurations, and each
+     of them would hand over the whole site. Past the hop limit the state is
+     "rules unavailable".
+   └ **A leading BOM is ignored** (RFC 9309 §2.3, v1.8). Left in place, the parser
+     fails to read the `User-agent:` line as a directive and **discards the whole
+     rule group**.
+   └ robots.txt is a response too, so **the size cap and timeout apply to it as-is**
+     (v1.8). Past the cap, the verdict uses what was read — discarding everything
+     erases the owner's prohibitions, so partial application is closer to honesty.
+     The chunk straddling the boundary is truncated and **kept** (dropped, a cap
+     smaller than one transfer chunk discards everything and becomes a fully-open
+     allow). The declared **charset is honoured** — hardcoded utf-8 annihilates the
+     rules of a UTF-16 file. **An unfollowable 3xx** (no Location, 300·305) means
+     "we could not ask for the rules" — it is not cached as unrestricted.
 
 3. Rate-limit wait (per-host token bucket, default 1 req/s, burst 3)
 
@@ -351,6 +394,8 @@ To prevent duplicate registration of the same document, normalize in the followi
 
 **Paths that lead to the fallback** (reinforced in v1.5): step 6 is reached not only on the HTTP failures of step 5 (402/403/404/410/429) but also **when the original could not be reached at all**. That covers the cases where the host has disappeared entirely and the connection fails, or where robots.txt could not be retrieved and the determination was withheld — **host disappearance is the most common form of link rot and precisely the situation where archive rescue is most needed**, so if it is blocked here the entire reason this feature exists disappears.
 
+> **The URI-M an aggregator points at also gets a robots verdict** (v1.8): everything we fetch as content gets a robots verdict. Otherwise a path that direct fetching blocks as `explicit` can be reached through one layer of aggregator, and the principle below becomes words only. That an archive is a different host with its own policy is something to confirm through that host's robots — not a reason to skip confirming. (Aggregator/CDX *lookup* calls are API endpoints the user explicitly enabled; they carry the rate limit and User-Agent, under that service's terms of use.)
+>
 > **An explicit denial and an undeterminable state are different things**: If robots was read and its rules blocked us (`explicit`), that is the site owner's intent, so we do not route around it via an archive either. If we simply could not ask about the rules (`unavailable` — host disappearance, 5xx), that is merely a state in which the intent cannot be confirmed, and an archive is **a different host with its own policy**, so there is no reason to block the check. This distinction is what reconciles §5.4's honest client principle with step 6.
 
 **The significance of step 6**: Even when a document disappears, the citation is not completely invalidated. Before rendering a `GONE` determination, public archives are checked once. A version obtained via this path is marked `source='archive'`, so the user always knows it was "confirmed from an archive, not the original."
@@ -413,12 +458,14 @@ PDFs go through `pypdf` text extraction, then end-of-line hyphenation is restore
 
 Anchor operates as an **honest client**. This is not a feature; it is a premise.
 
-- **User-Agent**: default `Anchor/<release version> (+https://github.com/julgi80ai-stack/anchor-mcp)`. No disguise or spoofing option is provided.
+- **User-Agent**: default `Anchor/<release version> (+https://github.com/julgi80ai-stack/anchor-mcp)`. No disguise or spoofing option is provided, and **a blank value is rejected at configuration time** (v1.8) — you cannot promise to honour the rules while refusing to say who you are, and an empty UA makes robots matching run on an empty token. Validation happens **the moment a `Config` is constructed**: the direct-library path (§8) must receive the same guarantee.
 - **robots.txt**: respected by default. The `respect_robots = false` setting exists, but enabling it prints a warning in the server startup log.
 - **Rate limiting**: a per-host token bucket. The configured value is honored even under concurrent calls — left unlocked, waiting threads all wake at once and hammer the host at several times the configured rate (v1.5).
 - **Honoring `Retry-After`** (clarified in v1.5): both numeric and HTTP-date forms are parsed. If the server specifies a wait longer than the ceiling (default 60 seconds), we **stop retrying rather than truncating it and knocking early** — reporting "could not confirm" is the honest answer. Unparseable or abnormal values (`nan`, etc.) fall back to our own exponential backoff.
-- **Size ceiling**: applied to **every response**, not only successful ones (v1.5). We do not buffer an enormous error page or blocking interstitial in full.
-- **Conditional requests**: always used. This is exactly what reduces server load.
+- **Size ceiling**: applied to **every response**, not only successful ones (v1.5). We do not buffer an enormous error page or blocking interstitial in full. **robots.txt is a response too** (v1.8) — exempting it alone lets a 20MB robots.txt settle wholesale into the cache DB.
+- **Conditional requests**: always used. This is exactly what reduces server load. Validators ride **only on the hop of the resource we received them from** (v1.8) — the document's canonical URL. Sent on every hop, a destination honestly comparing them against its own validators returns 304, which Anchor reads as "nothing changed", serving the old body as current forever (the move is never detected) while leaking the ETag to other hosts. Sent only on the first hop, re-checking through a redirecting alias loses conditional requests entirely. The hop-to-canonical comparison uses the **normalized form** (§5.1, v1.8) — raw strings never match once query ordering, tracking parameters, or a fragment differ.
+- **`https → http` downgrade refused** (v1.8): a body received over a channel with no integrity guarantee does not become citation evidence, and the canonical URL is not recorded as plaintext.
+- **Unfollowable Location** (v1.8): a non-http(s) Location (`mailto:`, `about:blank`, …) is that document's `FetchFailed` — it does not escape the exception hierarchy (`httpx.InvalidURL`) and kill the whole re-verification batch.
 - **No anti-bot evasion**: proxy rotation, browser fingerprint spoofing, and CAPTCHA solving are not implemented. A 403 is reported as a 403.
 
 > From 15 September 2026, Cloudflare blocks by default those crawlers that mix search/agent/training purposes on ad-serving pages. Anchor is an agent-class fetcher that operates on user request; when blocked, it does not evade — it records a `Forbidden` state and then attempts only the archive fallback. Support for signature-based bot authentication (Web Bot Auth) is a v1.3 candidate.
@@ -488,7 +535,7 @@ For a new version, the following are attempted in order. As soon as a stage succ
 | 1 | Exact match of `exact` within `position_hint ± 500 chars` | `INTACT` (score 1.0) |
 | 2 | Exact match of `exact` across the whole document (standard string search) | `MOVED` (score 1.0) |
 | 3 | Find **all** candidate spans by `prefix + suffix` context and select the closest | `ALTERED` (score = similarity) |
-| 4 | **Approximate string search with an edit-distance ceiling** | found within the ceiling → `ALTERED`, not found → `MISSING` |
+| 4 | **Approximate string search with an edit-distance ceiling** + context corroboration | corroborated find → `ALTERED`, otherwise → `MISSING` |
 
 #### Stage 4 in Detail — the Core Change from v1.0
 
@@ -501,7 +548,14 @@ For a new version, the following are attempted in order. As soon as a stage succ
 # Accounts for the writing system (v1.5): a revision of the same character
 # (replacing one word) is expressed in far fewer characters in Japanese and
 # Chinese, so multiplying by a fixed ratio drops ALTERED down to MISSING.
-ratio = 0.15 * (2.5 if han_and_kana_are_the_majority else 1.0)
+#
+# The adjustment must be **continuous** (v1.7). A step like "2.5x if majority"
+# is always wrong just below the step — Japanese and Chinese sentences mixing
+# Latin abbreviations, years, or percentages routinely fall below density 0.5
+# (`GDPは3.2%増加した。` is 0.462), at which point k shrinks 2.5-fold and a
+# two-character replacement becomes MISSING.
+density = share_of_han_and_kana          # 0.0-1.0 (whitespace excluded, Hangul excluded)
+ratio = 0.15 * (1.0 + 1.5 * density)     # density 0 -> x1.0, density 1 -> x2.5
 k = max(1, min(int(len(exact) * ratio), 64))
 ```
 
@@ -513,9 +567,13 @@ Implementation priority:
    ```
 2. **Fallback / optimization** — a direct implementation of Myers bit-vector approximate string search. It is the algorithm the `approx-string-match` family uses; for pattern lengths ≤ 64 it is close to O(n) through word-level parallelism.
 
-> **Path selection (revised in v1.5)**: regex fuzzy matching becomes exponentially slow **when k is large and there is no result**. Measurements show it is already slower than Myers from k=4, and at k=6 on a 7 KB Korean article it exhausted the 200 ms budget and produced `UNRESOLVED` (running the same input through Myers is 56–67× faster). Since the problem was that short quotes (= complete CJK sentences) were pinned to the slow path, **regex is used when k ≤ 3 and the Myers path when k > 3**. That the two paths agree in their determinations was confirmed by differential comparison.
+> **Path selection (revised in v1.5, corrected in v1.7)**: regex fuzzy matching becomes exponentially slow **when k is large and there is no result**. Measurements show it is already slower than Myers from k=4, and at k=6 on a 7 KB Korean article it exhausted the 200 ms budget and produced `UNRESOLVED` (running the same input through Myers is 56–67× faster). Since the problem was that short quotes (= complete CJK sentences) were pinned to the slow path, **regex is used when k ≤ 3 and the Myers path when k > 3**.
 >
-> **Window candidates (v1.5)**: For quotes longer than 64 characters, the position is narrowed using 64-character cores from the front and the back, and then the whole quote is verified inside the window with semi-global DP. Here **the windows from every core are refined and the best one is chosen** — keeping only the single lowest-scoring core means that when one end of the quote aligns better somewhere else in the document (a heading, a lede, a pull quote), only that decoy window is examined, the true position is missed, and a false `MISSING` results. The window needs `m + 2k` of slack on the right (because the true match's start can shift by ±k and its length can stretch to m±k).
+> v1.5 additionally claimed here that "the two paths agree in their determinations" — **that was not a fact** (corrected in v1.7). The differential comparison only exercised decoy-free inputs. The two paths agree only once the window-candidate rule below is in place.
+>
+> **Window candidates (v1.5, revised in v1.7)**: For quotes longer than 64 characters, the position is narrowed using 64-character cores from the front and the back, and then the whole quote is verified inside the window with semi-global DP. The core scan returns **every position within distance k** as a candidate — keeping only the global minimum per core means that in the ordinary edit where a summary carries the quote's head and a pull-quote its tail, both cores' optima land on those decoys and the true position's window is never even examined (a false `MISSING`). Since a core is a substring of the quote, the whole quote's distance inside a window is **at least the core's distance** — that lower bound prunes the remaining candidates: everything is swept, nothing is wasted. Contiguous qualifying positions are grouped into one run keeping only its minimum, and runs are **split at the pattern length** — when k approaches the core length (Latin quotes from ~340 chars up), ordinary prose qualifies almost everywhere and the whole document would otherwise collapse into a single run, reviving the original defect. The window needs `m + 2k` of slack on the right (because the true match's start can shift by ±k and its length can stretch to m±k).
+>
+> **Context corroboration (new in v1.7)**: a stage 4 find is presented as `ALTERED` only when corroborated as **the place the quote used to live**. Similarity alone cannot decide this — in contracts, release notes, and FAQs the context is boilerplate, and a sibling paragraph from another section differs by only a couple of characters. The deciding signal is what remains at the old location: if the old neighbours now **sit adjacent**, the quote left that spot (a section move) and a match elsewhere is that quote; if something else occupies the slot, "moved and edited" and "deleted, with a lookalike elsewhere" **cannot be told apart by this evidence**, so neither is asserted (see §6.3). Candidate ranking also **prefers the corroborated side** even at slightly larger edit distance — an appendix's boilerplate is often closer to the original than the revised body is.
 
 `score` is computed as `1 - (edit_distance / len(exact))`, and `edit_distance` is stored alongside it. A ratio alone is misleading for short quotes.
 
@@ -525,13 +583,17 @@ Implementation priority:
 
 There is a ceiling on matching time per anchor. On exceeding it, no determination is forced; `UNRESOLVED` is returned.
 
-**The budget is checked not only between stages but inside them** (v1.5). The edit-distance DP of stages 3 and 4 is O(quote length × candidate length), so checking only between candidates lets a single call blow through the whole budget — measurements showed a 4,000-character quote spending 7.7 seconds against a 200 ms budget (38×). Checking on every DP row upholds the contract that "one anchor does not stop the whole run."
+**The budget is checked not only between stages but inside them** (v1.5). The edit-distance DP of stages 3 and 4 is O(quote length × candidate length), so checking only between candidates lets a single call blow through the whole budget — measurements showed a 4,000-character quote spending 7.7 seconds against a 200 ms budget (38×).
+
+The check period is **converted to DP cells** (v1.7). With a per-row period, one row costs O(candidate length), so the overshoot grows with the quote — against a 200 ms budget an 8,545-char quote spent 267 ms and a 68,902-char quote 1,133 ms (violating §10's per-anchor p99 of 250 ms). Bounding the work between checks in cells makes the overshoot a constant independent of length.
 
 | Condition | Default budget |
 |---|---|
 | `quality = OK` | 200 ms |
 | `quality = SHORT` | 100 ms |
 | Document length ceiling | 2 MB (beyond that, only the first 2 MB is searched, with a `TRUNCATED` flag) |
+
+> **Effective limit (made explicit in v1.7)**: the 2 MB above caps the **stored and searched range**, not what stage 4 can sweep within the budget. The Myers core scan is pure Python at roughly 2.0M chars/s, so for quotes over 64 characters (two cores × a full scan) the effective limit under the default 200 ms budget is **about 190K characters**. On larger documents, when stage 3 fails, stage 4 cannot reach a verdict and returns `UNRESOLVED`. That is not a defect but a consequence of the contract — we chose to say we do not know, and a larger budget widens the reach accordingly. If UNRESOLVED is frequent on large documents, raising `time_budget_ms` is the intended answer.
 
 **Saying you do not know what you do not know is better than giving a wrong answer quickly.** In batch verification, one anchor must not be allowed to stop the whole run.
 
@@ -545,9 +607,15 @@ There is a ceiling on matching time per anchor. On exceeding it, no determinatio
 | `MISSING` | The document is alive but the quote has disappeared | **Consider withdrawing or replacing the citation** |
 | `GONE` | The document itself is 404/410 and is not in any archive | **Withdraw the citation or replace it with a preserved version** |
 | `UNREACHABLE` | 403/402/timeout — cannot be confirmed | Schedule a retry |
-| `UNRESOLVED` | Determination withheld because the time budget was exceeded *(new in v1.1)* | Re-verify with a larger budget, or reset the quote to a longer one |
+| `UNRESOLVED` | Determination withheld — budget exceeded, or **the evidence splits** *(new in v1.1, widened in v1.7)* | Re-verify with a larger budget, or judge by eye using `found_offset` |
 
 `ALTERED` and `MISSING` are different events. The former means the source changed; the latter means the citation became invalid. This distinction produces the most practical value in report review.
+
+> **When the evidence splits (new in v1.7)**: if stage 4 finds a candidate within the edit-distance ceiling but has no grounds to confirm it is **this quote**, the determination is withheld. When something else occupies the quote's old slot and a similar sentence exists in another section, "it moved and was edited" and "it was deleted and a lookalike exists" cannot be told apart by this evidence. Presenting `ALTERED` makes the user read a sentence of opposite meaning as the revision; presenting `MISSING` declares a living quote dead — **both are assertions.** In this case `after` stays empty: not fabricating a false comparison table is the point of this state.
+>
+> If **nothing** lies within the edit-distance ceiling, that is `MISSING`. That is not split evidence but absent evidence — absence can be stated.
+>
+> **Truncation and verdicts (v1.5, extended in v1.7)**: if the document was cut at the ceiling, "the quote has disappeared" cannot be asserted — `MISSING` is lowered to `UNRESOLVED`. **The same applies to `ALTERED`** (v1.7): a quote straddling the cut has its severed tail counted as edit distance, so the original is intact yet the severed fragment would be presented as its "current form". A find touching the cut boundary withholds the verdict. Not asserting what you could not fully see is not a rule for `MISSING` alone.
 
 `UNRESOLVED` is not a failure but **an honest non-answer**. Making an arbitrary determination in order to avoid producing this state destroys trust in the whole tool.
 
@@ -655,7 +723,9 @@ Re-verifies anchors against the current source. Processes in batch and observes 
       "before": "More than half of AI crawler traffic goes to re-fetching pages that have not changed",
       "after":  "About 60% of AI crawler traffic goes to re-fetching pages that have not changed",
       "match_score": 0.86,
-      "edit_distance": 12
+      "edit_distance": 12,
+      "position_hint": 4210,                // where the anchor was created (v1.7)
+      "found_offset": 4198                  // where it was found now (v1.7)
     }
   ],
   "network": { "requests": 12, "not_modified": 9, "bytes_down": 48210 },
@@ -667,6 +737,8 @@ If `stopped_early` is true, `checked` and `summary` are **partial results**. The
 
 The `attention` array carries only the items that require action (`ALTERED`/`MISSING`/`GONE`/`UNRESOLVED`). It does not fill the context by listing all 36 `INTACT` entries.
 
+`position_hint` and `found_offset` are provided together (v1.7). From edit distance alone the caller cannot tell whether this is **a revision in the same place** or **a lookalike paragraph from another section of the document**. If the two are far apart, the item is worth a human look even though it passed §6.2's context corroboration.
+
 ### 7.4 `diff_versions`
 
 Returns the content difference between two versions as a unified diff.
@@ -677,6 +749,8 @@ Returns the content difference between two versions as a unified diff.
 
 Why the parameters are not named `from`/`to`: they are Python keywords and cannot be used in the tool signature of the reference implementation (v1.3). Version references are `latest`, `latest~N`, or a version id.
 
+> **The coordinate system of `latest~N` (v1.7)**: since `latest` follows the pointer, `latest~N` also follows **observation order**. Stepping back by capture time mixes two coordinate systems: after a revert, `latest~1` points at the same row as `latest`, so the default diff comes out empty (right after a fetch reported `changed`); in A→B→A→C→A it presents **a transition that never happened (B→A)** as evidence; and the intermediate edition B is unreachable by any `latest~N`. The TimeMap (§7.8) stays in **capture order**, by contrast — RFC 7089's time axis is the Memento-Datetime. The two answer different questions.
+
 ### 7.5 `get_version`
 
 Retrieves the content of a past version verbatim. Even after the source is gone, the text as it stood at citation time can be inspected.
@@ -684,6 +758,8 @@ Retrieves the content of a past version verbatim. Even after the source is gone,
 ### 7.6 `list_documents`
 
 Returns the list of cached documents together with their status and last-checked time. Filters: `status`, `host`, `has_pending_verification`.
+
+The criterion for `has_pending_verification` is **which version was verified**, not when (v1.7). Reverts reuse an old row and archive rescues carry a past Memento time, so measuring by time answers "nothing to verify" right after the current body changed — a workflow narrowing its targets with this filter would never re-examine documents whose verdicts flipped.
 
 ### 7.7 `cache_stats`
 
@@ -804,6 +880,8 @@ The entry point for registration with MCP clients is the console script `anchor-
 
 Environment variables override the documented configuration keys across the board (`ANCHOR_DB_PATH`, `ANCHOR_TIMEOUT_SECONDS`, `ANCHOR_RATE_LIMIT_RPS`, etc.). Implementing only two of them while writing "always take precedence" is a mismatch between specification and implementation.
 
+Values are validated **only against the final merged state** (v1.8). Validating the intermediate state after the file layer is applied means that, in a deployment where an environment variable is meant to override a bad file value, the server refuses to start at all — "always take precedence" collapses at the validation point. The validation itself runs at `Config` construction (including §5.4's UA rule), so direct library use receives the same guarantee.
+
 ```toml
 [storage]
 db_path        = "~/.anchor/store.db"
@@ -860,6 +938,8 @@ transport = "stdio"   # stdio | http
 
 The reason the worst-case metric (row 4) was added in v1.1 is in §6.2. You have to look at the tail, not the average.
 
+**The reach of the `UNRESOLVED` ratio (v1.7)**: the target in row 5 holds within §6.2's effective document-length limit (~190K chars at the default 200 ms budget). On larger documents, when stage 3 fails, stage 4 cannot reach a verdict — a larger budget widens the reach. Why the gate does not catch this is also recorded: the worst-case scenario's quote is short and takes the regex path only, and the normal corpus compares unrevised text against itself, ending at stage 1.
+
 **Concurrency isolation (v1.5)**: Wrapping every tool in a global lock is safe, but it stops all the other tools while a background batch verification runs — directly at odds with the purpose of the Tasks extension. Serialization is confined to the minimum necessary scope: the store serializes internally, and the service locks only the "look up → decide → create" section for the same URL, at per-URL granularity. **The reason the serialization responsibility sits in the library layer rather than the server** is that someone using the library directly must get the same guarantee.
 
 ---
@@ -897,7 +977,7 @@ anchor-mcp/
 │   │   ├── robustlinks.py # Robust Links serialization
 │   │   └── diff.py
 │   ├── store/
-│   │   ├── schema.sql     # full schema for new DBs (currently v5)
+│   │   ├── schema.sql     # full schema for new DBs (currently v6)
 │   │   ├── migrations/    # incremental SQL. Existing DBs catch up through these
 │   │   └── repository.py  # the sole SQL access point (includes internal serialization)
 │   ├── service.py         # public facade (the Anchor class)
@@ -1044,7 +1124,61 @@ This is not a formality. There are people in this field who have held on to this
 
 ---
 
-## 15. v1.5 → v1.6 Change History
+## 15. v1.7 → v1.8 Change History
+
+Reflects the robots and redirect-identity portion of **stage 4 (the honest-client contract, cluster 2)** of the second parallel audit's remediation, plus the audit of that stage's own remediation code. Every item in this section is a place where **the declaration and the reality had drifted apart** — because a document said we never bypass anything, nobody checked, and so nobody noticed for a long time that ordinary configurations made the rules vanish wholesale.
+
+| # | § | Change | Underlying defect |
+|---|---|---|---|
+| 1 | **5.2** | robots.txt **3xx is followed** (at least 5 hops, RFC 9309 §2.3.1.2) | Any `status != 200` discarded the body, so http→https moves, CDN migrations, and canonical cleanups ignored even `Disallow: /` and took the whole site. That verdict was cached for 24 hours |
+| 2 | 5.2 | Leading **BOM ignored** (RFC 9309 §2.3) | In robots.txt saved by Windows editors the parser failed to read `User-agent:` as a directive and discarded the entire rule group |
+| 3 | 5.2, 5.4 | **Size cap and timeout apply to robots.txt** too | A 20MB robots.txt landed wholesale in the cache DB, and a configured 1-second timeout waited 10 seconds. §5.4 already said "every response" |
+| 4 | **5.4** | Blank User-Agent **rejected at configuration time**; validation moved to `Config` construction | Requests went out with an empty UA and robots matching ran on an empty token. Validation only happened via `load_config`, leaving the direct-library path (§8) uncovered |
+| 5 | **5.2** | The **URI-M an aggregator points at also gets a robots verdict** | A path that direct fetching blocks as `explicit` could be reached through one layer of aggregator — "no bypass of any kind" was words only |
+| 6 | **5.1** | Only permanent redirects (301·308) change the canonical URL | A 302 interstitial URL (consent wall, region gate) hardened into the Memento URI-R and never came back after the wall lifted |
+| 7 | 5.1 | An old alias that starts serving its own content retires the alias | When an alias stopped redirecting, `final_url == norm_url` meant the correction branch never ran, and **another resource's body** was pushed into the target document's history |
+| 8 | 5.1 | Two documents unified by a permanent redirect are merged | A's anchors were checked against B's body while the verification record held another document's version id — the audit trail contradicted itself |
+| 9 | 5.1 | Document and version creation made **idempotent** | The lock key is the input URL but creation uses the final URL, so canonical redirects raised bare `sqlite3.IntegrityError` to the caller (reproduced 25/30) |
+| 10 | **5.4** | Validators ride **only on the canonical-URL hop** | A destination honestly returning 304 was read as "nothing changed", the old body kept being served as current, and the move was never detected. ETags leaked to other hosts |
+| 11 | 5.4 | `https → http` downgrade redirects refused | A body received over a channel with no integrity guarantee became citation evidence and the canonical URL was recorded as plaintext |
+| 12 | **5.1** | The "serving its own content" test corrected to **`final_url == norm_url`** (a 200 with no redirect) | Testing "not permanent" instead meant an alias reached through a *temporary* redirect was destroyed, a ghost document holding the destination's body was created, and the recovery-phase merge planted that body in the target's history (D-183, the mirror image of #7) |
+| 13 | 5.1 | Merge rules strengthened: identical (body, source) keeps the **earliest capture**, observation sequence is **renumbered**, and accounting (fetch_log) moves too | Deleting either side changed a citation's Memento-Datetime and URI-M (D-186), duplicate sequence numbers made `latest~N` show transitions that never happened (D-184), and accounting shrank (D-195) |
+| 14 | 5.1 | Access after a merge removed the document row answers with a **domain error / re-tracking** | `merge_document` is the only path that deletes from documents — another process's verify died with AssertionError and cite with a bare IntegrityError (D-185) |
+| 15 | 5.1 | A registered document that moves: **the canonical URL moves and the old address becomes an alias** | With no document at the destination, documents.url stayed at the old address, so #6 held only for new documents (D-194) |
+| 16 | 5.4 | Validator hop comparison in **normalized form** | Raw string comparison meant query ordering, tracking parameters, or a fragment made conditional requests permanently inert (D-187) |
+| 17 | 5.2 | robots: **declared charset honoured**, boundary chunk **kept**, unfollowable 3xx is **rules-unavailable** | Hardcoded utf-8 wiped out UTF-16 rules (D-190), discarding the boundary chunk turned cap < chunk into a fully-open allow (D-191), and a Location-less 3xx was cached as unlimited allow for 24h (D-192) |
+| 18 | **5.1** | URL normalization: RFC 3986 **unreserved percent-decoding**, uppercase hex, **valueless parameters preserved** | `/~user/` and `/%7Euser/` registered as duplicate documents, and `?novalue`→`?novalue=` sent the server **a request different from what the user gave** (D-105) |
+| 19 | 5.1 | Invalid input raises `InvalidURL` (a domain exception) | Port errors leaked as bare ValueError (D-107), and scheme-less input was reported as "robots.txt refused" — **pinning the user's typo on the site owner** (D-108) |
+| 20 | 5.2 | An unfollowable Location (`mailto:` etc.) is that document's `FetchFailed` | `httpx.InvalidURL` is not a subclass of HTTPError, so it escaped the hierarchy and killed the whole re-verification batch (D-106) |
+| 21 | **9** | Configuration is validated **only in its final state** — one construction after layering | Mid-state validation broke "environment variables always win": with a bad file value that env was deployed to override, the server refused to start (D-188) |
+
+## 16. v1.6 → v1.7 Change History
+
+Reflects **stage 3 (judgment accuracy, cluster 5)** of the remediation for the defects demonstrated in the second parallel audit (10 Opus auditors, 2026-08-18). Every item in this section belongs to the "silently wrong judgment" family — a false MISSING declares a living quote dead, and a false ALTERED presents a lookalike from another section as "the current form of your quote". The user has no way to check either.
+
+| # | § | Change | Underlying defect |
+|---|---|---|---|
+| 1 | **6.2** | The core scan returns **every position within distance k** as a candidate | Keeping only the global minimum per core meant that in the ordinary edit where a summary carries the quote's head and a pull-quote its tail, both cores' optima landed on decoys and the true position was never even examined (3,856 false MISSING out of a 4,000-case decoy campaign) |
+| 2 | 6.2 | When stage 3 **hits its candidate cap it defers to stage 4** instead of committing | Committing to the best of 32 meant that if the real revision was 38th, an earlier sibling paragraph was reported as `found_text` — the failure mode D-044 fixed, with its boundary merely moved from 1 to 32 |
+| 3 | 6.2 | Stage 3 also refuses to commit when the budget runs out (`UNRESOLVED`) | Same reason. A best chosen without seeing everything is not evidence |
+| 4 | **6.2** | A **context-corroboration gate** on stage 4 results | A template sentence from the v1.9.0 section (opposite in meaning) was attached to a deleted v2.0.0 entry as its "current form". Similarity cannot decide this — if the context is alive in the document and the quote is not beside it, that is deletion |
+| 5 | 6.2 | Candidate selection **prefers the corroborated side** | A risk newly created by #1's wider candidates: in terms-of-service documents, an appendix's boilerplate is often closer to the original than the revised body |
+| 6 | 6.2 | The writing-system factor on the edit-distance cap became a **continuous function** | Just below the "2.5× if majority" step was always wrong. Japanese and Chinese sentences with Latin abbreviations, years, or percentages routinely fall under density 0.5 (`GDPは3.2%増加した。` is 0.462) |
+| 7 | 6.2 | The budget check period is measured in **DP cells** | With a per-row period the overshoot grew with quote length — a 68,902-char quote spent 1,133ms against a 200ms budget (§10 violation), reachable through the public API since `cite` has no length cap |
+| 8 | 6.2 | v1.5's "the two paths agree" claim **corrected** | That differential comparison only exercised decoy-free inputs. It becomes true only after #1 |
+| 9 | 6.2, 10 | Stage 4's **effective document-length limit (~190K chars)** made explicit | 2MB is the cap on the search range, not what the budget can sweep. The spec never stated that the size it permits and the size the budget permits are different |
+| 10 | **6.3** | Truncation holds `ALTERED` back too | "Do not assert what you could not fully see" applied only to `MISSING`. A quote straddling the cut had its severed tail counted as edit distance — the original intact, yet the severed fragment presented as its "current form" |
+| 11 | 7.3 | `position_hint` and `found_offset` added to `attention` | From edit distance alone the caller cannot tell an in-place revision from a paragraph that came from another section |
+| 12 | **4.1** | **Schema v6** — `versions.last_observed_at` and `last_observed_seq` | Deduplicating by body hash folded the observation timeline. `latest` (the pointer) and `latest~N` (capture time) diverged: after a revert the default diff came out empty, transitions that never happened were shown, and intermediate editions were unreachable |
+| 13 | 7.4 | `latest~N` defined on **observation order**; the TimeMap keeps capture order | Same as above. The two answer different questions — RFC 7089's time axis is the Memento-Datetime |
+| 14 | 7.6 | `has_pending_verification` now keyed on **which version was verified** | Keyed on time, reverts and archive rescues returned False right after the current body changed |
+| 15 | **6.2** | Core-scan runs are **split at pattern length** | Grouping runs only by `score ≤ k` meant that for long quotes (Latin ~340 chars up), where k approaches the core length, the whole document became one run and #1 was nullified. 88.5% of that range was false MISSING |
+| 16 | **6.3** | `UNRESOLVED` widened to **evidence-split cases** | #4's gate read "the context is alive but the quote is not beside it" as deletion, asserting MISSING for a quote that had **moved sections while being edited**. Section reshuffles are ordinary editing. The two situations cannot be told apart by this evidence, so neither is asserted |
+| 17 | 6.2 | Stage 4's verdict boundary split into "no match → MISSING / no corroboration → UNRESOLVED" | Same as above. Absence can be stated; unidentifiability cannot |
+
+Many of this section's fixes complete what an earlier fix did **only by half** (1 follows D-042, 2 and 4 follow D-044, 7 follows D-045, 6 follows D-049). The §12 lesson — one passing reproduction script is not completion — repeated itself verbatim.
+
+## 17. v1.5 → v1.6 Change History
 
 Reflects **stage 1 (normalization, cluster 1)** of the remediation for the 101 defects demonstrated in the second parallel audit (10 Opus auditors, 2026-08-18). These came out of code written during the first round of remediation, so each entry also records what was broken while fixing something else.
 
@@ -1067,7 +1201,7 @@ Reflects **stage 1 (normalization, cluster 1)** of the remediation for the 101 d
 
 ---
 
-## 16. v1.4 → v1.5 Change History
+## 18. v1.4 → v1.5 Change History
 
 Reflects the remediation of **52 defects demonstrated with reproduction scripts** in a parallel audit (10 Opus instances, 2026-08-17). They emerged in a state where all 198 existing tests passed, so each item is also a blind spot in the specification.
 
@@ -1101,7 +1235,7 @@ Reflects the remediation of **52 defects demonstrated with reproduction scripts*
 
 ---
 
-## 17. v1.3 → v1.4 Change History
+## 19. v1.3 → v1.4 Change History
 
 Cleanup at the v1.0 release (2026-08-17).
 
@@ -1114,7 +1248,7 @@ Cleanup at the v1.0 release (2026-08-17).
 
 ---
 
-## 18. v1.2 → v1.3 Change History
+## 20. v1.2 → v1.3 Change History
 
 Reflects what was settled during the v0.1–v0.4 implementation (2026-08-17). These were found with the implementation running ahead of the specification, so the grounds for each item are in the code and the tests.
 
@@ -1134,7 +1268,7 @@ Reflects what was settled during the v0.1–v0.4 implementation (2026-08-17). Th
 
 ---
 
-## 19. v1.1 → v1.2 Change History
+## 21. v1.1 → v1.2 Change History
 
 Reflects the results of the license audit (2026-08-16). All 16 unverified items were checked and reduced to zero, and in the process one substantive conflict was found.
 
@@ -1164,7 +1298,7 @@ See `THIRD-PARTY.md` for details.
 
 ---
 
-## 20. v1.0 → v1.1 Change History
+## 22. v1.0 → v1.1 Change History
 
 | # | Section | Change | Rationale |
 |---|---|---|---|
