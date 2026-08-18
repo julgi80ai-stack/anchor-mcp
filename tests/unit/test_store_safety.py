@@ -38,7 +38,9 @@ def test_interrupted_migration_leaves_db_reopenable(tmp_path):
     broken = Repository(db_path)
     with pytest.raises(sqlite3.Error):
         broken._apply_sql_atomically(
-            "CREATE TABLE probe_ok (x INTEGER); THIS IS NOT SQL;", SCHEMA_VERSION + 5
+            "CREATE TABLE probe_ok (x INTEGER);\nTHIS IS NOT SQL;",
+            SCHEMA_VERSION + 5,
+            expected_version=SCHEMA_VERSION,  # 현재 버전에서 출발해야 적용을 시도한다 (D-078)
         )
     tables = {
         row[0]

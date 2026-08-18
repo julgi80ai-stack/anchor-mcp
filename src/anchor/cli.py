@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CLI (SPEC §8). v0.1은 fetch와 list만 제공한다."""
+"""CLI (SPEC §8). fetch·cite·verify·timemap·export·stats·gc·list·serve."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from anchor.service import Anchor
 
 app = typer.Typer(
     name="anchor",
-    help="AI가 사용한 웹 근거의 시간적·출처적 무결성 계층 (v0.1: fetch + 변경 감지)",
+    help="AI가 사용한 웹 근거의 시간적·출처적 무결성 계층 (Memento RFC 7089 로컬 클라이언트)",
     add_completion=False,
 )
 

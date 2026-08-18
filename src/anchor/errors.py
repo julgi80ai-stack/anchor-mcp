@@ -28,7 +28,7 @@ class ContentTooLarge(AnchorError):
 
 
 class UnsupportedContent(AnchorError):
-    """v0.1이 처리하지 않는 콘텐츠 유형 (PDF 등은 이후 버전 범위)."""
+    """처리 범위 밖의 콘텐츠 유형 (텍스트 레이어 없는 스캔 PDF 등, SPEC §5.3)."""
 
 
 class ExtractionFailed(AnchorError):

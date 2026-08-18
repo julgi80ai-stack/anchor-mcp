@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -96,14 +97,82 @@ def _load_schema() -> str:
     return resources.files("anchor.store").joinpath("schema.sql").read_text("utf-8")
 
 
+_WAL_ATTEMPTS = 10
+_WAL_RETRY_SECONDS = 0.05
+# 잠금 대기 상한. 큰 DB의 최초 마이그레이션을 견딜 만큼 넉넉해야 한다.
+_BUSY_TIMEOUT_SECONDS = 60.0
+
+
+def _enable_wal(connection: sqlite3.Connection) -> None:
+    """WAL로 전환한다 (D-078/D-155).
+
+    저널 모드 전환은 짧게 배타 잠금을 요구해, 같은 DB를 **동시에 처음 여는**
+    클라이언트가 여럿이면 한쪽이 스키마 생성 트랜잭션을 쥔 사이 다른 쪽이
+    `database is locked`로 죽는다(실측 확인). 저널 모드는 DB 헤더에 영속되므로
+    먼저 성공한 쪽의 결과를 곧 보게 된다 — 잠깐 기다렸다 다시 물으면 된다.
+
+    **재시도는 잠금 경합에만 한다.** 읽기 전용 DB처럼 다른 이유로 실패하는
+    경우까지 재시도하면 진짜 원인을 몇 초 늦게 보여줄 뿐이고, WAL을 지원하지
+    않는 저장소에서는 열 때마다 그 대기를 문다. PRAGMA가 예외 없이 다른 모드를
+    돌려주면 그 환경의 사실로 받아들이고 그대로 진행한다.
+    """
+    for attempt in range(_WAL_ATTEMPTS):
+        try:
+            row = connection.execute("PRAGMA journal_mode = WAL").fetchone()
+        except sqlite3.OperationalError as error:
+            if "locked" not in str(error) and "busy" not in str(error).lower():
+                raise  # 경합이 아닌 실패는 그대로 보고한다 (예: 읽기 전용 DB)
+            time.sleep(_WAL_RETRY_SECONDS * (attempt + 1))
+            continue
+        if row is not None and row[0] != "wal":
+            return  # 이 저장소가 WAL을 지원하지 않는다 — 재시도해도 같다
+        return
+
+
+def _split_statements(sql: str) -> list[str]:
+    """SQL 스크립트를 실행 가능한 문장으로 나눈다 (D-079).
+
+    `sql.split(";")`는 문자열 리터럴·`--` 주석·트리거 본문(`BEGIN … END;`)
+    안의 세미콜론에서 문장을 깨뜨린다. 이 저장소는 `-- live | gone | forbidden`
+    같은 열거 주석을 관행적으로 쓰므로, 거기에 `;`가 하나 들어가는 순간
+    마이그레이션이 통째로 실패한다.
+
+    판정은 `sqlite3.complete_statement`(sqlite3_complete())에 맡긴다 — 셋을
+    모두 안다. **`;`를 만날 때마다** 물어보므로 한 줄에 문장이 여럿이어도
+    쪼갠다(줄 단위로 물으면 `execute`가 "one statement at a time"으로 거절한다).
+    """
+    statements: list[str] = []
+    start = 0
+    for index, char in enumerate(sql):
+        if char != ";":
+            continue
+        candidate = sql[start : index + 1]
+        if sqlite3.complete_statement(candidate):
+            statements.append(candidate.strip())
+            start = index + 1
+    tail = sql[start:].strip()
+    if tail:  # 마지막 문장 뒤에 남은 주석 등 — 실행해도 무해하다
+        statements.append(tail)
+    return [statement for statement in statements if statement]
+
+
 class Repository:
     def __init__(self, db_path: Path | str) -> None:
         db_path = Path(db_path).expanduser()
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db_path = db_path
-        raw = sqlite3.connect(db_path, check_same_thread=False, isolation_level=None)
+        # 기본 busy timeout(5초)은 v5의 표 재작성처럼 오래 걸리는 마이그레이션을
+        # 넘기지 못한다 — 큰 DB(실측 1.4GB에서 34초)를 동시에 열면 기다리던
+        # 프로세스가 `database is locked`로 죽는다. 업그레이드는 한 번뿐이고
+        # 그때는 기다리는 편이 옳다 (D-078).
+        raw = sqlite3.connect(
+            db_path,
+            check_same_thread=False,
+            isolation_level=None,
+            timeout=_BUSY_TIMEOUT_SECONDS,
+        )
         raw.row_factory = sqlite3.Row
-        raw.execute("PRAGMA journal_mode = WAL")
+        _enable_wal(raw)
         raw.execute("PRAGMA foreign_keys = ON")
         # 압축기 인스턴스는 스레드 안전하지 않아 공유하면 segfault가 난다.
         # 호출마다 만든다 — 실측 비용 +0.016ms (D-020).
@@ -121,7 +190,9 @@ class Repository:
                 total += candidate.stat().st_size
         return total
 
-    def _apply_sql_atomically(self, sql: str, target_version: int) -> None:
+    def _apply_sql_atomically(
+        self, sql: str, target_version: int, *, expected_version: int
+    ) -> None:
         """스키마 SQL과 버전 표시를 한 트랜잭션으로 적용한다 (D-019).
 
         `executescript`는 대기 중인 트랜잭션을 암시적으로 COMMIT하고 각 문장을
@@ -129,29 +200,63 @@ class Repository:
         테이블 일부만 생성된 채 `user_version`이 갱신되지 않아 이후 DB를 영영
         열 수 없게 되므로, 문장 단위로 나눠 명시적 트랜잭션 안에서 실행한다.
         `PRAGMA user_version`은 DB 헤더에 기록되며 트랜잭션에 포함된다(실측 확인).
+
+        버전 확인을 트랜잭션 **안에서** 다시 한다 (D-078). 밖에서 읽고 안에서
+        적용하면 두 클라이언트가 같은 버전을 보고 둘 다 적용을 시도해, 뒤늦은
+        쪽이 이미 만들어진 객체를 다시 만들며 죽는다. 이미 올라가 있으면
+        아무것도 하지 않는다 — 호출자가 다시 읽어 이어간다.
         """
-        statements = [part.strip() for part in sql.split(";") if part.strip()]
         with self._connection as connection:
-            for statement in statements:
+            (observed,) = connection.execute("PRAGMA user_version").fetchone()
+            if observed != expected_version:
+                return  # 다른 클라이언트가 먼저 적용했다
+            for statement in _split_statements(sql):
                 connection.execute(statement)
+            # FK를 끈 구간이므로 커밋 전에 직접 검사한다 (SQLite 공식 ALTER 절차).
+            violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                raise RuntimeError(
+                    f"마이그레이션 v{target_version} 적용 후 참조 무결성 위반: "
+                    f"{[tuple(row) for row in violations[:5]]}"
+                )
             connection.execute(f"PRAGMA user_version = {target_version}")
 
     def _migrate(self) -> None:
-        (current,) = self._connection.execute("PRAGMA user_version").fetchone()
-        if current == 0:
-            self._apply_sql_atomically(_load_schema(), SCHEMA_VERSION)
-            return
-        if current > SCHEMA_VERSION:
-            raise RuntimeError(
-                f"DB 스키마 버전 {current}이 코드가 아는 버전 {SCHEMA_VERSION}보다 높습니다"
-            )
-        for target in range(current + 1, SCHEMA_VERSION + 1):
-            sql = (
-                resources.files("anchor.store")
-                .joinpath(MIGRATION_FILES[target])
-                .read_text("utf-8")
-            )
-            self._apply_sql_atomically(sql, target)
+        """스키마를 현재 버전까지 올린다.
+
+        적용 구간에서만 FK를 내린다 (D-077). 표의 제약을 바꾸려면 표를 다시
+        만들어야 하는데(0005), FK가 켜져 있으면 `DROP TABLE versions`가
+        `documents.current_version`·`anchors.created_version`·
+        `verifications.checked_version`을 즉시 위반해 **행이 하나라도 있는 모든
+        구버전 DB가 영구히 열리지 않게 된다.** `PRAGMA foreign_keys`는
+        트랜잭션 안에서 no-op이므로(실측 확인) 반드시 트랜잭션 밖에서 내리고,
+        대신 커밋 직전에 `foreign_key_check`로 검사한다.
+        """
+        self._connection.execute("PRAGMA foreign_keys = OFF")
+        try:
+            # 동시 오픈 시 다른 클라이언트가 올려놓는 경우가 있어 매번 다시 읽는다.
+            for _ in range(2 * SCHEMA_VERSION + 4):
+                (current,) = self._connection.execute("PRAGMA user_version").fetchone()
+                if current > SCHEMA_VERSION:
+                    raise RuntimeError(
+                        f"DB 스키마 버전 {current}이 코드가 아는 버전 {SCHEMA_VERSION}보다 높습니다"
+                    )
+                if current == SCHEMA_VERSION:
+                    return
+                if current == 0:
+                    self._apply_sql_atomically(
+                        _load_schema(), SCHEMA_VERSION, expected_version=0
+                    )
+                    continue
+                sql = (
+                    resources.files("anchor.store")
+                    .joinpath(MIGRATION_FILES[current + 1])
+                    .read_text("utf-8")
+                )
+                self._apply_sql_atomically(sql, current + 1, expected_version=current)
+            raise RuntimeError("스키마 마이그레이션이 진행되지 않았습니다")
+        finally:
+            self._connection.execute("PRAGMA foreign_keys = ON")
 
     # -- documents ---------------------------------------------------------
 
