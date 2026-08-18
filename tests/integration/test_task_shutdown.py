@@ -27,6 +27,9 @@ from mcp_types import (
     CancelTaskRequest,
     CancelTaskRequestParams,
     CancelTaskResult,
+    GetTaskRequest,
+    GetTaskRequestParams,
+    GetTaskResult,
     TaskMetadata,
 )
 from typer.testing import CliRunner
@@ -340,3 +343,80 @@ def test_switch_interval_is_scoped_to_serving(tmp_path):
         )
     finally:
         _sys.setswitchinterval(baseline)
+
+
+async def test_cancel_overlapping_long_network_wait(fixture_server, tmp_path):
+    """D-205: 5초 조인 문턱을 넘는 네트워크 대기와 겹친 취소 — 기존 픽스처는
+    delay 0.3~0.35s뿐이라 이 축이 없었다.
+
+    신호는 fetch 안에서 확인되지 않으므로(D-197) 취소 응답은 비종결
+    (working)일 수 있다. 대신 계약은 셋이다: ①응답은 조인 상한 안팎에서
+    돌아온다(페치가 끝날 때까지 매달리지 않는다) ②신호는 이미 세워져 있어
+    fetch가 끝나는 즉시 cancelled로 종결된다 ③남은 작업(앵커 매칭)은
+    실행되지 않는다.
+    """
+    from mcp.client.client import Client
+
+    base_url, state = fixture_server
+    db_path = tmp_path / "slow-cancel.db"
+    config = Config(db_path=db_path, rate_limit_rps=1000.0, retry_backoff_base=0.01)
+    server, service = build_server(db_path=db_path, config=config)
+    try:
+        async with Client(server) as client:
+            fetched = await client.call_tool(
+                "fetch_document", {"url": f"{base_url}/slow-cancel-doc"}
+            )
+            document_id = fetched.structured_content["document_id"]
+            quote = "링크는 살아 있지만 내용이 바뀌는 인용 표류가 가장 위험하다."
+            cited = await client.call_tool(
+                "cite", {"document_id": document_id, "quote": quote}
+            )
+            assert not cited.is_error, cited.content
+
+            state.response_delay = 6.0  # 조인 상한(5s)을 넘는 네트워크 대기
+            try:
+                task_id = (await client.session.send_request(
+                    CallToolRequest(
+                        params=CallToolRequestParams(
+                            name="verify_citations",
+                            arguments={"document_ids": [document_id]},
+                            task=TaskMetadata(),
+                        )
+                    ),
+                    CallToolResult,
+                )).structured_content["task"]["taskId"]
+                await anyio.sleep(0.5)  # 워커가 fetch에 들어갈 시간
+
+                cancel_started = time.monotonic()
+                cancelled = await client.session.send_request(
+                    CancelTaskRequest(params=CancelTaskRequestParams(task_id=task_id)),
+                    CancelTaskResult,
+                )
+                cancel_elapsed = time.monotonic() - cancel_started
+                assert cancel_elapsed < 5.8, (
+                    f"취소 응답이 조인 상한을 훌쩍 넘겨 {cancel_elapsed:.1f}s 매달렸다"
+                )
+                # 네트워크 대기와 겹치면 비종결일 수 있다 — 그 자체는 계약 위반이
+                # 아니다 (SPEC §15 4행 한정). 종결은 폴링으로 관찰한다.
+                assert cancelled.status in ("working", "cancelled")
+
+                deadline = time.monotonic() + 20
+                while time.monotonic() < deadline:
+                    got = await client.session.send_request(
+                        GetTaskRequest(params=GetTaskRequestParams(task_id=task_id)),
+                        GetTaskResult,
+                    )
+                    if got.status in ("completed", "failed", "cancelled"):
+                        break
+                    await anyio.sleep(0.1)
+                assert got.status == "cancelled", (
+                    f"fetch가 끝난 뒤에는 즉시 cancelled여야 한다 (실제 {got.status})"
+                )
+                assert _count_verifications(db_path) == 0, (
+                    "취소 후 남은 작업(앵커 매칭)이 실행됐다"
+                )
+            finally:
+                state.response_delay = 0.0
+    finally:
+        server.anchor_tasks.shutdown()
+        service.close()

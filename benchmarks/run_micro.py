@@ -38,12 +38,18 @@ def judge_cache_hit(p95: float, floor: float, budget: float = 15.0) -> tuple[boo
     """cache_hit 게이트 판정 — 어떤 기계에서도 회귀는 잡되, 디스크를 코드로
     오인하지 않는다 (D-189).
 
-    커밋 바닥(floor)이 예산 안이면 절대 기준으로 판정한다. 바닥이 이미
-    예산을 넘는 기계에서는 **바닥을 뺀 순비용**으로 판정한다 — "판정 불가"로
-    통째로 건너뛰면 예산의 7배짜리 회귀도 SKIP 뒤에 숨고, 마지막 줄의
-    "모든 게이트 통과"가 근거 없는 문장이 된다.
+    커밋 바닥(floor)이 예산의 절반 안이면 절대 기준으로 판정한다. 그보다
+    크면 **바닥을 뺀 순비용**으로 판정한다 — "판정 불가"로 통째로 건너뛰면
+    예산의 7배짜리 회귀도 SKIP 뒤에 숨고, 마지막 줄의 "모든 게이트 통과"가
+    근거 없는 문장이 된다 (D-189).
+
+    경계가 예산 그 자체였을 때의 불연속 (D-209): 바닥 14.91ms에서는 절대
+    기준이 비커밋 작업에 0.09ms만 허용해 FAIL, 15.29ms에서는 순비용으로
+    넉넉히 PASS였다 — 같은 주변 조건의 A/B(현재 vs 부모 커밋 교차 실행)로
+    코드 무회귀를 확인한 그 실행에서다. 바닥이 예산의 절반을 넘으면 이미
+    기계 상태가 지배 변수다.
     """
-    if floor < budget:
+    if floor < budget / 2:
         return (
             p95 < budget,
             f"p95={p95:.2f}ms (절대 기준, 커밋 바닥 {floor:.2f}ms)",
@@ -52,7 +58,7 @@ def judge_cache_hit(p95: float, floor: float, budget: float = 15.0) -> tuple[boo
     return (
         net < budget,
         f"순비용={net:.2f}ms (p95={p95:.2f}ms − 바닥 {floor:.2f}ms; "
-        f"바닥이 예산 {budget:.0f}ms를 넘는 기계라 순비용 기준)",
+        f"바닥이 예산 {budget:.0f}ms의 절반을 넘어 기계 상태가 지배 변수 — 순비용 기준)",
     )
 
 
@@ -166,23 +172,26 @@ def bench_cache_hit_under_load() -> None:
             time.sleep(0.1)
             try:
                 samples = []
+                rounds_before_samples = churn_rounds[0]
                 for _ in range(200):  # 이 머신의 fsync 꼬리 변동을 p95가 견디도록 n을 넉넉히
                     start = time.perf_counter()
                     result = ax.fetch("https://bench.invalid/doc")
                     samples.append((time.perf_counter() - start) * 1000)
                     assert result.outcome == "cache_hit"
             finally:
+                rounds_during_samples = churn_rounds[0] - rounds_before_samples
                 died_early = not worker.is_alive()
                 stop.set()
                 worker.join()
                 sys.setswitchinterval(previous_interval)
-    # 부하가 실제로 있었는지 게이트가 스스로 확인한다 (D-198). churn이
-    # 임포트 오류 등으로 즉사하면 이 벤치는 유휴를 재면서 PASS를 찍는다 —
-    # 지키려는 회귀(양보 기제 소실)가 churn 쪽을 깨는 방식이면 무력화된다.
+    # 부하가 실제로 있었는지 게이트가 스스로 확인한다 (D-198). 총 라운드
+    # 수가 아니라 **표본 구간과 겹친** 라운드를 센다 (D-208) — 표본 전에만
+    # 돌다 죽은 churn은 부하가 아니다.
     gate(
         "cache_hit(부하 중) 부하 유효성",
-        churn_rounds[0] >= 3 and not died_early,
-        f"매칭 {churn_rounds[0]}회, 조기 사망={died_early} — 부하 없이 잰 수치는 판정이 아니다",
+        rounds_during_samples >= 1 and not died_early,
+        f"표본 구간 매칭 {rounds_during_samples}회(총 {churn_rounds[0]}회), "
+        f"조기 사망={died_early} — 부하 없이 잰 수치는 판정이 아니다",
     )
     p95 = percentile(samples, 0.95)
     floor = commit_floor_ms()
@@ -190,44 +199,124 @@ def bench_cache_hit_under_load() -> None:
     gate("cache_hit(부하 중) p95 < 15ms", ok, detail + " (n=200, 매칭 루프 동시 실행)")
 
 
-def bench_matcher_worst_case(polite: bool = False) -> int:
-    """polite=True면 배경 워커와 같은 배치로 잰다 (D-196). 판정 게이트가
-    전경에서만 돌면 배경 경로의 판정 열화를 못 본다 — D-120이 "유휴만 재면
-    숨는다"였던 것과 같은 구조다. 반환: UNRESOLVED 수."""
-    from anchor.anchoring.approx import set_thread_yields
-
-    suffix = " (정중 모드)" if polite else ""
+def bench_matcher_worst_case() -> int:
+    """반환: UNRESOLVED 수 — 경합 벤치가 같은 실행의 전경 기준선으로 쓴다."""
     big_text = "채움 문장이 끝없이 이어지는 대폭 개편 문서다. " * 20000  # ~50만 자
     samples = []
     unresolved = 0
-    if polite:
-        set_thread_yields(True)
-    try:
-        for index in range(100):
-            start = time.perf_counter()
-            result = match_anchor(
-                big_text,
-                exact=f"이 문서 어디에도 없는 인용문 {index}번이다, 확실히.",
-                prefix="존재하지 않는 앞 문맥",
-                suffix="존재하지 않는 뒤 문맥",
-                position_hint=len(big_text) // 2,
-                budget_ms=200,
-            )
-            samples.append((time.perf_counter() - start) * 1000)
-            if result.state == UNRESOLVED:
-                unresolved += 1
-    finally:
-        if polite:
-            set_thread_yields(False)
+    for index in range(100):
+        start = time.perf_counter()
+        result = match_anchor(
+            big_text,
+            exact=f"이 문서 어디에도 없는 인용문 {index}번이다, 확실히.",
+            prefix="존재하지 않는 앞 문맥",
+            suffix="존재하지 않는 뒤 문맥",
+            position_hint=len(big_text) // 2,
+            budget_ms=200,
+        )
+        samples.append((time.perf_counter() - start) * 1000)
+        if result.state == UNRESOLVED:
+            unresolved += 1
     p99 = percentile(samples, 0.99)
-    gate(f"최악 사례{suffix} p99 < 250ms", p99 < 250.0, f"p99={p99:.1f}ms, UNRESOLVED {unresolved}/100")
+    gate("최악 사례 p99 < 250ms", p99 < 250.0, f"p99={p99:.1f}ms, UNRESOLVED {unresolved}/100")
     return unresolved
 
 
-def bench_normal_corpus(polite: bool = False) -> None:
-    from anchor.anchoring.approx import set_thread_yields
+def bench_matcher_under_contention(foreground_unresolved: int) -> None:
+    """배경 배치(정중 모드)의 매칭을 **전경 호출이 실제로 진행 중인 동안** 잰다
+    (D-202/D-203).
 
-    suffix = " (정중 모드)" if polite else ""
+    정중 모드를 켜기만 하고 전경 구간을 열지 않으면 양보는 한 번도 잠들지
+    않는다(전경 조건부, D-196) — 그런 "정중 모드 게이트"는 전경 실행과
+    바이트 동일한 항진식이었다. 전경은 **GIL 상주 작업**으로 만든다 — 같은
+    프로파일의 실경로가 있다: task가 도는 동안 들어온 동기 verify_citations
+    (전경 표시 아래의 매칭 루프). fetch 루프는 GIL을 자주 놓아(sqlite·fsync)
+    잠듦이 짧게 끝나므로 무상한 크레딧의 회귀를 드러내지 못했다(실측 240ms).
+
+    재는 것: ①경합 중에도 앵커 하나의 벽시계가 §10 상한 안인가 — 크레딧
+    상한 (D-203, 무상한이면 실측 p99 306~971ms) ②경합의 판정 비용
+    (UNRESOLVED)이 전경 기준선 대비 한도 안인가 — 크레딧 소실 회귀 검출.
+    """
+    import threading
+
+    from anchor.anchoring.approx import foreground_section, set_thread_yields
+
+    big_text = "채움 문장이 끝없이 이어지는 대폭 개편 문서다. " * 20000
+    small_text = "전경 재검증을 모사하는 짧은 본문 문장이 이어진다. " * 400
+    stop = threading.Event()
+    foreground_rounds = [0]
+    previous_interval = sys.getswitchinterval()
+    sys.setswitchinterval(0.001)  # 서빙 배치와 동일 (serve_forever)
+    try:
+
+        def foreground() -> None:
+            # 동기 verify를 모사: 전경 구간 안의 짧은 매칭 버스트.
+            while not stop.is_set():
+                with foreground_section():
+                    # 인용문이 길어야(k>3) myers 경로 — 순수 파이썬이라 GIL에
+                    # 상주한다. 짧으면 regex(C) 경로가 GIL을 놓아 배경의
+                    # 잠듦이 즉시 끝나고, 크레딧 회귀가 드러나지 않는다.
+                    match_anchor(
+                        small_text,
+                        exact="전경 경로의 재검증을 모사하기 위한 제법 긴 인용문이며 이 본문 어디에도 존재하지 않는다",
+                        prefix="존재하지 않는 앞",
+                        suffix="존재하지 않는 뒤",
+                        position_hint=0,
+                        budget_ms=5,
+                    )
+                foreground_rounds[0] += 1
+
+        worker = threading.Thread(target=foreground)
+        worker.start()
+        time.sleep(0.05)
+        samples = []
+        unresolved = 0
+        set_thread_yields(True)
+        try:
+            for index in range(100):
+                start = time.perf_counter()
+                result = match_anchor(
+                    big_text,
+                    exact=f"이 문서 어디에도 없는 인용문 {index}번이다, 확실히.",
+                    prefix="존재하지 않는 앞 문맥",
+                    suffix="존재하지 않는 뒤 문맥",
+                    position_hint=len(big_text) // 2,
+                    budget_ms=200,
+                )
+                samples.append((time.perf_counter() - start) * 1000)
+                if result.state == UNRESOLVED:
+                    unresolved += 1
+        finally:
+            set_thread_yields(False)
+            died_early = not worker.is_alive()
+            stop.set()
+            worker.join()
+    finally:
+        sys.setswitchinterval(previous_interval)
+    gate(
+        "최악 사례(경합 중) 전경 유효성",
+        foreground_rounds[0] >= 100 and not died_early,
+        f"전경 버스트 {foreground_rounds[0]}회, 조기 사망={died_early} — 전경 없이 "
+        "정중 모드만 켠 측정은 항진식이다",
+    )
+    p99 = percentile(samples, 0.99)
+    gate(
+        "최악 사례(경합 중) p99 < 250ms",
+        p99 < 250.0,
+        f"p99={p99:.1f}ms — 크레딧 무상한이면 예산이 경합에 비례해 늘어난다 (D-203)",
+    )
+    # 절대 문턱은 주변 부하(다른 프로세스)에 오탐한다 — 같은 실행의 전경
+    # 기준선 대비 **증분**으로 판정한다: 주변 부하는 두 측정에 똑같이 걸려
+    # 상쇄되고, 크레딧 기제의 차이만 남는다.
+    gate(
+        "최악 사례(경합 중) UNRESOLVED 증분 ≤ 40/100",
+        unresolved - foreground_unresolved <= 40,
+        f"경합 {unresolved}/100 vs 전경 {foreground_unresolved}/100 — 크레딧이 "
+        "사라지면 잠듦이 전부 예산에서 빠져 증분이 치솟는다",
+    )
+
+
+def bench_normal_corpus() -> None:
     golden = Path(__file__).parent.parent / "tests" / "fixtures" / "golden"
     texts = [p.read_text("utf-8") for p in sorted(golden.glob("*.expected.md"))]
     anchors = []
@@ -243,43 +332,29 @@ def bench_normal_corpus(polite: bool = False) -> None:
 
     started = time.perf_counter()
     unresolved = 0
-    if polite:
-        set_thread_yields(True)
-    try:
-        for text, selector in anchors:
-            result = match_anchor(
-                text,
-                exact=selector.exact,
-                prefix=selector.prefix,
-                suffix=selector.suffix,
-                position_hint=selector.position_hint,
-                budget_ms=200,
-            )
-            if result.state == UNRESOLVED:
-                unresolved += 1
-    finally:
-        if polite:
-            set_thread_yields(False)
+    for text, selector in anchors:
+        result = match_anchor(
+            text,
+            exact=selector.exact,
+            prefix=selector.prefix,
+            suffix=selector.suffix,
+            position_hint=selector.position_hint,
+            budget_ms=200,
+        )
+        if result.state == UNRESOLVED:
+            unresolved += 1
     elapsed = time.perf_counter() - started
     rate = unresolved / len(anchors)
-    gate(f"500 앵커 / 60초{suffix}", elapsed < 60.0, f"{len(anchors)}건 {elapsed:.2f}s")
-    gate(f"UNRESOLVED < 1%{suffix}", rate < 0.01, f"{unresolved}/{len(anchors)} ({rate:.2%})")
+    gate("500 앵커 / 60초", elapsed < 60.0, f"{len(anchors)}건 {elapsed:.2f}s")
+    gate("UNRESOLVED < 1%", rate < 0.01, f"{unresolved}/{len(anchors)} ({rate:.2%})")
 
 
 def main() -> int:
     bench_cache_hit()
     bench_cache_hit_under_load()
     foreground_unresolved = bench_matcher_worst_case()
-    polite_unresolved = bench_matcher_worst_case(polite=True)
-    # 판정은 호출 경로와 무관해야 한다 (D-196). 양보 시간이 예산에서
-    # 청구되면 여기가 0/100 vs 59~60/100으로 갈린다.
-    gate(
-        "최악 사례 판정의 경로 무관성",
-        abs(polite_unresolved - foreground_unresolved) <= 15,
-        f"전경 UNRESOLVED {foreground_unresolved}/100 vs 정중 모드 {polite_unresolved}/100",
-    )
+    bench_matcher_under_contention(foreground_unresolved)
     bench_normal_corpus()
-    bench_normal_corpus(polite=True)
     if FAILURES:
         print(f"\n게이트 실패: {', '.join(FAILURES)}", file=sys.stderr)
         return 1

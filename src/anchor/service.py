@@ -396,8 +396,9 @@ class Anchor:
         should_stop: 문서·앵커 사이마다 확인하는 중단 신호 (D-119). 참을
         돌려주면 남은 작업을 건드리지 않고 지금까지의 결과만 반환한다 —
         취소와 종료가 실제로 작업을 멈추게 하는 유일한 경로다 (D-034/D-035).
-        네트워크 요청(fetch) 안에서는 확인하지 않는다 — 반응 상한은 앵커
-        하나의 예산 + 진행 중인 요청 한 건이다 (D-197).
+        네트워크 대기(fetch) 안에서는 확인하지 않는다 — 반응 상한은 앵커
+        하나의 예산 + 진행 중인 한 문서의 페치 전체(robots·홉·재시도·폴백,
+        D-206)다 (D-197).
         """
         if time_budget_ms is not None and time_budget_ms <= 0:
             # 0·음수 예산은 매칭 3·4단계를 조용히 건너뛰어 실제 개정 인용문을
@@ -711,6 +712,7 @@ class Anchor:
             items.append({"anchor_id": anchor.id, fmt: serializer(document, version, anchor)})
         return items
 
+    @_foreground
     def collect_garbage(self, *, keep: int | None = None) -> dict:
         """고아 버전 정리 (SPEC §4.2). 앵커가 가리키는 버전은 절대 삭제하지 않는다."""
         if keep is None:

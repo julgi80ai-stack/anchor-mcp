@@ -113,3 +113,68 @@ def test_no_sleep_when_no_foreground_call_is_active(monkeypatch):
         assert sleeps["n"] == 0, "전경 호출이 없는데 배경 워커가 잠들었다"
     finally:
         approx.set_thread_yields(False)
+
+
+def test_budget_credit_is_capped(monkeypatch):
+    """D-203: 크레딧 무상한은 "앵커 하나의 예산"을 탄력적으로 만든다 —
+    경합 실측 앵커당 최대 971ms(예산의 4.9배), 서비스 계층 p99 345·478ms로
+    §10 "최악 사례 p99 < 250ms" 위반. D-196이 없앤 판정의 경로 의존이
+    시간의 경로 의존으로 옮겨온 것. 크레딧 총량은 예산의 20%로 묶는다 —
+    그 너머의 잠듦은 예산을 먹고, 경계 문서는 UNRESOLVED로 보류된다(실측된
+    경합의 정직한 보고, SPEC §10)."""
+    budget = Budget(100.0)  # 상한 = 20ms
+    r0 = budget.remaining_seconds()
+    budget.credit(0.050)
+    r1 = budget.remaining_seconds()
+    assert 0.010 < (r1 - r0) < 0.030, (
+        f"50ms 크레딧 요청에 상한 20ms만 인정돼야 한다 (실제 연장 {(r1 - r0) * 1000:.1f}ms)"
+    )
+    budget.credit(0.050)  # 상한 소진 후에는 더 밀리지 않는다
+    r2 = budget.remaining_seconds()
+    assert (r2 - r1) < 0.005, (
+        f"상한 소진 후에도 예산이 밀렸다 (+{(r2 - r1) * 1000:.1f}ms)"
+    )
+
+
+def test_all_public_service_methods_are_foreground_marked(tmp_path):
+    """D-204·D-207: `@_foreground` 10곳을 전부 제거해도 609 테스트가 통과했다
+    — 조치의 서비스 계층 절반에 회귀선이 없었다. 구조(래퍼 존재)와 행동
+    (호출 시 전경 구간 개방, 정중 스레드는 제외)을 함께 고정한다."""
+    from contextlib import contextmanager
+
+    from anchor.config import Config
+    from anchor.service import Anchor
+
+    public_api = [
+        "fetch", "cite", "verify", "diff_versions", "get_version",
+        "get_version_text", "list_documents", "cache_stats", "get_timemap",
+        "export_robust_links", "collect_garbage",
+    ]
+    for name in public_api:
+        assert hasattr(getattr(Anchor, name), "__wrapped__"), (
+            f"Anchor.{name}에 @_foreground가 없다 — 배경 워커가 이 호출을 위해 "
+            "양보하지 않는다"
+        )
+
+    calls = {"n": 0}
+
+    @contextmanager
+    def spy():
+        calls["n"] += 1
+        yield
+
+    import anchor.anchoring.approx as approx_module
+    original = approx_module.foreground_section
+    approx_module.foreground_section = spy
+    try:
+        with Anchor(db_path=tmp_path / "fg.db", config=Config(db_path=tmp_path / "fg.db")) as ax:
+            ax.list_documents()
+            assert calls["n"] == 1, "전경 호출이 전경 구간을 열지 않았다"
+            approx_module.set_thread_yields(True)
+            try:
+                ax.list_documents()
+            finally:
+                approx_module.set_thread_yields(False)
+            assert calls["n"] == 1, "정중(배경) 스레드의 재진입이 전경으로 표시됐다"
+    finally:
+        approx_module.foreground_section = original

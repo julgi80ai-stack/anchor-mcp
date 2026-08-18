@@ -51,3 +51,18 @@ def test_under_load_gate_fails_when_churn_dies(monkeypatch):
     monkeypatch.setattr(run_micro, "FAILURES", [])
     run_micro.bench_cache_hit_under_load()
     assert run_micro.FAILURES, "churn이 죽었는데 부하 게이트가 통과했다"
+
+
+def test_floor_just_under_budget_judges_net_cost():
+    """D-209: 바닥이 예산 바로 아래(예: 13~14.9ms)면 절대 기준은 비커밋
+    작업에 사실상 0ms를 허용한다 — 기계 상태가 코드 회귀로 둔갑한다(실측:
+    바닥 14.91에서 FAIL, 15.29에서 PASS — 같은 코드). 바닥이 예산의 절반을
+    넘으면 순비용 기준으로 판정한다."""
+    ok, detail = judge_cache_hit(p95=19.3, floor=13.0)
+    assert ok, detail  # 순비용 6.3ms — 코드는 죄가 없다
+    ok, _ = judge_cache_hit(p95=30.0, floor=13.0)
+    assert not ok  # 순비용 17ms — 이건 코드다
+    ok, _ = judge_cache_hit(p95=10.0, floor=5.0)
+    assert ok  # 건강한 바닥은 여전히 절대 기준
+    ok, _ = judge_cache_hit(p95=18.0, floor=5.0)
+    assert not ok
