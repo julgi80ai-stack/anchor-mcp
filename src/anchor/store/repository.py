@@ -15,7 +15,7 @@ import zstandard
 
 from anchor.models import AnchorRecord, Document, Version, uuid7
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 ZSTD_LEVEL = 6
 
 
@@ -109,6 +109,7 @@ MIGRATION_FILES: dict[int, str] = {
     3: "migrations/0003_current_version.sql",
     4: "migrations/0004_document_aliases.sql",
     5: "migrations/0005_version_source_unique.sql",
+    6: "migrations/0006_version_observation.sql",
 }
 
 
@@ -433,8 +434,41 @@ class Repository:
 
     # -- versions ----------------------------------------------------------
 
+    def observe_version(self, document_id: str, version_id: str, observed_at: str) -> None:
+        """원문에서 이 본문을 관측했다 — 포인터와 **관측 시각**을 함께 남긴다.
+
+        본문 해시로 중복을 제거하면 관측의 시간축이 접힌다. 되돌림에서
+        "직전에 서빙되던 판본"은 이 값으로만 알 수 있다 (D-083). 포인터가
+        그대로여도(같은 본문을 다시 관측) 시각은 갱신한다 — 관측은 일어났다.
+        """
+        with self._connection:
+            self._connection.execute(
+                """UPDATE versions SET last_observed_at = ?,
+                       last_observed_seq = (SELECT COALESCE(MAX(last_observed_seq), 0) + 1
+                                            FROM versions WHERE document_id = ?)
+                   WHERE id = ?""",
+                (observed_at, document_id, version_id),
+            )
+            self._connection.execute(
+                "UPDATE documents SET current_version = ? WHERE id = ?",
+                (version_id, document_id),
+            )
+
+    def list_versions_by_observation(self, document_id: str) -> list[Version]:
+        """관측 최신순 — `latest~N`의 좌표계 (D-083).
+
+        `list_versions`(캡처 시각 오름차순)는 TimeMap의 순서다. 둘은 다르며,
+        섞으면 일어난 적 없는 전이를 보여준다.
+        """
+        rows = self._connection.execute(
+            """SELECT * FROM versions WHERE document_id = ?
+               ORDER BY last_observed_seq DESC, captured_at DESC, id DESC""",
+            (document_id,),
+        ).fetchall()
+        return [self._to_version(row) for row in rows]
+
     def set_current_version(self, document_id: str, version_id: str) -> None:
-        """원문을 관측할 때마다 갱신한다 — "지금 서빙되는 본문"의 포인터."""
+        """포인터만 옮긴다 (마이그레이션·복구용). 관측은 observe_version이다."""
         with self._connection:
             self._connection.execute(
                 "UPDATE documents SET current_version = ? WHERE id = ?",
@@ -511,8 +545,12 @@ class Repository:
             self._connection.execute(
                 """INSERT INTO versions
                    (id, document_id, text_hash, raw_hash, pipeline_version, captured_at,
-                    byte_size, char_count, content_blob, http_status, source, source_uri)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    last_observed_at, last_observed_seq, byte_size, char_count,
+                    content_blob, http_status, source, source_uri)
+                   VALUES (?, ?, ?, ?, ?, ?, ?,
+                           (SELECT COALESCE(MAX(last_observed_seq), 0) + 1 FROM versions
+                            WHERE document_id = ?),
+                           ?, ?, ?, ?, ?, ?)""",
                 (
                     version_id,
                     document_id,
@@ -520,6 +558,8 @@ class Repository:
                     raw_hash,
                     pipeline_version,
                     captured_at,
+                    captured_at,
+                    document_id,
                     byte_size,
                     len(normalized_text),
                     blob,
@@ -687,6 +727,15 @@ class Repository:
             (since_iso,),
         ).fetchone()
         return int(total)
+
+    def latest_verified_version(self, anchor_id: str) -> tuple[str, str | None] | None:
+        """가장 최근 검증의 (시각, 검증한 버전 id). GONE/UNREACHABLE이면 버전은 None."""
+        row = self._connection.execute(
+            """SELECT checked_at, checked_version FROM verifications WHERE anchor_id = ?
+               ORDER BY checked_at DESC, id DESC LIMIT 1""",
+            (anchor_id,),
+        ).fetchone()
+        return (row["checked_at"], row["checked_version"]) if row else None
 
     def latest_verification_time(self, anchor_id: str) -> str | None:
         row = self._connection.execute(
@@ -889,6 +938,8 @@ class Repository:
             raw_hash=row["raw_hash"],
             pipeline_version=row["pipeline_version"],
             captured_at=row["captured_at"],
+            last_observed_at=row["last_observed_at"],
+            last_observed_seq=row["last_observed_seq"],
             byte_size=row["byte_size"],
             char_count=row["char_count"],
             http_status=row["http_status"],

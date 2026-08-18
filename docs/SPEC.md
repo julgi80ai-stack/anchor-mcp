@@ -14,7 +14,7 @@
 | 준거 스펙 | RFC 7089, RFC 9110 (조건부 요청), W3C Web Annotation Data Model, MCP 2026-07-28 |
 | 설계 근거 | `docs/decisions/0001` (선행기술·포지셔닝), `docs/decisions/0002` (라이선스·재사용) |
 
-> **v1.6 → v1.7 변경 요약**: 2차 감사 결함 중 **3단계(판정 정확성, 군집 5)** 의 조치를 반영했다. 근사 검색이 코어마다 **k 이하인 모든 자리**를 후보로 삼게 하고(§6.2), 3단계 후보 상한에 걸리면 확정하지 않고 4단계로 넘기고(§6.2), 4단계 결과에 **문맥 뒷받침 관문**을 세워 다른 절의 형제 문단이 "현재 모습"으로 제시되지 않게 하고(§6.2), 편집거리 상한의 문자 체계 반영을 연속 함수로 바꾸고(§6.2), 예산 확인 주기를 DP 칸 수로 환산하고(§6.2), 절단 시 `ALTERED`도 보류하게 했다(§6.3). 4단계의 실효 문서 길이 한계를 명시했다(§6.2, §10). 전체 목록은 §15 참조.
+> **v1.6 → v1.7 변경 요약**: 2차 감사 결함 중 **3단계(판정 정확성, 군집 5)** 의 조치를 반영했다. 근사 검색이 코어마다 **k 이하인 모든 자리**를 후보로 삼게 하고(§6.2), 3단계 후보 상한에 걸리면 확정하지 않고 4단계로 넘기고(§6.2), 4단계 결과에 **문맥 뒷받침 관문**을 세워 다른 절의 형제 문단이 "현재 모습"으로 제시되지 않게 하고(§6.2), 편집거리 상한의 문자 체계 반영을 연속 함수로 바꾸고(§6.2), 예산 확인 주기를 DP 칸 수로 환산하고(§6.2), 절단 시 `ALTERED`도 보류하게 했다(§6.3). 4단계의 실효 문서 길이 한계를 명시했다(§6.2, §10). **스키마를 v6으로 올려 관측의 시간축을 도입하고**(§4.1) `latest~N`을 그 축 위에서 정의했다(§7.4). 전체 목록은 §15 참조.
 >
 > **v1.5 → v1.6 변경 요약**: 2차 병렬 감사에서 실증된 결함 101건 중 1단계(정규화) 조치를 반영했다. **정규화 규칙을 재설계해 NORM_VERSION 3으로 올렸다**(§5.3) — 줄과 블록을 먼저 인식하고, 지우는 규칙은 산문 줄 안에서만 적용한다. 인용문 검색을 블록 구분자에 유연하게 바꾸고(§6.1), 골든 코퍼스가 정규화 규칙을 실제로 밟도록 요구하고(§12), 데이터가 든 구버전 DB의 마이그레이션을 테스트 대상으로 명시했다(§12). 전체 목록은 §16 참조.
 >
@@ -104,7 +104,7 @@ Memento(RFC 7089) 용어를 병기한다. Anchor의 로컬 개념은 Memento의 
 | **Document** | Original Resource (URI-R) | URL 하나에 대응하는 논리적 대상. 여러 Version을 가진다 |
 | **Version** | Memento (URI-M) | 특정 시점의 본문 스냅샷. `text_hash`로 식별한다 |
 | **버전 목록** | TimeMap (URI-T) | 한 Document의 모든 Version과 캡처 시각의 열거 |
-| `captured_at` | Memento-Datetime | 해당 버전을 획득한 시각 |
+| `captured_at` | Memento-Datetime | 해당 버전을 **처음** 획득한 시각 |
 | **Anchor** | — (W3C Annotation Selector) | 인용문 하나를 원문 안에서 다시 찾기 위한 위치 서술자 |
 | **Verification** | — | 특정 Anchor를 특정 Version에 대해 재검증한 결과 레코드 |
 | **Normalized text** | — | HTML에서 본문만 추출해 마크다운으로 변환하고 공백·유니코드를 정규화한 문자열. 모든 해시와 앵커의 기준 |
@@ -212,6 +212,15 @@ CREATE TABLE versions (
     http_status      INTEGER NOT NULL,
     source           TEXT NOT NULL DEFAULT 'live',-- live | archive
     source_uri       TEXT,                        -- 아카이브에서 온 경우 URI-M
+    -- 이 본문이 원문에서 **마지막으로 관측된** 때와 그 순서 (v1.7).
+    -- text_hash로 중복을 제거하면 관측의 시간축이 접힌다 — A→B→A에서 A는
+    -- 한 행이므로 "직전에 서빙되던 판본"을 captured_at으로는 알 수 없다.
+    -- captured_at은 Memento-Datetime이라 바꿀 수 없으므로 따로 둔다.
+    -- 시각은 사람에게 답하는 사실이고 순번은 기계에 답하는 순서다: 시각을
+    -- 순서로 쓰면 같은 초 안의 두 관측이 갈리지 않고 시계가 뒤로 밀리면
+    -- 순서가 뒤집힌다.
+    last_observed_at  TEXT NOT NULL,
+    last_observed_seq INTEGER NOT NULL,
     -- 본문이 같아도 출처가 다르면 별개의 memento다 (v1.5). 아카이브에서
     -- 되살린 본문이 기존 live 버전과 같다는 이유로 그 행을 재사용하면
     -- source·source_uri·Memento-Datetime이 통째로 사라진다.
@@ -269,6 +278,7 @@ CREATE TABLE robots_cache (
 );
 
 CREATE INDEX idx_versions_doc      ON versions(document_id, captured_at DESC);
+CREATE INDEX idx_versions_observed ON versions(document_id, last_observed_seq DESC);
 CREATE INDEX idx_anchors_doc       ON anchors(document_id);
 CREATE INDEX idx_verif_anchor      ON verifications(anchor_id, checked_at DESC);
 CREATE INDEX idx_fetchlog_time     ON fetch_log(requested_at DESC);
@@ -690,6 +700,8 @@ k = max(1, min(int(len(exact) * ratio), 64))
 
 파라미터명이 `from`/`to`가 아닌 이유: Python 예약어라 참조 구현의 도구 시그니처로 쓸 수 없다 (v1.3). 버전 참조는 `latest`, `latest~N`, 또는 버전 id.
 
+> **`latest~N`의 좌표계 (v1.7)**: `latest`가 포인터를 따르므로 `latest~N`도 **관측 순서**를 따른다. 캡처 시각으로 물러나면 두 좌표계가 섞여, 되돌림에서 `latest~1`이 `latest`와 같은 행을 가리켜 기본 diff가 비고(직전 fetch가 `changed`를 보고한 직후에), A→B→A→C→A에서는 **일어난 적 없는 전이(B→A)** 를 근거로 제시하며, 중간 판본 B는 어떤 `latest~N`으로도 도달할 수 없다. TimeMap(§7.8)은 이와 달리 **캡처 시각 순**이다 — RFC 7089의 시간축은 Memento-Datetime이기 때문이다. 둘은 서로 다른 질문에 답한다.
+
 ### 7.5 `get_version`
 
 과거 버전의 본문을 그대로 꺼낸다. 원문이 사라진 뒤에도 인용 당시의 텍스트를 확인할 수 있다.
@@ -697,6 +709,8 @@ k = max(1, min(int(len(exact) * ratio), 64))
 ### 7.6 `list_documents`
 
 캐시된 문서 목록을 상태·최종 확인 시각과 함께 반환한다. 필터: `status`, `host`, `has_pending_verification`.
+
+`has_pending_verification`의 기준은 **어느 버전을 검증했는가**이지 시각이 아니다 (v1.7). 되돌림은 옛 행을 재사용하고 아카이브는 과거 Memento 시각을 쓰므로, 시각으로 재면 현재 본문이 방금 바뀌었는데도 "검증할 것 없음"이 나온다 — 이 필터로 대상을 좁히는 워크플로는 판정이 뒤집힌 문서를 영영 다시 보지 않는다.
 
 ### 7.7 `cache_stats`
 
@@ -912,7 +926,7 @@ anchor-mcp/
 │   │   ├── robustlinks.py # Robust Links 직렬화
 │   │   └── diff.py
 │   ├── store/
-│   │   ├── schema.sql     # 신규 DB용 전체 스키마 (현재 v5)
+│   │   ├── schema.sql     # 신규 DB용 전체 스키마 (현재 v6)
 │   │   ├── migrations/    # 증분 SQL. 기존 DB는 이걸로 따라온다
 │   │   └── repository.py  # 유일한 SQL 접근 지점 (내부 직렬화 포함)
 │   ├── service.py         # 공개 파사드 (Anchor 클래스)
@@ -1075,6 +1089,9 @@ Anchor는 다음 성과 위에 서 있다. README와 문서에 명시한다.
 | 9 | 6.2, 10 | 4단계의 **실효 문서 길이 한계(약 19만 자)** 명시 | 2MB는 탐색 범위의 상한이지 예산 안에 훑을 수 있는 크기가 아니다. 사양이 허용하는 크기와 예산이 허용하는 크기가 다르다는 사실 자체가 적혀 있지 않았다 |
 | 10 | **6.3** | 절단 시 `ALTERED`도 보류한다 | "다 보지 못했으면 단정하지 않는다"가 `MISSING`에만 적용돼 있었다. 인용문이 경계에 걸치면 잘린 꼬리가 편집거리로 계산돼, 원문 무손상인데 잘린 조각이 "현재 모습"으로 제시됐다 |
 | 11 | 7.3 | `attention`에 `position_hint`·`found_offset` 추가 | 편집거리만으로는 같은 자리의 개정인지 다른 절에서 온 문단인지 호출자가 알 수 없다 |
+| 12 | **4.1** | **스키마 v6** — `versions.last_observed_at`·`last_observed_seq` | 본문 해시로 중복을 제거하면서 관측의 시간축이 접혔다. `latest`(포인터)와 `latest~N`(캡처 시각)이 갈려, 되돌림에서 기본 diff가 비고 일어난 적 없는 전이를 보여주고 중간 판본에 도달할 수 없었다 |
+| 13 | 7.4 | `latest~N`을 **관측 순서**로 정의. TimeMap은 캡처 시각 순 유지 | 위와 같다. 둘은 서로 다른 질문에 답한다 — RFC 7089의 시간축은 Memento-Datetime이다 |
+| 14 | 7.6 | `has_pending_verification`의 기준을 **검증한 버전**으로 | 시각 기준이라 되돌림·아카이브에서 현재 본문이 방금 바뀌었는데 False를 줬다 |
 
 이 절의 조치는 앞선 조치가 **절반만 고친 것**을 마저 고친 경우가 많다(1은 D-042, 2·4는 D-044, 7은 D-045, 6은 D-049의 뒤를 잇는다). 재현 스크립트 하나가 통과하는 것은 완료가 아니라는 §12의 교훈이 그대로 되풀이됐다.
 

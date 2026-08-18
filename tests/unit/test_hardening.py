@@ -23,7 +23,8 @@ from anchor.models import Document, Version
 def make_version(vid="v", source="live", uri=None):
     return Version(
         id=vid, document_id="d", text_hash="b3:h", raw_hash="b3:r",
-        pipeline_version="p", captured_at="2026-08-16T00:00:00Z", byte_size=1,
+        pipeline_version="p", captured_at="2026-08-16T00:00:00Z",
+        last_observed_at="2026-08-16T00:00:00Z", last_observed_seq=1, byte_size=1,
         char_count=1, http_status=200, source=source, source_uri=uri,
     )
 

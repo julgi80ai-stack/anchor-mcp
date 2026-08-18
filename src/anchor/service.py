@@ -636,7 +636,13 @@ class Anchor:
         return {"deleted_versions": deleted, "freed_bytes_estimate": freed, "keep": keep}
 
     def _resolve_version_ref(self, document_id: str, ref: str) -> Version:
-        """'latest', 'latest~N' 또는 버전 id를 버전으로 해석한다."""
+        """'latest', 'latest~N' 또는 버전 id를 버전으로 해석한다.
+
+        `latest~N`은 **관측 순서**로 N칸 물러난 판본이다 (D-083). 캡처 시각으로
+        물러나면 되돌림에서 일어난 적 없는 전이를 보여준다 — A→B→A→C→A의
+        직전 판본은 B가 아니라 C다. 본문 해시로 중복을 제거하면 관측의
+        시간축이 접히므로, 그 축을 따로 들고 있어야 답할 수 있다.
+        """
         if ref == "latest" or ref.startswith("latest~"):
             back = int(ref[7:]) if ref.startswith("latest~") else 0
             if back == 0:
@@ -645,25 +651,32 @@ class Anchor:
                 current = self._repository.current_version(document_id)
                 if current is not None:
                     return current
-            versions = self._repository.list_versions(document_id)
+            versions = self._repository.list_versions_by_observation(document_id)
             if not versions or back >= len(versions):
                 raise DocumentNotFound(
                     f"Cannot resolve version ref {ref!r} ({len(versions)} versions stored) — 버전 참조 해석 불가"
                 )
-            return versions[-1 - back]
+            return versions[back]
         version = self._repository.get_version(ref)
         if version is None or version.document_id != document_id:
             raise DocumentNotFound(f"Version not found — 버전을 찾을 수 없습니다: {ref}")
         return version
 
     def _has_pending_verification(self, document: Document) -> bool:
-        """최신 버전 캡처 이후 재검증되지 않은 앵커가 있는가."""
+        """현재 본문에 대해 아직 검증되지 않은 앵커가 있는가.
+
+        기준은 **어느 버전을 검증했는가**이지 시각이 아니다 (D-084). 되돌림은
+        옛 행을 재사용하고 아카이브는 과거 Memento 시각을 쓰므로, 시각으로
+        재면 현재 본문이 방금 바뀌었는데도 "검증할 것 없음"이 나온다 — 그
+        필터로 대상을 좁히는 워크플로는 판정이 뒤집힌 문서를 영영 다시
+        보지 않는다.
+        """
         latest = self._repository.current_version(document.id)
         if latest is None:
             return False
         for anchor in self._repository.select_anchors(document_ids=[document.id]):
-            last_checked = self._repository.latest_verification_time(anchor.id)
-            if last_checked is None or last_checked < latest.captured_at:
+            checked = self._repository.latest_verified_version(anchor.id)
+            if checked is None or checked[1] != latest.id:
                 return True
         return False
 
@@ -892,10 +905,12 @@ class Anchor:
         started: float,
         include_content: bool,
     ) -> FetchResult:
-        # 원문을 실제로 관측한 결과라면 "현재 본문" 포인터를 갱신한다.
+        # 원문을 실제로 관측한 결과라면 관측을 남긴다 — 포인터와 관측 시각.
         # cache_hit은 관측이 아니므로 건드리지 않는다 (D-011/D-012/D-024).
-        if outcome != "cache_hit" and document.current_version != version.id:
-            self._repository.set_current_version(document.id, version.id)
+        # 포인터가 그대로여도(같은 본문 재관측) 시각은 갱신한다: 되돌림에서
+        # "직전에 서빙되던 판본"을 이 시간축으로만 알 수 있다 (D-083).
+        if outcome != "cache_hit":
+            self._repository.observe_version(document.id, version.id, utcnow_iso())
         elapsed_ms = self._log(document.id, outcome, http_status, bytes_down, started)
         return FetchResult(
             document_id=document.id,

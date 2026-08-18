@@ -16,7 +16,14 @@ DOC = Document(
 )
 
 
-def make_version(vid: str, captured: str, source: str = "live", source_uri: str | None = None):
+def make_version(
+    vid: str,
+    captured: str,
+    source: str = "live",
+    source_uri: str | None = None,
+    observed: str | None = None,
+    seq: int = 0,
+):
     return Version(
         id=vid,
         document_id="doc-1",
@@ -24,6 +31,8 @@ def make_version(vid: str, captured: str, source: str = "live", source_uri: str 
         raw_hash=f"b3:raw-{vid}",
         pipeline_version="trafilatura/2.2.0+norm/1",
         captured_at=captured,
+        last_observed_at=observed or captured,
+        last_observed_seq=seq,
         byte_size=1000,
         char_count=500,
         http_status=200,

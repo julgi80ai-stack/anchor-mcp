@@ -151,7 +151,7 @@ def _user_version(path: Path) -> int:
 # -- D-077: 데이터가 든 구 DB의 마이그레이션 -------------------------------
 
 
-@pytest.mark.parametrize("source_version", [1, 2, 3, 4])
+@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5])
 def test_migrates_old_db_that_has_rows(tmp_path, source_version):
     path = tmp_path / f"v{source_version}.db"
     build_old_db(path, source_version)
@@ -168,7 +168,7 @@ def test_migrates_old_db_that_has_rows(tmp_path, source_version):
         assert after["verifications"] == before["verifications"] == 1
 
 
-@pytest.mark.parametrize("source_version", [1, 2, 3, 4])
+@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5])
 def test_migration_leaves_no_dangling_references(tmp_path, source_version):
     """표를 다시 만드는 v5 이후에도 참조가 살아 있어야 한다."""
     path = tmp_path / f"fk-v{source_version}.db"
@@ -457,3 +457,60 @@ def test_readonly_db_fails_fast_without_wal_retry(tmp_path):
     finally:
         os.chmod(tmp_path, 0o755)
         os.chmod(path, 0o644)
+
+
+# -- D-083: 관측 시간축을 뒤늦게 도입할 때 -----------------------------------
+
+
+@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5])
+def test_observation_timeline_is_seeded_for_existing_rows(tmp_path, source_version):
+    """v6 이전의 행에도 **관측 순서가 있어야** 한다 (D-083).
+
+    없으면 전부 0으로 남아 `latest~N`이 임의의 행을 가리킨다. 그때까지
+    알 수 있는 최선은 캡처 순서이고, 되돌림이 없었던 문서에서는 그것이
+    실제 관측 순서와 같다.
+    """
+    path = tmp_path / f"obs-v{source_version}.db"
+    build_old_db(path, source_version)
+    Repository(path).close()
+
+    connection = sqlite3.connect(path)
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute(
+            """SELECT document_id, id, captured_at, last_observed_at, last_observed_seq
+               FROM versions ORDER BY document_id, captured_at"""
+        ).fetchall()
+        assert rows, "픽스처에 버전이 없다"
+        for row in rows:
+            assert row["last_observed_at"] == row["captured_at"], "관측 시각이 비었다"
+        per_document: dict[str, list[int]] = {}
+        for row in rows:
+            per_document.setdefault(row["document_id"], []).append(row["last_observed_seq"])
+        for document_id, sequence in per_document.items():
+            assert len(set(sequence)) == len(sequence), f"{document_id}: 순번이 겹친다"
+            assert sequence == sorted(sequence), f"{document_id}: 캡처 순서와 어긋난다"
+            assert min(sequence) >= 1, f"{document_id}: 0이 남았다"
+    finally:
+        connection.close()
+
+
+def test_observation_sequence_continues_after_migration(tmp_path):
+    """마이그레이션이 매긴 순번 **위로** 새 관측이 쌓여야 한다 (D-083).
+
+    새 관측이 1부터 다시 시작하면 옛 판본이 최신으로 보인다.
+    """
+    path = tmp_path / "continue.db"
+    build_old_db(path, 5)
+    repository = Repository(path)
+    try:
+        document_id = repository.list_documents()[0].id
+        before = max(v.last_observed_seq for v in repository.list_versions(document_id))
+        oldest = repository.list_versions(document_id)[0]
+        repository.observe_version(document_id, oldest.id, "2026-08-18T00:00:00Z")
+        after = repository.get_version(oldest.id)
+        assert after is not None
+        assert after.last_observed_seq > before, "새 관측이 옛 순번 아래로 들어갔다"
+        assert repository.list_versions_by_observation(document_id)[0].id == oldest.id
+    finally:
+        repository.close()

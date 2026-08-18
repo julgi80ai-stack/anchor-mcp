@@ -98,7 +98,9 @@ class Version:
     text_hash: str
     raw_hash: str
     pipeline_version: str
-    captured_at: str
+    captured_at: str      # 처음 캡처된 때 (Memento-Datetime)
+    last_observed_at: str   # 원문에서 마지막으로 관측된 때 (v6, D-083)
+    last_observed_seq: int  # 그 관측의 순서 — 같은 초의 두 관측을 가른다
     byte_size: int
     char_count: int
     http_status: int

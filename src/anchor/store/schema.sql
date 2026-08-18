@@ -1,5 +1,5 @@
 -- SPDX-License-Identifier: Apache-2.0
--- Anchor 스키마 v5 — 신규 DB용 전체 스키마 (SPEC §4.1 + robots 캐시).
+-- Anchor 스키마 v6 — 신규 DB용 전체 스키마 (SPEC §4.1 + robots 캐시).
 -- 기존 DB는 migrations/ 아래의 증분 SQL로 따라온다.
 
 -- 논리적 문서 (Memento: Original Resource / URI-R). URL 정규화 후 유일.
@@ -27,13 +27,20 @@ CREATE TABLE versions (
     text_hash        TEXT NOT NULL,               -- blake3(normalized_text)
     raw_hash         TEXT NOT NULL,               -- blake3(원본 바이트)
     pipeline_version TEXT NOT NULL,
-    captured_at      TEXT NOT NULL,               -- Memento-Datetime 대응
+    captured_at      TEXT NOT NULL,               -- Memento-Datetime 대응 (처음 캡처된 때)
     byte_size        INTEGER NOT NULL,
     char_count       INTEGER NOT NULL,
     content_blob     BLOB NOT NULL,               -- zstd(normalized_text)
     http_status      INTEGER NOT NULL,
     source           TEXT NOT NULL DEFAULT 'live',-- live | archive
     source_uri       TEXT,                        -- 아카이브에서 온 경우 URI-M
+    -- 이 본문이 원문에서 **마지막으로 관측된** 때와 그 순서 (v6). 본문 해시로
+    -- 중복을 제거하면 관측의 시간축이 접히므로, 되돌림에서 "직전에 서빙되던
+    -- 판본"을 이 값으로만 알 수 있다. captured_at은 Memento-Datetime이라 못
+    -- 바꾼다. 시각은 사람에게 답하는 사실이고 순번은 기계에 답하는 순서다 —
+    -- 시각을 순서로 쓰면 같은 초 안의 두 관측이 갈리지 않는다.
+    last_observed_at  TEXT NOT NULL,
+    last_observed_seq INTEGER NOT NULL,
     -- 같은 본문이라도 출처가 다르면 별개의 memento다 (v5).
     UNIQUE (document_id, text_hash, source)
 );
@@ -94,6 +101,7 @@ CREATE TABLE verifications (
 );
 
 CREATE INDEX idx_versions_doc  ON versions(document_id, captured_at DESC);
+CREATE INDEX idx_versions_observed ON versions(document_id, last_observed_seq DESC);
 CREATE INDEX idx_fetchlog_time ON fetch_log(requested_at DESC);
 CREATE INDEX idx_anchors_doc   ON anchors(document_id);
 CREATE INDEX idx_verif_anchor  ON verifications(anchor_id, checked_at DESC);
