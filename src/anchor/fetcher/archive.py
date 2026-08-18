@@ -79,7 +79,11 @@ class ArchiveFallback:
                 content_type=response.headers.get("Content-Type", ""),
                 bytes_down=lookup_bytes + len(response.content),
             )
-        except httpx.HTTPError:
+        except Exception:
+            # 폴백의 실패가 **원래의 실패 보고를 가려서는 안 된다** (D-089).
+            # 애그리게이터·CDX 응답은 우리가 통제하지 않는 입력이라, 파싱에서
+            # 어떤 예외가 나오든 여기서 끝낸다 — 새어 나가면 `AnchorError`가
+            # 아니라서 `verify()`가 잡지 못하고 보고서 전체가 사라진다.
             return None
 
     # -- 백엔드 ------------------------------------------------------------
@@ -94,7 +98,7 @@ class ArchiveFallback:
             last = mementos.get("last") or (mementos.get("list") or [None])[-1]
             if not last:
                 return None
-            return last["uri"], last["datetime"], len(response.content)
+            return last["uri"], _to_iso(last["datetime"]), len(response.content)
         except (ValueError, KeyError, TypeError):
             return None
 
@@ -124,6 +128,26 @@ class ArchiveFallback:
         # id_ 접미사는 재생 UI 없이 원본 바이트를 돌려준다.
         uri_m = f"{WAYBACK_BASE}/web/{timestamp}id_/{original}"
         return uri_m, _cdx_timestamp_to_iso(timestamp), len(response.content)
+
+
+def _to_iso(value: str) -> str:
+    """애그리게이터가 준 Memento 시각을 ISO 8601로 확인·변환한다 (D-091).
+
+    검증 없이 저장하면 그 문자열이 `versions.captured_at`에 영구히 남아,
+    이후 그 문서의 `get_timemap`이 매번 실패한다 — 지우는 공개 API가 없으므로
+    문서가 회복 불가능하게 오염된다. 해석할 수 없으면 폴백 자체를 포기한다.
+    """
+    from email.utils import parsedate_to_datetime
+
+    if not isinstance(value, str):
+        raise ValueError(f"Memento datetime is not a string: {value!r}")
+    try:
+        moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        moment = parsedate_to_datetime(value)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _cdx_timestamp_to_iso(timestamp: str) -> str:

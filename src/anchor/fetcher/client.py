@@ -108,11 +108,12 @@ class ConditionalFetcher:
                 raise FetchFailed(
                     f"Redirect without Location — 목적지 없는 리다이렉트: {current}",
                     http_status=response.status,
+                    reason="redirect",
                 )
             current = str(httpx.URL(current).join(location))
 
         raise FetchFailed(
-            f"Too many redirects — 리다이렉트 한도 초과: {url}", http_status=None
+            f"Too many redirects — 리다이렉트 한도 초과: {url}", reason="redirect"
         )
 
     def _retry_delay(self, response: FetchResponse, attempt: int) -> float | None:
@@ -166,11 +167,15 @@ class ConditionalFetcher:
                 )
                 return fetched
         except httpx.TimeoutException as error:
-            raise FetchFailed(f"Timeout — 타임아웃: {url}") from error
+            raise FetchFailed(f"Timeout — 타임아웃: {url}", reason="timeout") from error
         except httpx.TooManyRedirects as error:
-            raise FetchFailed(f"Too many redirects — 리다이렉트 한도 초과: {url}") from error
+            raise FetchFailed(
+                f"Too many redirects — 리다이렉트 한도 초과: {url}", reason="redirect"
+            ) from error
         except httpx.HTTPError as error:
-            raise FetchFailed(f"Network error — 네트워크 오류: {url} ({error})") from error
+            raise FetchFailed(
+                f"Network error — 네트워크 오류: {url} ({error})", reason="network"
+            ) from error
 
 
 def _parse_retry_after(raw: str) -> float | None:

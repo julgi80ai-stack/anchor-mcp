@@ -382,3 +382,57 @@ def test_reference_created_between_select_and_delete_is_respected(tmp_path):
         assert deleted > 0, "참조 하나 때문에 삭제 전체가 무산됐다"
     finally:
         repository.close()
+
+
+def test_reuse_and_point_is_atomic(tmp_path):
+    """되돌림 재사용은 **찾기와 가리키기가 한 트랜잭션**이어야 한다 (D-177).
+
+    갈라져 있으면 그 사이 다른 프로세스의 `anchor gc`가 그 행을 지울 수 있고,
+    `UPDATE`가 FK로 죽어 맨 `sqlite3.IntegrityError`가 MCP 호출자에게 올라간다.
+    창은 **별도 커넥션**으로 연다 — 같은 커넥션은 재진입 락이라 충실하지 않다.
+    """
+    path = tmp_path / "reuse.db"
+    repository = Repository(path)
+    other = Repository(path)
+    try:
+        document_id, version_ids = _seed(repository, "https://e.test/a", 3)
+        repository.set_current_version(document_id, version_ids[-1])
+        target = repository.get_version(version_ids[0])
+        assert target is not None
+
+        deleted = threading.Event()
+
+        def racer() -> None:
+            """찾기와 가리키기 사이를 노려 다른 커넥션에서 지운다."""
+            try:
+                with other._connection as connection:
+                    connection.execute("DELETE FROM versions WHERE id = ?", (target.id,))
+                deleted.set()
+            except Exception:  # noqa: BLE001 — 원자적이면 여기서 막힌다
+                pass
+
+        wrapper = repository._connection
+        original = wrapper.execute
+        state = {"raced": False}
+
+        def hook(sql, params=()):
+            rows = original(sql, params)
+            if not state["raced"] and "WHERE document_id = ? AND text_hash = ?" in sql:
+                state["raced"] = True
+                thread = threading.Thread(target=racer)
+                thread.start()
+                thread.join(timeout=1.0)
+            return rows
+
+        wrapper.execute = hook  # type: ignore[method-assign]
+        try:
+            result = repository.reuse_and_point(document_id, target.text_hash, "live")
+        finally:
+            wrapper.execute = original  # type: ignore[method-assign]
+
+        assert state["raced"], "창이 열리지 않았다 — 픽스처가 조회를 가로채지 못했다"
+        assert result is not None, "재사용 대상이 조회와 갱신 사이에 사라졌다"
+        assert repository.current_version(document_id).id == target.id
+    finally:
+        repository.close()
+        other.close()

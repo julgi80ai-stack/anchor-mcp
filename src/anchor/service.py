@@ -52,6 +52,26 @@ _UNREGISTERED = "-"
 # 아카이브 폴백으로 이어지는 원본 실패 (SPEC §5.2 5→6단계).
 _ARCHIVE_FALLBACK_STATUSES = frozenset({402, 403, 404, 410, 429})
 
+# 연결 자체가 안 되는 실패만 "사라졌을 수 있다"로 본다. 타임아웃·리다이렉트
+# 이상은 회복 가능한 일시 실패이므로 폴백에 들어갈 자격이 없다 (D-088).
+_ARCHIVE_FALLBACK_REASONS = frozenset({"network"})
+
+
+def _may_consult_archive(error: AnchorError) -> bool:
+    """이 실패가 아카이브를 확인할 자격이 있는가 (SPEC §5.2 6단계).
+
+    사이트 소유자가 **명시적으로** 거부한 경우는 어떤 우회도 하지 않는다.
+    규칙을 물어보지 못한 경우(호스트 소멸·robots 5xx)와 연결 실패는 다른
+    호스트인 공개 아카이브를 확인하는 것까지 막을 이유가 없다 (D-053).
+    """
+    if isinstance(error, RobotsDisallowed):
+        return error.reason != "explicit"
+    if isinstance(error, FetchFailed):
+        if error.http_status is not None:
+            return error.http_status in _ARCHIVE_FALLBACK_STATUSES
+        return error.reason in _ARCHIVE_FALLBACK_REASONS
+    return False
+
 # URL별 직렬화용 스트라이프 락 개수. 서로 다른 URL이 같은 락을 쓰는 충돌은
 # 성능 손해일 뿐 정확성 문제가 아니므로, 무한히 늘어나는 URL별 락 사전
 # 대신 고정 크기 배열을 쓴다.
@@ -197,7 +217,7 @@ class Anchor:
             # 호스트인 공개 아카이브를 확인하는 것까지 막을 이유는 없다.
             # 호스트가 통째로 사라지는 것은 링크 부패의 가장 흔한 형태이자
             # 아카이브 구제가 가장 필요한 상황이다 (SPEC §5.2 6단계).
-            if isinstance(error, RobotsDisallowed) and error.reason == "explicit":
+            if not _may_consult_archive(error):
                 raise
             recovered = self._recover_from_archive(
                 norm_url, document, started, include_content
@@ -714,9 +734,17 @@ class Anchor:
         if latest is None:
             outcome = "created"
             version = self._insert_version(document, response, raw_hash, text_hash, normalized, now)
-        elif text_hash == latest.text_hash:
+        elif text_hash == latest.text_hash and latest.source == "live":
             outcome = "unchanged"
             version = latest
+        elif text_hash == latest.text_hash:
+            # 본문은 같지만 지금 가리키는 것은 **아카이브 판본**이다. 그대로
+            # 재사용하면 살아 있는 원문의 인용에 아카이브 URI-M과 과거 날짜가
+            # 달린다 — 출처가 사실과 달라진다 (D-087).
+            outcome = "changed"
+            version = self._insert_or_reuse(
+                document, response, raw_hash, text_hash, normalized, now
+            )
         elif (
             raw_hash == latest.raw_hash
             and normalized.pipeline_version != latest.pipeline_version
@@ -784,6 +812,11 @@ class Anchor:
             self._repository.set_document_status(
                 document.id, status_label or document.status, now
             )
+            # 원본의 검증자를 버린다 (D-087). 남겨 두면 원본이 되살아났을 때
+            # 그 etag로 조건부 GET을 보내고, 원본이 정직하게 준 304를 Anchor가
+            # "변한 것 없음"으로 읽어 아카이브 본문을 계속 현재 본문으로
+            # 보고한다 — `force_refresh`로도 벗어나지 못한다.
+            self._repository.clear_validators(document.id)
 
         # 본문이 같아도 아카이브 관측은 별개의 memento다 — 시각도 URI-M도
         # 다르다. 기존 live 행을 재사용하면 "아카이브에서 확인됨"이라는
@@ -820,8 +853,9 @@ class Anchor:
         now: str,
     ) -> Version:
         # 과거 버전과 동일한 본문으로 되돌아온 경우 UNIQUE(document_id, text_hash)에
-        # 걸리므로 기존 버전을 재사용한다.
-        existing = self._repository.find_version_by_text_hash(document.id, text_hash)
+        # 걸리므로 기존 버전을 재사용한다. 찾기와 가리키기를 **한 트랜잭션**으로
+        # 묶어, 그 사이 gc가 지워도 맨 예외가 새어 나가지 않게 한다 (D-177).
+        existing = self._repository.reuse_and_point(document.id, text_hash)
         if existing is not None:
             return existing
         return self._insert_version(document, response, raw_hash, text_hash, normalized, now)

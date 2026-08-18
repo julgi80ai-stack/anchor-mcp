@@ -52,6 +52,8 @@ class FixtureState:
         self.redirect_status: int = 301
         # 실패 응답에도 본문을 실을지 (크기 상한 검증용)
         self.status_override_with_body: bool = False
+        # 애그리게이터 응답을 이상한 페이로드로 바꿔치기 (파싱 견고성 검증용)
+        self.archive_payload_override: str | None = None
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -150,6 +152,14 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         # MemGator Time Travel 호환 API
+        if state.archive_payload_override is not None:
+            payload = state.archive_payload_override.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         if state.archive_html is None:
             self.send_response(404)
             self.send_header("Content-Length", "0")

@@ -386,6 +386,38 @@ class Repository:
                 (status, now, document_id),
             )
 
+    def clear_validators(self, document_id: str) -> None:
+        """조건부 요청용 검증자를 버린다 (D-087).
+
+        아카이브 판본을 현재 본문으로 삼는 동안 원본의 etag를 들고 있으면,
+        원본이 되살아났을 때 그 etag로 304를 받아 아카이브에 고착된다.
+        """
+        with self._connection:
+            self._connection.execute(
+                "UPDATE documents SET etag = NULL, last_modified = NULL WHERE id = ?",
+                (document_id,),
+            )
+
+    def reuse_and_point(self, document_id: str, text_hash: str, source: str = "live"):
+        """같은 본문의 기존 버전을 찾아 **한 트랜잭션에서** 현재 버전으로 가리킨다.
+
+        찾기와 가리키기가 갈라져 있으면 그 사이에 gc가 그 행을 지울 수 있고,
+        `UPDATE`가 FK로 죽어 맨 `sqlite3.IntegrityError`가 호출자에게 올라간다
+        (D-177). 사라졌으면 None을 돌려 호출자가 새로 넣게 한다.
+        """
+        with self._connection:
+            row = self._connection.execute(
+                "SELECT * FROM versions WHERE document_id = ? AND text_hash = ? AND source = ?",
+                (document_id, text_hash, source),
+            ).fetchone()
+            if row is None:
+                return None
+            self._connection.execute(
+                "UPDATE documents SET current_version = ? WHERE id = ?",
+                (row["id"], document_id),
+            )
+            return self._to_version(row)
+
     def set_robots_allowed(self, document_id: str, allowed: bool) -> None:
         with self._connection:
             self._connection.execute(

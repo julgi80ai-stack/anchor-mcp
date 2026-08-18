@@ -52,8 +52,17 @@ class DocumentNotFound(AnchorError):
 
 
 class FetchFailed(AnchorError):
-    """HTTP 획득 실패. http_status에 서버가 준 상태를 그대로 담는다."""
+    """HTTP 획득 실패. http_status에 서버가 준 상태를 그대로 담는다.
 
-    def __init__(self, message: str, *, http_status: int | None = None) -> None:
+    `reason`은 **아카이브 폴백에 들어갈 자격**을 가른다 (D-088).
+    `"network"`(연결 자체가 안 됨 — 호스트 소멸)는 폴백의 본래 목적이지만,
+    `"timeout"`·`"redirect"`는 회복 가능한 일시 실패다. 그것까지 폴백으로
+    보내면 옛 스냅샷이 현재 본문이 되고 멀쩡한 인용이 MISSING으로 단정된다.
+    """
+
+    def __init__(
+        self, message: str, *, http_status: int | None = None, reason: str = "status"
+    ) -> None:
         super().__init__(message)
         self.http_status = http_status
+        self.reason = reason
