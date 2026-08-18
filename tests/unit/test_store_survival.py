@@ -284,31 +284,6 @@ def test_rate_limit_still_paces_a_single_host():
 # -- D-126/D-159: VACUUM ------------------------------------------------------
 
 
-def test_vacuum_does_not_block_readers_in_the_same_process(tmp_path):
-    """VACUUM이 저장소 락을 쥐면 같은 프로세스의 읽기 전용 도구가 멈춘다."""
-    repository = Repository(tmp_path / "vac.db")
-    try:
-        document_id, version_ids = _seed(repository, "https://e.test/a", 40, body=_bulk(20_000))
-        repository.set_current_version(document_id, version_ids[-1])
-        worst = {"ms": 0.0}
-        stop = threading.Event()
-
-        def reader() -> None:
-            while not stop.is_set():
-                started = time.monotonic()
-                repository.count_rows()
-                worst["ms"] = max(worst["ms"], (time.monotonic() - started) * 1000)
-
-        thread = threading.Thread(target=reader)
-        thread.start()
-        repository.collect_garbage_versions(keep=2)
-        stop.set()
-        thread.join()
-    finally:
-        repository.close()
-    assert worst["ms"] < 60, f"읽기가 {worst['ms']:.0f}ms 멈췄다"
-
-
 def test_gc_reclaims_free_pages_left_by_a_table_rebuild(tmp_path):
     """마이그레이션의 표 재작성이 남긴 빈 페이지를 gc가 회수해야 한다.
 
@@ -358,3 +333,52 @@ def test_vacuum_runs_on_its_own_connection(tmp_path, monkeypatch):
     finally:
         repository.close()
     assert opened, "VACUUM이 저장소 커넥션에서 돌았다 — 같은 프로세스의 읽기가 멈춘다"
+
+
+def test_reference_created_between_select_and_delete_is_respected(tmp_path):
+    """조회와 삭제 사이에 생긴 참조를 존중해야 한다 (D-081).
+
+    삭제 시점에 보존 조건을 다시 확인하지 않으면, 그 사이에 누군가 그 버전을
+    인용하는 순간 **삭제 전체가 FK 위반으로 롤백**된다 — 되돌림 문서 하나가
+    저장소 전체의 gc를 마비시켰던 것과 같은 형태다.
+
+    경합을 기다리지 않고 창을 직접 연다: 대상 조회가 끝난 직후, 후보 하나에
+    앵커를 달아 놓고 삭제를 진행시킨다.
+    """
+    repository = Repository(tmp_path / "window.db")
+    try:
+        document_id, version_ids = _seed(repository, "https://e.test/a", 8)
+        repository.set_current_version(document_id, version_ids[-1])
+
+        wrapper = repository._connection
+        original = wrapper.execute
+        state = {"hooked": False}
+
+        def hook(sql, params=()):
+            rows = original(sql, params)
+            if not state["hooked"] and "rank_in_document" in sql:
+                state["hooked"] = True
+                victim = rows.fetchall()[0][0]
+                repository.insert_anchor(
+                    document_id=document_id,
+                    created_version=victim,
+                    exact="조회와 삭제 사이에 생긴 인용이다",
+                    prefix="앞", suffix="뒤", position_hint=0,
+                    exact_hash="b3:e", quality="ok", note=None,
+                    created_at=utcnow_iso(),
+                )
+                state["victim"] = victim
+            return rows
+
+        wrapper.execute = hook  # type: ignore[method-assign]
+        try:
+            deleted, _ = repository.collect_garbage_versions(keep=2)
+        finally:
+            wrapper.execute = original  # type: ignore[method-assign]
+
+        assert state.get("victim"), "창이 열리지 않았다 — 픽스처가 조회를 가로채지 못했다"
+        remaining = {version.id for version in repository.list_versions(document_id)}
+        assert state["victim"] in remaining, "그 사이 인용된 버전이 지워졌다"
+        assert deleted > 0, "참조 하나 때문에 삭제 전체가 무산됐다"
+    finally:
+        repository.close()

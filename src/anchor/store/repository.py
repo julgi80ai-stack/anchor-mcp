@@ -59,6 +59,12 @@ class _SerializedConnection:
     def __enter__(self) -> _SerializedConnection:
         self._lock.acquire()
         try:
+            if self._connection.in_transaction:
+                # 앞선 실패가 트랜잭션을 남겼다(롤백 자체가 실패한 경우).
+                # 정리하지 않으면 이후 모든 쓰기가 "cannot start a transaction
+                # within a transaction"으로 조용히 막힌다 — D-124가 고치려던
+                # 바로 그 상태가 다른 경로로 재현된다.
+                self._rollback_quietly()
             self._connection.execute("BEGIN IMMEDIATE")
         except BaseException:
             self._lock.release()
@@ -124,6 +130,19 @@ _WAL_RETRY_SECONDS = 0.05
 _BUSY_TIMEOUT_SECONDS = 60.0
 # 이보다 적게 남은 빈 페이지는 회수 비용이 이득보다 크다.
 _VACUUM_MIN_FREE_PAGES = 16
+# 한 번에 지우는 개수. SQLite의 바인딩 변수 상한보다 넉넉히 아래로 둔다.
+_DELETE_BATCH = 400
+
+# gc가 지워도 되는 버전의 조건. **조회와 삭제 양쪽에서 같은 조건을 쓴다** —
+# 삭제 시점에 다시 확인해야 그 사이에 생긴 참조를 존중할 수 있다.
+_VERSION_IS_UNREFERENCED = """
+    NOT EXISTS (SELECT 1 FROM anchors a WHERE a.created_version = {ref})
+    AND NOT EXISTS (SELECT 1 FROM verifications f WHERE f.checked_version = {ref})
+    -- 원문이 **지금 서빙하는** 본문은 캡처 시각 최대값이 아닐 수 있다
+    -- (되돌림·아카이브). 보호하지 않으면 되돌림 문서 하나가 저장소 전체의
+    -- gc를 마비시킨다 (D-080).
+    AND NOT EXISTS (SELECT 1 FROM documents d WHERE d.current_version = {ref})
+"""
 
 
 def _enable_wal(connection: sqlite3.Connection) -> None:
@@ -521,38 +540,52 @@ class Repository:
 
         반환: (삭제된 버전 수, 회수된 blob 바이트 추정치)
         """
-        # 대상 선정과 삭제는 **한 트랜잭션**이어야 한다. 그 사이에 다른 스레드가
-        # 그 버전을 참조하면(cite·현재 버전 갱신) 둘 다 FK 위반으로 실패한다 (D-081).
-        with self._connection as connection:
-            rows = connection.execute(
-                """SELECT id, LENGTH(content_blob) FROM versions v
-                   WHERE (
-                     SELECT COUNT(*) FROM versions newer
-                     WHERE newer.document_id = v.document_id
-                       AND (newer.captured_at > v.captured_at
-                            OR (newer.captured_at = v.captured_at AND newer.id > v.id))
-                   ) >= ?
-                   AND NOT EXISTS (SELECT 1 FROM anchors a WHERE a.created_version = v.id)
-                   AND NOT EXISTS (SELECT 1 FROM verifications f WHERE f.checked_version = v.id)
-                   -- 원문이 **지금 서빙하는** 본문은 캡처 시각 최대값이 아닐 수 있다
-                   -- (되돌림·아카이브). 보호하지 않으면 FK에 걸려 삭제가 통째로
-                   -- 롤백되고, 되돌림 문서 하나가 저장소 전체의 gc를 마비시킨다 (D-080).
-                   AND NOT EXISTS (
-                     SELECT 1 FROM documents d WHERE d.current_version = v.id
-                   )""",
-                (keep,),
-            ).fetchall()
-            ids = [row[0] for row in rows]
-            freed = sum(row[1] for row in rows)
-            if ids:
-                connection.executemany(
-                    "DELETE FROM versions WHERE id = ?", [(identifier,) for identifier in ids]
-                )
-        self._vacuum_if_fragmented()
-        return len(ids), freed
+        # 대상 선정은 **락 밖에서** 한다. 이 조회는 문서당 버전 수에 제곱이라
+        # (16,000 버전에서 20초 실측), 트랜잭션 안에 두면 그 시간만큼 쓰기 락을
+        # 붙잡아 MCP 서버의 모든 쓰기가 멈춘다 — SPEC §10 동시성 격리 위반.
+        # 순위는 **윈도 함수**로 매긴다. 문서별 상관 서브쿼리는 버전 수에 제곱이라
+        # (8,000 버전 한 문서에서 3.4초, 16,000에서 20초 실측) 그 시간만큼 저장소가
+        # 붙잡혀 다른 도구가 전부 멈춘다.
+        rows = self._connection.execute(
+            f"""SELECT id, size FROM (
+                  SELECT id, LENGTH(content_blob) AS size,
+                         ROW_NUMBER() OVER (
+                           PARTITION BY document_id ORDER BY captured_at DESC, id DESC
+                         ) AS rank_in_document
+                  FROM versions
+                ) ranked
+                WHERE rank_in_document > ?
+                  AND {_VERSION_IS_UNREFERENCED.format(ref="ranked.id")}""",
+            (keep,),
+        ).fetchall()
+        if not rows:
+            self._vacuum_if_fragmented(deleted=0)
+            return 0, 0
 
-    def _vacuum_if_fragmented(self) -> None:
-        """빈 페이지가 충분히 쌓였을 때만 회수한다.
+        # 삭제할 때 보존 조건을 **다시 확인**한다. 조회와 삭제 사이에 누군가
+        # 그 버전을 참조하면(cite·현재 버전 갱신) 그 행만 조용히 빠질 뿐,
+        # 삭제 전체가 FK 위반으로 롤백되지 않는다 (D-081).
+        deleted = 0
+        freed = 0
+        for start in range(0, len(rows), _DELETE_BATCH):
+            batch = rows[start : start + _DELETE_BATCH]
+            placeholders = ",".join("?" * len(batch))
+            with self._connection as connection:
+                connection.execute(
+                    f"""DELETE FROM versions
+                        WHERE id IN ({placeholders})
+                          AND {_VERSION_IS_UNREFERENCED.format(ref="versions.id")}""",
+                    [row[0] for row in batch],
+                )
+                (changed,) = connection.execute("SELECT changes()").fetchone()
+            deleted += changed
+            if changed:
+                freed += sum(row[1] for row in batch) * changed // len(batch)
+        self._vacuum_if_fragmented(deleted=deleted)
+        return deleted, freed
+
+    def _vacuum_if_fragmented(self, *, deleted: int) -> None:
+        """공간을 회수한다.
 
         VACUUM은 DB 전체를 다시 쓴다. 저장소 락을 쥔 채 돌리면 같은 프로세스의
         읽기 전용 도구가 그 시간만큼 멈추므로(840MB에서 27초 실측) **별도
@@ -561,7 +594,12 @@ class Repository:
         """
         (free_pages,) = self._connection.execute("PRAGMA freelist_count").fetchone()
         (total_pages,) = self._connection.execute("PRAGMA page_count").fetchone()
-        if free_pages < _VACUUM_MIN_FREE_PAGES or free_pages * 4 < total_pages:
+        # 실제로 지웠으면 회수한다 — 사용자가 명시적으로 `anchor gc`를 부른
+        # 것이고, "회수 추정 N bytes"를 보고했는데 파일이 그대로면 보고와
+        # 실제가 어긋난다. 삭제가 0건이어도 빈 페이지가 크게 쌓였으면(표
+        # 재작성 직후) 정리한다 (D-159).
+        fragmented = free_pages >= _VACUUM_MIN_FREE_PAGES and free_pages * 4 >= total_pages
+        if not deleted and not fragmented:
             return
         connection = sqlite3.connect(
             self._db_path, timeout=_BUSY_TIMEOUT_SECONDS, isolation_level=None
