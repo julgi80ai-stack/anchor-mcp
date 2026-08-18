@@ -92,3 +92,14 @@ def test_headings_do_not_glue_onto_the_following_paragraph(monkeypatch):
     doc = extract.to_normalized(SHORT_PAGE.encode("utf-8"), "text/html")
     assert "statusDegraded" not in doc.text
     assert "performanceBetween" not in doc.text
+
+
+def test_plain_text_that_normalizes_to_empty_is_rejected():
+    """빈 본문 가드는 HTML 분기에만 있으면 안 된다 (D-071의 형제 경로).
+
+    `.txt`/`.md` 원문이 한 번 잘린 응답이나 빈 CDN 페이지를 돌려주면, 빈 판본이
+    저장되고 그 문서의 앵커가 전부 MISSING("인용 철회 또는 대체 검토")으로
+    뒤집힌다 — 추출 실패가 인용 무효로 둔갑한다.
+    """
+    with pytest.raises(ExtractionFailed):
+        extract.to_normalized("\n\n   \n\t\n   \n".encode("utf-8"), "text/plain")

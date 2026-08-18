@@ -163,16 +163,30 @@ def test_normalization_is_idempotent(source):
     assert normalize_text(once) == once
 
 
-def test_normalization_is_idempotent_under_fuzzing():
+# 퍼징의 **생성 모델**이 검정력을 정한다. 문자 단위 균등 추출은 `<em>`·`**a**`
+# 같은 토큰을 사실상 만들지 못해, 20만 회를 돌려도 이 부류의 위반을 5건밖에
+# 못 잡는다(실측 0.0025%). 정규화가 다루는 것은 문자가 아니라 **토큰과 줄**이므로
+# 생성기도 그 단위여야 한다 — 토큰 단위로 바꾸면 같은 결함이 0.4%로 나온다.
+_FUZZ_TOKENS = [
+    "<em>", "</em>", "<b>", "</b>", "<sup>", "</sup>", "<span>", "</span>",
+    "<updated>", "<feed>", "**", "*", "`", "```", "~~~",
+    "# ", "## ", "- ", "* ", "1. ", "12) ", "> ", "|", "||", "[^1]: ", "[server]",
+    "---", "===", "    ", "\t", " ", "  ",
+    "a", "ab", "가", "가나", "漢", "漢字", "あ", "アア", "1", "2026", ".", ",", ":", "=",
+    "\u200b", "\u200c", "\u200d", "\u0301", "\u00a0", "\u2028", "\ufeff", "\u00ad",
+]
+
+
+def test_normalization_is_idempotent_under_token_fuzzing():
     import random
 
-    alphabet = list("ab가나漢あ *_`<>/-|#[]().,\n\t") + [
-        "\u200b", "\u200c", "\u200d", "\u0301", "\u00a0", "\u2028", "\ufeff", "\u00ad",
-    ]
     rng = random.Random(20260818)
     violations = []
-    for _ in range(20000):
-        source = "".join(rng.choice(alphabet) for _ in range(rng.randint(1, 60)))
+    for _ in range(30000):
+        lines = []
+        for _ in range(rng.randint(1, 6)):
+            lines.append("".join(rng.choice(_FUZZ_TOKENS) for _ in range(rng.randint(1, 8))))
+        source = "\n".join(lines)
         once = normalize_text(source)
         if normalize_text(once) != once:
             violations.append(source)
@@ -327,3 +341,78 @@ def test_space_between_latin_and_cjk_is_kept():
 def test_korean_documents_keep_spaces_between_han_characters():
     korean = "이 조문은 大韓民國 憲法 제1조에 근거한다. 나머지는 하위 법령에 위임한다."
     assert "大韓民國 憲法" in normalize_text(korean)
+
+
+# -- 1단계 조치 감사에서 나온 것 ---------------------------------------------
+
+
+def test_tag_names_in_prose_survive_even_when_whitelisted():
+    """화이트리스트 **안에 든 이름**을 다루는 산문도 본문이다.
+
+    접근성·HTML 문서가 정확히 이 부류다. 권고가 `<strong>`에서 `<b>`로 바뀐
+    개정이 같은 문자열로 붕괴하면 verify가 거짓 INTACT를 준다.
+    """
+    v1 = "Use the <strong> element for text with strong importance."
+    v2 = "Use the <b> element for text with strong importance."
+    assert normalize_text(v1) == v1
+    assert normalize_text(v1) != normalize_text(v2)
+    assert normalize_text("Prefer <em> over <i> here.") != normalize_text("Prefer <i> over <em> here.")
+
+
+def test_paired_formatting_tags_are_still_removed():
+    """짝을 이룬 서식 태그는 화면에 글자로 보이지 않는다 — D-051의 대상."""
+    assert normalize_text("본문 각주<sup>12</sup> 뒤") == "본문 각주12 뒤"
+    assert normalize_text("<strong>굵게</strong> 강조") == "굵게 강조"
+    assert normalize_text("<em>기울임</em>도 있다") == "기울임도 있다"
+
+
+def test_space_aligned_table_rows_are_not_folded():
+    """PDF 표는 공백으로 열을 맞춘다 — 접히면 없던 인접이 만들어진다."""
+    source = (
+        "Region      2024      2025\n"
+        "Europe      41.2      38.7\n"
+        "Asia        55.9      61.3\n"
+        "Africa      12.0      13.4"
+    )
+    result = normalize_text(source)
+    assert result.count("\n") >= 3, f"표가 접혔다 — {result!r}"
+
+
+# -- 조치가 세운 전제를 지키는 회귀선 (되돌림 검증에서 비어 있던 자리) --------
+
+
+def test_inline_code_protects_whitelisted_tags_and_emphasis():
+    """인라인 코드 안은 서식이 아니라 글자다.
+
+    바깥에서라면 지워질 형태(짝을 이룬 태그, 어절 경계의 강조)로 시험해야
+    보호가 실제로 작동하는지 알 수 있다.
+    """
+    assert normalize_text("`<b>x</b>` 를 보라") == "`<b>x</b>` 를 보라"
+    assert normalize_text("`a **y** b` 는 예제다") == "`a **y** b` 는 예제다"
+
+
+def test_code_fence_keeps_spaces_between_cjk_in_cjk_documents():
+    """CJK 공백 제거는 산문 규칙이다 — 코드 안에서는 공백도 글자다."""
+    document = "この文書は日本語である。説明を続ける。\n\n```\n漢字 漢字\n```\n\n終わり。"
+    assert "漢字 漢字" in normalize_text(document)
+
+
+def test_dangling_dash_joins_with_a_space():
+    """줄 끝 하이픈 무공백 접합은 **분철**에만 적용된다.
+
+    앞에 낱말 문자가 있어야 한다는 가드가 없으면 문장 부호로 쓰인 하이픈이
+    다음 줄을 붙여버리고, 그 결과가 더는 같은 종류로 분류되지 않아 멱등성이
+    깨진다.
+    """
+    result = normalize_text("some words that end with a dash -\ncontinuation here")
+    assert "dash - continuation here" in result
+
+
+def test_list_item_run_is_judged_without_its_marker_line():
+    """레코드 판정은 목록 표지 줄을 빼고 **계속 줄만** 봐야 한다.
+
+    표지 줄을 함께 세면 그 줄의 모양 때문에 판정이 뒤집혀, 레코드인 계속 줄들이
+    한 줄로 접힌다.
+    """
+    result = normalize_text("- alpha\n1,2\n3,4")
+    assert result.count("\n") >= 2, f"레코드 줄이 접혔다 — {result!r}"

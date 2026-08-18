@@ -54,19 +54,37 @@ def test_golden_corpus_exercises_the_normalization_rules():
             "\u3040" <= ch <= "\u30ff" or "\u4e00" <= ch <= "\u9fff" for ch in body
         ),
         "결합 문자 합성형": lambda body: "café" in body,
+        "위첨자 각주 제거": lambda body: "각주12" in body,
     }
     missing = [name for name, predicate in checks.items() if not any_body(predicate)]
     assert not missing, f"골든이 밟지 않는 구조: {missing}"
 
+    # 아래는 **코퍼스가 그 조건을 담고 있는지**만 본다. 파이프라인이 그것을
+    # 옳게 처리하는지는 증명하지 않는다 — 원본만 보는 검사를 "커버됨"으로
+    # 세면, 규칙을 정반대로 처리해도 커버리지 수치가 올라간다. 처리 결과의
+    # 검증은 위 `checks`(본문 관찰)와 `test_normalize_rules.py`가 맡는다.
     source_checks = {
         "문단 안 줄바꿈": lambda html: "\n" in html.split("<p>", 1)[-1].split("</p>", 1)[0],
         "유니코드 공백": lambda html: any(ch in html for ch in "\u00a0\u202f\u2009"),
         "폭 없는 문자": lambda html: any(ch in html for ch in "\u200b\u00ad"),
-        "ZWJ 이모지": lambda html: "\u200d" in html,
         "위첨자 각주": lambda html: "<sup>" in html,
     }
     missing_sources = [name for name, predicate in source_checks.items() if not any_source(predicate)]
     assert not missing_sources, f"골든 원본이 담지 않는 조건: {missing_sources}"
+
+
+def test_extractor_drops_zero_width_joiners(tmp_path):
+    """추출기가 ZWJ를 지운다는 **사실**을 고정한다 (D-173).
+
+    정규화는 ZWJ를 보존하지만(`test_normalize_rules`), trafilatura가 그 앞에서
+    지워 버려 저장 본문의 이모지가 화면과 달라진다. 골든 `en-31`의 기대 본문이
+    이 손실을 담고 있는데, 그것을 "정답"으로 오해하지 않도록 손실 지점을
+    명시해 둔다. 추출기가 고쳐지면 이 테스트가 먼저 빨개진다.
+    """
+    source = (GOLDEN_DIR / "en-31.html").read_text("utf-8")
+    body = (GOLDEN_DIR / "en-31.expected.md").read_text("utf-8")
+    assert "\u200d" in source, "픽스처가 ZWJ를 담고 있어야 한다"
+    assert "\u200d" not in body, "추출기 동작이 바뀌었다 — D-173을 재평가할 것"
 
 
 @pytest.mark.parametrize("stem", CASES)

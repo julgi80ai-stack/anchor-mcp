@@ -47,10 +47,15 @@ _CHAR_TRANSLATION.update({ord(char): None for char in "​⁠﻿­"})
 # 제네릭 타입(`List<Entry>`)까지 사라진다. 그러면 원문이 `<updated>`에서
 # `<published>`로 개정돼도 같은 문자열로 붕괴해 verify가 INTACT를 보고한다.
 # D-051이 실제로 겨냥한 것은 `<sup>12</sup>` 각주였으므로 거기로 좁힌다.
-_INLINE_TAGS = "sup|sub|wbr|span|em|strong|b|i|u|s|small|mark"
-_INLINE_TAG_RE = re.compile(rf"</?(?:{_INLINE_TAGS})(?:\s[^<>]*)?/?>", re.IGNORECASE)
-# `<br>`는 줄바꿈이므로 공백으로 바꾼다.
-_BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+_INLINE_TAGS = "sup|sub|span|em|strong|b|i|u|s|small|mark"
+# **짝을 이룬 것만** 지운다. 화이트리스트에 든 이름이라도 산문에 홀로 적힌
+# `<strong>`은 본문이다 — 접근성·HTML 문서에서는 그 이름 자체가 주제다.
+# 지우면 `<strong>` 권고를 `<b>`로 바꾼 개정이 같은 문자열로 붕괴한다.
+_INLINE_PAIR_RE = re.compile(
+    rf"<({_INLINE_TAGS})(?:\s[^<>]*)?>(.*?)</\1\s*>", re.IGNORECASE
+)
+# `<br>`·`<wbr>`는 짝이 없는 줄바꿈 표시이므로 공백으로 바꾼다.
+_BR_RE = re.compile(r"<(?:br|wbr)\s*/?>", re.IGNORECASE)
 
 # 마크다운 강조. **어절 내부는 건드리지 않는다** — `2*3*4`를 `234`로 바꾸면
 # 원문에 없던 수치를 만들어내는 것이다 (D-057). 여는 기호 앞과 닫는 기호
@@ -132,6 +137,24 @@ def is_hangul(char: str) -> bool:
     return _in_ranges(char, _HANGUL_RANGES)
 
 
+_DENSITY_NOISE = re.compile(r"<[^<>]*>|`[^`]*`")
+
+
+def _density_basis(text: str) -> str:
+    """문자 체계를 재는 기준 문자열 (D-163).
+
+    서식 문자(`<sup>`·`**`)가 라틴 문자로 세어지면 밀도가 0.5 아래로 내려간다.
+    그러면 1차 정규화는 CJK 사이 공백을 남기고 2차는 지워 **멱등성이 깨지고**,
+    그 직접 귀결로 `fetch_document`가 준 본문을 복사해 `cite`하면 실패한다.
+    서식을 걷어낸 기준으로 재면 두 호출이 같은 답을 얻는다.
+    """
+    # NFC까지 걸어야 한다. 결합 문자는 합성 전후로 **글자 수가 달라지고**,
+    # 그 차이가 밀도를 0.5 경계 너머로 밀어 접합 공백을 뒤집는다.
+    return unicodedata.normalize(
+        "NFC", _DENSITY_NOISE.sub("", text).replace("*", "").replace("_", "")
+    )
+
+
 def wordless_density(text: str) -> float:
     """공백으로 단어를 나누지 않는 문자(한자·가나)의 비율. 한글은 제외."""
     letters = [char for char in text if not char.isspace()]
@@ -162,7 +185,7 @@ def _strip_inline_markup(line: str) -> str:
 def _strip_markup_fragment(fragment: str) -> str:
     for _ in range(_MARKUP_PASSES):
         updated = _BR_RE.sub(" ", fragment)
-        updated = _INLINE_TAG_RE.sub("", updated)
+        updated = _INLINE_PAIR_RE.sub(r"\2", updated)
         updated = _STRONG_RE.sub(r"\1", updated)
         updated = _EMPHASIS_RE.sub(r"\1", updated)
         if updated == fragment:
@@ -179,7 +202,7 @@ _PROSE = "prose"
 _BLANK = "blank"
 
 
-def _classify(lines: list[str]) -> list[tuple[str, str]]:
+def _classify(lines: list[str]) -> list[tuple[str, str, int]]:
     """줄마다 종류와 정규화된 본문을 함께 낸다.
 
     코드 울타리 안쪽과 들여쓴 코드는 무엇도 건드리지 않는다 (D-056).
@@ -188,36 +211,58 @@ def _classify(lines: list[str]) -> list[tuple[str, str]]:
     구조 표지의 뒤 공백을 없애(`> ` → `>`) 같은 입력이 다음 호출에서 산문으로
     분류되고, 결과가 달라진다(멱등성 위반, D-059).
     """
-    entries: list[tuple[str, str]] = []
-    in_fence = False
-    for line in lines:
-        if line.lstrip().startswith(("```", "~~~")):
-            in_fence = not in_fence
-            entries.append((_CODE, line.rstrip()))
+    # 분류의 입력은 **서식을 걷어낸 줄**이어야 한다 (D-171). 걷기 전 줄로
+    # 분류하면 출력(걷은 줄)이 다음 호출에서 다르게 분류된다 — `# <em></em>`가
+    # 제목이었다가 산문이 되고, `<b>```` 가 울타리가 되고, 파이프 개수가 달라져
+    # 레코드 판정이 뒤집힌다. 코드 줄의 **내용**은 원본 줄에서 가져와야
+    # 울타리 안쪽이 보존된다 (D-056).
+    probe = [_HORIZONTAL_WS.sub(" ", _strip_inline_markup(line)).rstrip() for line in lines]
+    entries: list[tuple[str, str, int]] = []
+    fence: str | None = None
+    for line, normalized in zip(lines, probe):
+        opener = normalized.lstrip()[:3]
+        if opener in ("```", "~~~"):
+            # 울타리는 **같은 표지**로만 닫힌다 (CommonMark). 서로 다른 표지를
+            # 짝지으면 패리티가 입력에 따라 흔들려 분류가 불안정해진다.
+            if fence is None:
+                fence = opener
+            elif fence == opener:
+                fence = None
+            entries.append((_CODE, line.rstrip(), 0))
             continue
-        if in_fence or line[:4] == "    " or line.startswith("\t"):
-            entries.append((_CODE, line.rstrip()))
+        if fence is not None or line[:4] == "    " or line.startswith("\t"):
+            entries.append((_CODE, line.rstrip(), 0))
             continue
-        normalized = _HORIZONTAL_WS.sub(" ", line).rstrip()
+        # 공백으로 열을 맞춘 줄(PDF 표의 지배적 형태)은 **원형을 보존한다**.
+        # 축약해 버리면 정렬 정보가 사라져 다음 호출에서 평범한 산문으로 접히고,
+        # 인접하지 않던 값이 이웃이 되어 없던 문장이 만들어진다 (D-060/D-170).
+        # 세 열 이상(간격 2개 이상)만 표로 본다 — 두 칸 문장 간격과 구별하기 위해서다.
+        if len(_COLUMN_GAP_RE.findall(_strip_inline_markup(line))) >= 2:
+            entries.append((_CODE, _strip_inline_markup(line).rstrip(), 0))
+            continue
+        gaps = 0
         if not normalized:
-            entries.append((_BLANK, ""))
+            entries.append((_BLANK, "", 0))
         elif (
-            _STRUCTURAL_RE.match(normalized)
-            or _SETEXT_RE.match(normalized)
-            or _YAML_FENCE_RE.match(normalized)
-            or _TABLE_ROW_RE.match(normalized)
+            # 접합이 줄의 앞 공백을 걷어내므로, 분류도 앞 공백을 무시해야
+            # 출력이 다음 호출에서 같게 분류된다 (멱등성, D-171).
+            _STRUCTURAL_RE.match(normalized.lstrip())
+            or _SETEXT_RE.match(normalized.lstrip())
+            or _YAML_FENCE_RE.match(normalized.lstrip())
+            or _TABLE_ROW_RE.match(normalized.lstrip())
         ):
-            entries.append((_STRUCTURAL, normalized))
+            entries.append((_STRUCTURAL, normalized, gaps))
         else:
-            entries.append((_PROSE, normalized))
+            entries.append((_PROSE, normalized, gaps))
     return entries
 
 
+_COLUMN_GAP_RE = re.compile(r"\S {2,}\S")
 _RECORD_KEY_RE = re.compile(r"^\S+:\s")
 _ASSIGNMENT_RE = re.compile(r"^\S+=")
 
 
-def _looks_like_records(run: list[str]) -> bool:
+def _looks_like_records(run: list[str], gaps: list[int]) -> bool:
     """같은 모양이 반복되는 줄들인가 (로그·CSV·표·설정).
 
     조판 줄바꿈과 달리 이런 줄은 각자가 완결된 항목이므로 이어붙이면
@@ -232,11 +277,13 @@ def _looks_like_records(run: list[str]) -> bool:
         return True
     if all(_ASSIGNMENT_RE.match(line) for line in run):
         return True
-    for delimiter in (",", "|", "\t"):
+    for delimiter in (",", "|"):
         counts = {line.count(delimiter) for line in run}
         if len(counts) == 1 and counts.pop() >= 1:
             return True
-    return False
+    # 공백으로 열을 맞춘 표 (PDF 표의 지배적 형태). 두 칸 이상 공백이 같은
+    # 개수로 반복되면 각 줄이 완결된 행이다 — 접으면 없던 인접이 생긴다.
+    return len(set(gaps)) == 1 and gaps[0] >= 1
 
 
 # 줄 끝 분철과 잘린 URL — 공백을 넣으면 낱말과 주소가 깨진다 (D-067).
@@ -256,11 +303,11 @@ def _fold_run(run: list[str], joiner: str) -> str:
     return folded
 
 
-def _fold(entries: list[tuple[str, str]], joiner: str) -> list[tuple[str, str]]:
+def _fold(entries: list[tuple[str, str, int]], joiner: str) -> list[tuple[str, str]]:
     output: list[tuple[str, str]] = []
     index = 0
     while index < len(entries):
-        kind, line = entries[index]
+        kind, line, gap = entries[index]
         if kind in (_CODE, _BLANK):
             output.append((kind, line))
             index += 1
@@ -269,13 +316,17 @@ def _fold(entries: list[tuple[str, str]], joiner: str) -> list[tuple[str, str]]:
         # 구조 줄 중 **목록 항목만** 뒤따르는 산문 줄을 흡수한다. 목록 항목이
         # 여러 줄에 걸치는 것은 흔하고(D-064), 나머지 구조는 그 자체로 완결이다.
         run = [line.strip()]
+        gaps = [gap]
         index += 1
         if kind == _PROSE or _LIST_ITEM_RE.match(line.strip()):
             while index < len(entries) and entries[index][0] == _PROSE:
                 run.append(entries[index][1].strip())
+                gaps.append(entries[index][2])
                 index += 1
 
-        if len(run) > 1 and _looks_like_records(run if kind == _PROSE else run[1:]):
+        if len(run) > 1 and _looks_like_records(
+            run if kind == _PROSE else run[1:], gaps if kind == _PROSE else gaps[1:]
+        ):
             output.extend((kind if index_offset == 0 else _PROSE, item)
                           for index_offset, item in enumerate(run))
         else:
@@ -283,38 +334,62 @@ def _fold(entries: list[tuple[str, str]], joiner: str) -> list[tuple[str, str]]:
     return output
 
 
-def normalize_text(text: str) -> str:
+def _normalize_once(text: str) -> str:
     text = _LINE_BREAK_RE.sub("\n", text)
-    # 바깥 공백을 **분류 전에** 걷는다. 마지막에 걷으면 첫 줄의 들여쓰기가
-    # 그때 사라져 다음 호출에서 분류가 달라진다(멱등성 위반, D-059).
-    text = text.translate(_CHAR_TRANSLATION).strip()
+    # 바깥은 **빈 줄만** 다듬는다. 공백까지 걷으면 첫 줄의 들여쓰기가 그때
+    # 사라져, 들여쓴 코드 줄이 다음 호출에서 산문으로 재분류된다
+    # (멱등성 위반, D-059/D-171).
+    text = text.translate(_CHAR_TRANSLATION)
 
     entries = _classify(text.split("\n"))
 
     # 접합 시 공백을 넣을지는 **문서 전체의 문자 체계**로 정한다. 경계 문자
     # 하나만 보면 일본어 문서의 라틴 낱말 뒤에 없던 공백이 들어가고, 한국어
     # 문서의 한자 경계에서 없던 붙임이 생긴다 (D-061).
-    joiner = "" if is_wordless_text(text) else " "
+    joiner = "" if is_wordless_text(_density_basis(text)) else " "
     folded = _fold(entries, joiner)
 
-    # 서식은 **접합이 끝난 뒤에** 걷는다. 접합 전에 걷으면 두 줄이 합쳐지며
-    # 새 매치가 생겨(`*b` + `漢*` → `*b 漢*`) 다음 호출의 결과가 달라진다.
-    lines = [
-        line if kind == _CODE
-        else _HORIZONTAL_WS.sub(" ", _strip_inline_markup(line)).strip()
-        for kind, line in folded
-    ]
-    if not joiner:  # 일본어·중국어 문서
-        lines = [
-            line if kind == _CODE else _WORDLESS_SPACE_RE.sub("", line)
-            for (kind, _), line in zip(folded, lines)
-        ]
+    # 접합은 새 매치를 만들 수 있으므로(`*b` + `漢*` → `*b 漢*`) 한 번 더 걷는다.
+    # 걷기는 멱등이므로 분류 전과 접합 후 양쪽에 두어도 안전하다 (D-059/D-171).
+    lines: list[str] = []
+    for kind, line in folded:
+        if kind == _CODE:
+            lines.append(line)
+            continue
+        cleaned = _HORIZONTAL_WS.sub(" ", _strip_inline_markup(line)).strip()
+        if not joiner:  # 일본어·중국어 문서
+            cleaned = _WORDLESS_SPACE_RE.sub("", cleaned)
+        lines.append(cleaned)
 
     # 문자 제거가 끝난 **뒤에** NFC를 건다 — 폭 없는 문자를 사이에서 지우면
     # 기반 문자와 결합 문자가 비로소 인접하는데, 앞에서 걸면 그 조합이
     # 결합형으로 남아 화면 복사문(NFC)과 어긋난다 (D-058).
     result = unicodedata.normalize("NFC", "\n".join(lines))
-    return _EXCESS_NEWLINES.sub("\n\n", result).strip()
+    return _EXCESS_NEWLINES.sub("\n\n", result).strip("\n")
+
+
+_NORMALIZE_PASSES = 3
+
+
+def normalize_text(text: str) -> str:
+    """정규화한다. **멱등을 구조적으로 보장한다** (D-059/D-171).
+
+    한 번의 통과로는 멱등을 만들 수 없다. 접합이 새 서식 매치를 만들고, 서식을
+    걷으면 줄의 종류가 달라지고, 달라진 종류가 다시 접합을 바꾼다 — 셋이 서로를
+    먹인다. 개별 상호작용을 하나씩 막는 방식은 퍼징이 계속 새 조합을 찾아냈다.
+
+    그래서 **고정점까지 돌린다.** 대부분의 문서는 두 번째 통과에서 같은 값이
+    나오므로 비용은 사실상 2회이고, 그 대가로 "정규화된 본문을 다시 정규화해도
+    같다"가 증명 가능한 성질이 된다. 이 성질이 깨지면 `fetch_document`가 준
+    본문을 복사해 `cite`하는 유일한 실사용 경로가 무너진다.
+    """
+    result = _normalize_once(text)
+    for _ in range(_NORMALIZE_PASSES - 1):
+        again = _normalize_once(result)
+        if again == result:
+            break
+        result = again
+    return result
 
 
 _HYPHEN_BREAK = re.compile(r"(?<=[^\W\d_])-\n(?=[a-zÀ-ɏ])")

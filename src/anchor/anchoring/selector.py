@@ -14,7 +14,12 @@ from dataclasses import dataclass
 
 from anchor.errors import QuoteNotFound, QuoteTooShort
 from anchor.models import Quality
-from anchor.normalize.text import WORDLESS_INFORMATION_RATIO, is_wordless_text, normalize_text
+from anchor.normalize.text import (
+    WORDLESS_INFORMATION_RATIO,
+    is_wordless_script,
+    is_wordless_text,
+    normalize_text,
+)
 
 QUALITY_OK = Quality.OK
 QUALITY_SHORT = Quality.SHORT
@@ -54,7 +59,10 @@ def scale_for_script(threshold: int, text: str) -> int:
 # 문단 사이를 줄바꿈 하나나 공백으로 주고 목록 표지(`- `)는 아예 주지 않는데,
 # 저장 본문에는 빈 줄과 표지가 있다. 그래서 두 문단·두 목록 항목을 한 번에
 # 인용하는 흔한 행동이 전부 `QuoteNotFound`가 됐다 (D-074).
-_LIST_MARKER_RE = re.compile(r"(?:[-*+]|\d{1,2}[.)])\s+")
+# 브라우저는 줄머리의 블록 표지를 클립보드에 넣지 않는다. 목록만 다루면
+# "이 절을 통째로 복사"라는 가장 흔한 제스처가 여전히 실패한다 — 골든 36건
+# 표본에서 제목을 걸친 선택의 46%가 그래서 깨졌다.
+_LIST_MARKER_RE = re.compile(r"(?:[-*+]|\d{1,2}[.)]|#{1,6}|>)\s+")
 _FORM_WHITESPACE = " \t\n"
 
 
@@ -93,14 +101,50 @@ def _form_stream(text: str) -> Iterator[tuple[str, int]]:
 
 
 def _search_form(text: str) -> str:
-    return "".join(char for char, _ in _form_stream(text))
+    """비교용 검색형. 양쪽에 같은 규칙을 적용해야 만난다.
+
+    CJK 문자 **사이의** 공백은 없앤다. 본문 쪽은 문서의 문자 체계에 따라 블록을
+    공백 없이 잇는데 검색형이 언제나 공백 하나로 접으면 두 형태가 구조적으로
+    만나지 못한다 — 일본어·중국어 문서에서 여러 블록에 걸친 인용이 전부
+    실패했다. 인용문만 CJK인 한국어 문서도 같은 이유로 실패했다.
+    """
+    chars = [char for char, _ in _form_stream(text)]
+    kept: list[str] = []
+    for index, char in enumerate(chars):
+        if (
+            char == " "
+            and kept
+            and is_wordless_script(kept[-1])
+            and index + 1 < len(chars)
+            and is_wordless_script(chars[index + 1])
+        ):
+            continue
+        kept.append(char)
+    return "".join(kept)
+
+
+def _form_pairs(text: str) -> list[tuple[str, int]]:
+    """검색형의 (문자, 원본 오프셋) 쌍. `_search_form`과 같은 규칙을 쓴다."""
+    raw = list(_form_stream(text))
+    kept: list[tuple[str, int]] = []
+    for position, (char, index) in enumerate(raw):
+        if (
+            char == " "
+            and kept
+            and is_wordless_script(kept[-1][0])
+            and position + 1 < len(raw)
+            and is_wordless_script(raw[position + 1][0])
+        ):
+            continue
+        kept.append((char, index))
+    return kept
 
 
 def _span_in_source(text: str, start_in_form: int, length_in_form: int) -> tuple[int, int]:
     """검색형의 구간을 원본 오프셋 구간으로 되돌린다."""
     last = start_in_form + length_in_form - 1
     start = end = -1
-    for position, (_, index) in enumerate(_form_stream(text)):
+    for position, (_, index) in enumerate(_form_pairs(text)):
         if position == start_in_form:
             start = index
         if position == last:
@@ -119,17 +163,21 @@ def build_selector(
 ) -> Selector:
     # 호출자의 인용문도 본문과 같은 규칙으로 정규화해야 비교가 성립한다.
     requested = normalize_text(quote)
-    minimum = scale_for_script(min_quote_chars, requested)
-    short_limit = scale_for_script(short_quote_chars, requested)
-    if len(requested) < minimum:
+    needle = _search_form(requested)
+    # 길이 게이트는 **실제로 탐색하는 문자열**을 세야 한다. 검색형은 공백과
+    # 목록 표지를 걷어내므로, 원 인용문 기준으로 재면 12자 하한을 통과한
+    # 인용문이 1자짜리 앵커가 될 수 있다 — 그런 앵커는 아무 문서에나 걸려
+    # "존재하지 않는 인용을 기록하지 않는다"는 계약이 뚫린다.
+    minimum = scale_for_script(min_quote_chars, needle)
+    short_limit = scale_for_script(short_quote_chars, needle)
+    if len(needle) < minimum:
         raise QuoteTooShort(
-            f"Quote is {len(requested)} chars; at least {minimum} required for this script, "
-            f"one complete sentence recommended — 인용문이 {len(requested)}자 "
-            f"(이 문자 체계의 최소 {minimum}자 필요)"
+            f"Quote reduces to {len(needle)} searchable chars; at least {minimum} required "
+            f"for this script, one complete sentence recommended — 인용문이 실제 탐색 기준 "
+            f"{len(needle)}자 (이 문자 체계의 최소 {minimum}자 필요)"
         )
 
     haystack = _search_form(text)
-    needle = _search_form(requested)
     position = haystack.find(needle) if needle else -1
     if position == -1:
         raise QuoteNotFound(
@@ -153,7 +201,7 @@ def build_selector(
         prefix=text[max(0, offset - context_chars) : offset],
         suffix=text[end : end + context_chars],
         position_hint=offset,
-        quality=Quality.SHORT if len(requested) < short_limit else Quality.OK,
+        quality=Quality.SHORT if len(needle) < short_limit else Quality.OK,
         occurrences=occurrences,
     )
 

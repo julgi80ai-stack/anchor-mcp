@@ -67,9 +67,15 @@ def to_normalized(raw: bytes, content_type: str) -> NormalizedDoc:
     media_type = content_type.split(",", 1)[0].split(";", 1)[0].strip().lower()
 
     if media_type in _TEXT_PLAIN_TYPES:
-        text = decode_bytes(raw)
+        text = normalize_text(decode_bytes(raw))
+        if not text:
+            # HTML 분기와 같은 이유로 거부한다 (D-071). 빈 판본이 저장되면 그
+            # 문서의 앵커가 전부 MISSING으로 뒤집힌다.
+            raise ExtractionFailed(
+                "Plain-text body is empty after normalization — 정규화 후 본문이 비었습니다"
+            )
         return NormalizedDoc(
-            text=normalize_text(text), title=None, pipeline_version=PLAIN_PIPELINE_VERSION
+            text=text, title=None, pipeline_version=PLAIN_PIPELINE_VERSION
         )
 
     if media_type in _PDF_TYPES:
