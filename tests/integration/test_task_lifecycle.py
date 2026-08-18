@@ -76,7 +76,7 @@ async def _start_task(client, arguments: dict | None = None) -> str:
     created = await client.session.send_request(
         CallToolRequest(
             params=CallToolRequestParams(
-                name="verify_citations", arguments=arguments or {}, task=TaskMetadata(ttl=60000)
+                name="verify_citations", arguments=arguments or {}, task=TaskMetadata()
             )
         ),
         CallToolResult,

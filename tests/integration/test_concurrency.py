@@ -112,7 +112,7 @@ async def test_read_only_tools_respond_during_background_verify(fixture_server, 
             await client.session.send_request(
                 CallToolRequest(
                     params=CallToolRequestParams(
-                        name="verify_citations", arguments={}, task=TaskMetadata(ttl=60000)
+                        name="verify_citations", arguments={}, task=TaskMetadata()
                     )
                 ),
                 CallToolResult,

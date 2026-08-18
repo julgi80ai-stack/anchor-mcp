@@ -115,7 +115,7 @@ anchor-mcp/
 ├── NOTICE                     저작권 고지 · attribution (distributed)
 ├── THIRD-PARTY.md             제3자 라이선스 대장 · third-party license ledger
 ├── docs/
-│   ├── SPEC.md                기술사양서 v1.8 · technical spec (Korean)
+│   ├── SPEC.md                기술사양서 v1.9 · technical spec (Korean)
 │   ├── MANIFESTO.md           설계 철학 · design philosophy (Korean)
 │   └── decisions/             ADR — 판단 기록 (동결) · frozen decision records
 ├── src/anchor/                구현 · implementation (fetcher / normalize / anchoring / export / store / server / cli)
@@ -140,8 +140,8 @@ The ledger and the decision records serve different purposes: `THIRD-PARTY.md` a
 
 | 항목 · Item | 상태 · State |
 |---|---|
-| 기술사양서 · Spec | v1.8 (2026-08-18, KR/EN) |
-| 구현 · Implementation | **v1.7.0** (2026-08-18) — 2차 감사 조치 완결: 입력 검증, 문서 병합·이사 의미론, robots 계약 이행 · second-audit remediation completed: input validation, merge/move semantics, robots contract honoured. 테스트 583개 · 583 tests. CI: 3 OS × Python 3.11–3.13, license gate, benchmark gate |
+| 기술사양서 · Spec | v1.9 (2026-08-18, KR/EN) |
+| 구현 · Implementation | **v1.8.0** (2026-08-18) — Tasks·서버 계약 이행: ttl 정책, 종료 보장, 앵커 단위 취소, 부하 중 캐시 히트 게이트 · Tasks/server contract honoured: ttl policy, shutdown guarantee, per-anchor cancellation, cache-hit gate under load. 테스트 605개 · 605 tests. CI: 3 OS × Python 3.11–3.13, license gate, benchmark gate |
 | 실사용 관찰 · Field observation | 30일 hit_rate 관찰 창 진행 중 · 30-day hit-rate window in progress (`anchor stats`) |
 | 라이선스 감사 · License audit | 카피레프트 강제 0건 · zero forced copyleft (선택형 `tld`는 MPL-1.1 선택 · disjunctive `tld` elected as MPL-1.1, THIRD-PARTY §4.4) |
 

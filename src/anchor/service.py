@@ -44,6 +44,7 @@ from anchor.normalize.hashing import hash_bytes, hash_text
 from anchor.store.repository import Repository
 
 _STATUS_BY_HTTP = {402: "paywalled", 403: "forbidden", 404: "gone", 410: "gone"}
+_DOCUMENT_STATUSES = ("live", "gone", "forbidden", "paywalled")
 
 # 아직 문서로 등록되지 않은 URL의 실패를 기록할 때 쓰는 자리표시자.
 # `fetch_log.document_id`가 NOT NULL이라 빈 값을 넣을 수 없다 (D-014).
@@ -375,6 +376,15 @@ class Anchor:
         문서를 건드리지 않고 지금까지의 결과만 반환한다 — 취소와 종료가
         실제로 작업을 멈추게 하는 유일한 경로다 (D-034/D-035).
         """
+        if time_budget_ms is not None and time_budget_ms <= 0:
+            # 0·음수 예산은 매칭 3·4단계를 조용히 건너뛰어 실제 개정 인용문을
+            # ALTERED 대신 UNRESOLVED로 만든다 (D-122). 설정 파일 경로는
+            # ConfigError로 거부하면서 런타임 인자만 통과시키면 세 경로 중
+            # 하나만 검증하는 셈이다 — 공통 길목인 여기서 거부한다.
+            raise ValueError(
+                f"time_budget_ms must be positive — 앵커당 시간 예산은 양수여야 "
+                f"합니다: {time_budget_ms}"
+            )
         if isinstance(older_than, str):
             older_than = parse_iso_duration(older_than)
         cutoff = iso_ago(older_than) if older_than is not None else None
@@ -468,6 +478,12 @@ class Anchor:
             text = self._repository.get_version_text(latest.id)
 
             for anchor in document_anchors:
+                if should_stop is not None and should_stop():
+                    # 문서 사이에서만 확인하면 취소·종료 반응 시간이 한 문서의
+                    # 앵커 수에 비례해 무한정 늘어난다 (D-119, 실측 100앵커에
+                    # 13.8초) — 앵커 사이에서도 확인한다.
+                    stopped_early = True
+                    break
                 budget_ms = (
                     time_budget_ms if time_budget_ms is not None else self._config.time_budget_ms
                 )
@@ -514,6 +530,8 @@ class Anchor:
                             found_offset=result.found_offset,
                         )
                     )
+            if stopped_early:
+                break
 
         checked = sum(summary.values())
         return VerifyReport(
@@ -536,6 +554,15 @@ class Anchor:
     ) -> list[Document]:
         documents = self._repository.list_documents()
         if status is not None:
+            # 열거값 밖 문자열에 빈 목록을 돌려주면 호출자는 "캐시가 비었다"로
+            # 읽는다 (D-121) — format 인자들과 같은 방식으로 명확히 거부한다.
+            # 대소문자는 뜻이 아니므로 접는다 ("LIVE" → live).
+            status = status.lower()
+            if status not in _DOCUMENT_STATUSES:
+                raise ValueError(
+                    f"Unknown status — 지원하지 않는 상태: {status} "
+                    f"({' | '.join(_DOCUMENT_STATUSES)})"
+                )
             documents = [d for d in documents if d.status == status]
         if host is not None:
             documents = [d for d in documents if httpx.URL(d.url).host == host]

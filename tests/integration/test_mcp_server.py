@@ -194,7 +194,7 @@ async def test_verify_citations_as_task(fixture_server, mcp_server):
         created = await client.session.send_request(
             CallToolRequest(
                 params=CallToolRequestParams(
-                    name="verify_citations", arguments={}, task=TaskMetadata(ttl=60000)
+                    name="verify_citations", arguments={}, task=TaskMetadata()
                 )
             ),
             CallToolResult,

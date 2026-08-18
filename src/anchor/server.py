@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -25,17 +26,15 @@ from mcp.shared.exceptions import MCPError
 from mcp_types import (
     CallToolResult,
     CancelTaskRequestParams,
-    CancelTaskResult,
     GetTaskPayloadRequestParams,
     GetTaskRequestParams,
-    GetTaskResult,
-    ListTasksResult,
     PaginatedRequestParams,
     Task,
     TextContent,
 )
 
 from anchor import __version__
+from anchor.anchoring import approx
 from anchor.config import Config, load_config
 from anchor.models import parse_iso, utcnow_iso, uuid7
 from anchor.service import Anchor
@@ -44,6 +43,18 @@ _INVALID_PARAMS = -32602
 _TASK_NOT_FOUND = -32001
 
 TASKABLE_TOOLS = frozenset({"verify_citations"})
+
+# ttl 정책 (D-116 / D-123). Task.ttl은 required-nullable이라 None을 저장하면
+# exclude_none 직렬화 경로에서 키가 사라져 표준 클라이언트의 스키마 검증이
+# 응답을 거부하고, prune이 건너뛰어 항목이 무한히 쌓인다(D-037의 재발).
+# 보존 기간을 항상 유한한 실제 값으로 정해 두 문제를 원천에서 없앤다.
+_TASK_DEFAULT_TTL_MS = 30 * 60 * 1000  # ttl 미지정 시 기본 보존 30분
+_TASK_MAX_TTL_MS = 24 * 60 * 60 * 1000  # 요청 ttl 상한 24시간
+
+# shutdown이 "등록됐지만 스레드가 시작되지 않은" 항목을 기다려 주는 시간.
+# 정상 경로에서 이 상태는 등록→start() 사이의 찰나지만, start()가 실패하면
+# (스레드 한도 등) 영구히 남는다 — 무한히 기다리면 서버가 영영 안 꺼진다.
+_TASK_START_PATIENCE_S = 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -92,19 +103,30 @@ class AnchorTasksExtension(Extension):
                 f"{', '.join(sorted(TASKABLE_TOOLS))} — 이 도구는 task로 실행할 수 없습니다",
             )
 
+        requested_ttl = params.task.ttl
+        if requested_ttl is None:
+            ttl = _TASK_DEFAULT_TTL_MS
+        elif requested_ttl <= 0:
+            # 0·음수 ttl은 첫 prune에서 항목을 즉시 지워 결과 회수를 원천
+            # 불가능하게 만든다 — 조용히 받지 않고 거부한다 (D-123).
+            raise MCPError(
+                _INVALID_PARAMS,
+                f"task ttl must be positive — ttl은 양수여야 합니다: {requested_ttl}",
+            )
+        else:
+            ttl = min(requested_ttl, _TASK_MAX_TTL_MS)
+
         now = utcnow_iso()
         task = Task(
             task_id=uuid7(),
             status="working",
             created_at=now,
             last_updated_at=now,
-            ttl=params.task.ttl,
+            ttl=ttl,
             poll_interval=500,
         )
         self.prune()
         entry = _TaskEntry(task=task)
-        with self._entries_lock:
-            self._entries[task.task_id] = entry
 
         tool_name = params.name
         arguments = params.arguments or {}
@@ -112,6 +134,8 @@ class AnchorTasksExtension(Extension):
         def _run() -> None:
             # 추적 가능한 스레드에서 돈다. anyio.to_thread의 워커는 join할 수
             # 없어 종료 시 커넥션 해제와 겹치면 SIGSEGV가 났다 (D-034).
+            # 배경 워커의 매칭 루프는 전경 도구 경로에 GIL을 양보한다 (D-120).
+            approx.set_thread_yields(True)
             try:
                 payload = self.run_tool(tool_name, arguments, entry.cancel.is_set)
                 result = CallToolResult(
@@ -132,17 +156,43 @@ class AnchorTasksExtension(Extension):
                     str(error),
                 )
 
+        # 스레드 배정 → 등록 → start 순서. 등록과 start 사이에 await 지점이
+        # 없어, 등록된 working 항목이 "워커 없음" 상태로 관측될 수 없다.
         entry.worker = threading.Thread(target=_run, name=f"anchor-task-{task.task_id[:8]}")
-        entry.worker.start()
+        with self._entries_lock:
+            self._entries[task.task_id] = entry
+        try:
+            entry.worker.start()
+        except Exception as error:
+            # 시작 실패를 종결로 기록하지 않으면 task가 영원히 working으로
+            # 남아 shutdown이 배정을 무한히 기다린다.
+            self._finish(
+                entry,
+                CallToolResult(
+                    content=[TextContent(type="text", text=str(error))], is_error=True
+                ),
+                "failed",
+                f"worker start failed — 워커 시작 실패: {error}",
+            )
+            raise
         # SDK 2.0의 와이어 게이트는 2026-07-28에서 tools/call 응답으로
         # CreateTaskResult를 허용하지 않는다 (tasks는 2025-11-25 실험 리비전
         # 전용). task 기술자를 CallToolResult에 인밴드로 담아 반환하고,
         # 폴링·결과 회수는 본 확장의 tasks/* 메서드가 맡는다.
-        task_payload = task.model_dump(by_alias=True, exclude_none=True)
+        task_payload = self._wire_task(task)
         return CallToolResult(
             content=[TextContent(type="text", text=json.dumps({"task": task_payload}))],
             structured_content={"task": task_payload},
         )
+
+    @staticmethod
+    def _wire_task(task: Task) -> dict[str, Any]:
+        """Task의 와이어 표현. `Task.ttl`은 required-nullable이라 exclude_none
+        직렬화가 ttl=None의 키를 지우면 표준 클라이언트의 스키마 검증이 응답을
+        통째로 거부한다 (D-116) — ttl 키는 항상 명시적으로 싣는다."""
+        payload = task.model_dump(by_alias=True, exclude_none=True)
+        payload["ttl"] = task.ttl
+        return payload
 
     def _finish(
         self,
@@ -155,9 +205,20 @@ class AnchorTasksExtension(Extension):
         `tasks/result`가 영원히 '아직 안 끝남'을 반환하지 않게 한다 (D-036)."""
         with self._entries_lock:
             entry.result = result
-            update: dict[str, Any] = {"status": status, "last_updated_at": utcnow_iso()}
+            now = utcnow_iso()
+            update: dict[str, Any] = {"status": status, "last_updated_at": now}
             if message is not None:
                 update["status_message"] = message
+            if entry.task.ttl is not None:
+                # 보존 기간은 생성 시점부터 센다(프로토콜 정의, D-123). 실행이
+                # 요청 ttl보다 오래 걸리면 결과가 종결과 동시에 소멸하므로,
+                # 종결 시점에 실제 보존 기간(경과 + 요청 ttl)으로 갱신해
+                # 보고한다 — Task.ttl은 '실제' 보존 기간이라 이 갱신은
+                # 프로토콜이 예정한 서버 재량이다.
+                elapsed_ms = int(
+                    (parse_iso(now) - parse_iso(entry.task.created_at)).total_seconds() * 1000
+                )
+                update["ttl"] = elapsed_ms + entry.task.ttl
             entry.task = entry.task.model_copy(update=update)
 
     def prune(self) -> None:
@@ -171,24 +232,83 @@ class AnchorTasksExtension(Extension):
             for task_id, entry in list(self._entries.items()):
                 if entry.task.status == "working" or entry.task.ttl is None:
                     continue
-                age_ms = (parse_iso(now) - parse_iso(entry.task.last_updated_at)).total_seconds()
-                if age_ms * 1000 >= entry.task.ttl:
+                # 프로토콜 정의대로 생성 시점부터 센다 (D-123). 종결이 늦은
+                # task는 _finish가 ttl을 실제 보존 기간으로 늘려 두었다.
+                age_ms = (
+                    parse_iso(now) - parse_iso(entry.task.created_at)
+                ).total_seconds() * 1000
+                if age_ms >= entry.task.ttl:
                     del self._entries[task_id]
 
-    def shutdown(self, timeout: float = 10.0) -> None:
-        """진행 중인 task에 중단을 알리고 워커가 끝나기를 기다린다.
+    def shutdown(self, grace: float = 10.0) -> None:
+        """진행 중인 task에 중단을 알리고 **워커가 전부 끝난 뒤에만** 반환한다.
 
-        저장소를 닫기 전에 반드시 호출해야 한다 — 워커가 쓰는 중인 SQLite
-        커넥션을 닫으면 use-after-free로 프로세스가 죽는다 (D-034).
+        반환 후에는 어떤 워커도 저장소를 건드리지 않는다 — 그때부터 저장소를
+        닫아도 안전하다는 것이 이 메서드의 계약이다 (D-034). 이전에는 유예가
+        지나면 워커가 살아 있어도 조용히 반환했고, 호출자가 곧바로 닫은
+        저장소 밑에서 워커가 죽어 부분 결과가 통째로 사라졌다 (D-117).
+
+        워커는 문서·앵커 사이마다 중단 신호를 확인하므로(D-119) 대기는 한
+        앵커 예산 안팎이다. grace를 넘기면 stderr로 알리고 계속 기다린다 —
+        인터프리터도 어차피 non-daemon 스레드의 종료를 기다린다: 같은 대기를
+        저장소가 열린 채로 할 뿐이다.
         """
-        with self._entries_lock:
-            entries = list(self._entries.values())
-        for entry in entries:
-            entry.cancel.set()
-        deadline = time.monotonic() + timeout
-        for entry in entries:
-            if entry.worker is not None and entry.worker.is_alive():
-                entry.worker.join(timeout=max(0.0, deadline - time.monotonic()))
+        deadline = time.monotonic() + grace
+        start_patience = time.monotonic() + _TASK_START_PATIENCE_S
+        warned = False
+        while True:
+            with self._entries_lock:
+                entries = list(self._entries.values())
+            for entry in entries:
+                entry.cancel.set()
+
+            pending: list[_TaskEntry] = []
+            for entry in entries:
+                worker = entry.worker
+                if worker is not None and worker.is_alive():
+                    pending.append(entry)
+                elif entry.task.status == "working" and (
+                    worker is None or worker.ident is None
+                ):
+                    # 등록은 됐지만 스레드가 시작되지 않은 항목. 정상 경로의
+                    # 찰나일 수 있어 잠시 기다리되, start() 실패의 고아라면
+                    # 영원히 오지 않는다 — 유예가 지나면 실패로 종결하고
+                    # 진행한다 (기다리면 서버가 영영 안 꺼진다).
+                    if time.monotonic() >= start_patience:
+                        self._finish(
+                            entry,
+                            CallToolResult(
+                                content=[
+                                    TextContent(
+                                        type="text",
+                                        text="worker never started — 워커가 시작되지 않았습니다",
+                                    )
+                                ],
+                                is_error=True,
+                            ),
+                            "failed",
+                            "worker never started — 워커가 시작되지 않았습니다",
+                        )
+                    else:
+                        pending.append(entry)
+
+            if not pending:
+                return
+            if not warned and time.monotonic() >= deadline:
+                names = ", ".join(entry.task.task_id for entry in pending)
+                print(
+                    f"anchor: waiting for background task(s) {names} to stop before "
+                    "closing the store — 저장소를 닫기 전에 백그라운드 task 종료를 "
+                    "기다리는 중",
+                    file=sys.stderr,
+                )
+                warned = True
+            for entry in pending:
+                worker = entry.worker
+                if worker is not None and worker.is_alive():
+                    worker.join(timeout=0.5)
+                else:
+                    time.sleep(0.01)
 
     def _entry(self, task_id: str) -> _TaskEntry:
         with self._entries_lock:
@@ -197,9 +317,10 @@ class AnchorTasksExtension(Extension):
             raise MCPError(_TASK_NOT_FOUND, f"task not found — task 없음: {task_id}")
         return entry
 
-    async def _on_get(self, ctx, params: GetTaskRequestParams) -> GetTaskResult:
-        task = self._entry(params.task_id).task
-        return GetTaskResult(**task.model_dump())
+    async def _on_get(self, ctx, params: GetTaskRequestParams) -> dict[str, Any]:
+        # dict로 반환한다 — 모델로 반환하면 SDK가 exclude_none으로 직렬화해
+        # ttl=None의 키를 지우고, 응답이 클라이언트 검증에서 죽는다 (D-116).
+        return self._wire_task(self._entry(params.task_id).task)
 
     async def _on_result(self, ctx, params: GetTaskPayloadRequestParams) -> CallToolResult:
         entry = self._entry(params.task_id)
@@ -210,7 +331,7 @@ class AnchorTasksExtension(Extension):
             )
         return entry.result
 
-    async def _on_cancel(self, ctx, params: CancelTaskRequestParams) -> CancelTaskResult:
+    async def _on_cancel(self, ctx, params: CancelTaskRequestParams) -> dict[str, Any]:
         entry = self._entry(params.task_id)
         if entry.task.status == "working":
             # 중단 신호만 세운다. 워커는 문서 사이에서 이를 확인하고 남은
@@ -228,12 +349,15 @@ class AnchorTasksExtension(Extension):
                 )
             if entry.worker is not None:
                 await anyio.to_thread.run_sync(lambda: entry.worker.join(timeout=5.0))
-        return CancelTaskResult(**entry.task.model_dump())
+        # dict 반환 이유는 _on_get과 같다 (D-116).
+        return self._wire_task(entry.task)
 
-    async def _on_list(self, ctx, params: PaginatedRequestParams | None) -> ListTasksResult:
+    async def _on_list(self, ctx, params: PaginatedRequestParams | None) -> dict[str, Any]:
         self.prune()
+        # dict 반환 이유는 _on_get과 같다 (D-116) — ttl 키가 빠진 항목 하나가
+        # tasks/list 전체를 영구히 파싱 불가로 만들었다.
         with self._entries_lock:
-            return ListTasksResult(tasks=[entry.task for entry in self._entries.values()])
+            return {"tasks": [self._wire_task(entry.task) for entry in self._entries.values()]}
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +374,14 @@ def build_server(
     # 막는다. 전역 락은 백그라운드 verify가 도는 동안 나머지 도구 전부를
     # 멈추게 했다 — Tasks 확장의 목적과 정면으로 어긋난다.
     service = Anchor(db_path=db_path, config=config)
+
+    # 백그라운드 verify 워커(순수 파이썬 CPU)와 지연 민감 도구 경로가 한
+    # 프로세스에 공존한다 (D-120). 매칭 루프는 스스로 양보하지만
+    # (anchoring/approx의 _yield_gil), 정규화 등 나머지 CPU 구간의 비자발
+    # 점유도 1ms로 상한을 건다. 이 프로세스는 MCP 서버 전용이므로 전역
+    # 인터프리터 설정을 여기서 정한다 — 라이브러리(Anchor)는 호스트 앱의
+    # 설정을 건드리지 않는다.
+    sys.setswitchinterval(0.001)
 
     def _verify_payload(
         arguments: dict[str, Any], should_stop: Any = None
@@ -489,6 +621,18 @@ def build_server(
     return server, service
 
 
+def serve_forever(server: MCPServer, service: Anchor, transport: str | None) -> None:
+    """서버를 돌리고, 어떤 진입점이든 같은 종료 순서를 지킨다: 워커 정리 →
+    저장소 해제. 순서를 어기면 워커가 쓰는 커넥션을 닫아 부분 결과가 사라진다
+    (D-034/D-117). 두 진입점(`anchor-mcp`, `anchor serve`)이 이 계약을 따로
+    구현하다 한쪽만 지키는 상태가 D-118이었다 — 공유 경로 하나로 합친다."""
+    try:
+        server.run(transport="streamable-http" if transport == "http" else "stdio")
+    finally:
+        server.anchor_tasks.shutdown()
+        service.close()
+
+
 def main() -> None:
     """`anchor-mcp` 콘솔 스크립트 — Claude Desktop 등 MCP 클라이언트가 실행한다."""
     import argparse
@@ -506,12 +650,7 @@ def main() -> None:
     config = load_config()
     transport = args.transport or config.server_transport
     server, service = build_server(db_path=args.db, config=config)
-    try:
-        server.run(transport="streamable-http" if transport == "http" else "stdio")
-    finally:
-        # 순서가 중요하다: 워커가 커넥션을 쓰는 중에 닫으면 죽는다 (D-034).
-        server.anchor_tasks.shutdown()
-        service.close()
+    serve_forever(server, service, transport)
 
 
 if __name__ == "__main__":

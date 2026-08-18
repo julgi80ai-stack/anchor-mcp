@@ -114,6 +114,70 @@ def bench_cache_hit() -> None:
     gate("cache_hit p95 < 15ms", ok, detail + " (n=100, 본문 ~100KB)")
 
 
+def bench_cache_hit_under_load() -> None:
+    """백그라운드 verify의 매칭 루프가 도는 동안의 캐시 히트 — Tasks 확장이
+    존재하는 바로 그 상황이다 (D-120). 유휴 벤치만 있으면 매칭 루프의 GIL
+    점유 회귀가 CI를 통과한다: 실측 p95 72~100ms(게이트의 6배)가 그렇게
+    숨어 있었다."""
+    import threading
+
+    text = ("캐시 히트 지연 측정을 위한 본문 문장이다. " * 40 + "\n\n") * 120
+    churn_text = " ".join(
+        f"채움 문단 {j}: 앵커와 무관한 서술이 이어지고 숫자 {j * 13}이 등장한다."
+        for j in range(2500)
+    )
+    missing_quote = (
+        "근거 문장은 서로 다른 사실을 담고 숫자 3700과 영어 조각 "
+        "fragment-100alpha 를 함께 품으며 길이도 상당히 길다"
+    )
+    stop = threading.Event()
+    # build_server와 같은 배치 — 서버 프로세스는 스위치 간격을 1ms로 줄인다.
+    # 이 벤치는 그 프로세스의 상황을 재는 것이므로 같은 설정에서 잰다.
+    previous_interval = sys.getswitchinterval()
+    sys.setswitchinterval(0.001)
+
+    def churn() -> None:
+        from anchor.anchoring.approx import set_thread_yields
+
+        set_thread_yields(True)  # 서버의 배경 워커와 같은 배치 (D-120)
+        while not stop.is_set():
+            match_anchor(
+                churn_text, exact=missing_quote, prefix="앞", suffix="뒤",
+                position_hint=1000, budget_ms=300,
+            )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with Anchor(db_path=Path(tmp) / "bench.db", config=Config(db_path=Path(tmp) / "bench.db")) as ax:
+            now = utcnow_iso()
+            doc = ax._repository.create_document(
+                url="https://bench.invalid/doc", original_url="https://bench.invalid/doc",
+                title=None, now=now,
+            )
+            ax._repository.insert_version(
+                document_id=doc.id, text_hash=hash_text(text), raw_hash="b3:raw",
+                pipeline_version="bench/1", captured_at=now, byte_size=len(text),
+                normalized_text=text, http_status=200,
+            )
+            worker = threading.Thread(target=churn)
+            worker.start()
+            time.sleep(0.1)
+            try:
+                samples = []
+                for _ in range(100):
+                    start = time.perf_counter()
+                    result = ax.fetch("https://bench.invalid/doc")
+                    samples.append((time.perf_counter() - start) * 1000)
+                    assert result.outcome == "cache_hit"
+            finally:
+                stop.set()
+                worker.join()
+                sys.setswitchinterval(previous_interval)
+    p95 = percentile(samples, 0.95)
+    floor = commit_floor_ms()
+    ok, detail = judge_cache_hit(p95, floor)
+    gate("cache_hit(부하 중) p95 < 15ms", ok, detail + " (n=100, 매칭 루프 동시 실행)")
+
+
 def bench_matcher_worst_case() -> None:
     big_text = "채움 문장이 끝없이 이어지는 대폭 개편 문서다. " * 20000  # ~50만 자
     samples = []
@@ -170,6 +234,7 @@ def bench_normal_corpus() -> None:
 
 def main() -> int:
     bench_cache_hit()
+    bench_cache_hit_under_load()
     bench_matcher_worst_case()
     bench_normal_corpus()
     if FAILURES:

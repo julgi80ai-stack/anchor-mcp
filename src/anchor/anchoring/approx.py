@@ -14,6 +14,8 @@ and contributors). 코드는 Python으로 새로 작성했으며, 근사 매칭
 
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import dataclass
 
 import regex
@@ -31,11 +33,48 @@ class ApproxMatch:
 # 한 행의 비용이 `O(len(b))`라 초과량이 인용문 길이에 비례해 커진다 — 예산
 # 200ms에 68,902자 인용문이 1,133ms를 썼다(§10의 앵커당 p99 250ms 위반).
 # 주기를 칸 수로 환산하면 초과량이 길이와 무관한 상수로 묶인다 (D-111).
-_BUDGET_CELLS = 4096
+_BUDGET_CELLS = 2048
 
 
 def _check_period(row_cost: int) -> int:
     return max(1, _BUDGET_CELLS // max(1, row_cost))
+
+
+def set_thread_yields(enabled: bool) -> None:
+    """이 스레드의 매칭 루프가 GIL을 주기적으로 양보할지 정한다 (D-120).
+
+    배경 워커(Tasks 확장의 verify)만 켠다. 양보의 비용은 슬립당 84µs(WSL2
+    실측)라, 대기자가 있을 수 없는 전경 호출(동기 도구·CLI·단독 벤치)이
+    내면 순손실이다 — 500K자 스캔이 예산을 넘겨 MISSING 판정이
+    UNRESOLVED로 전락했다(최악 사례 벤치 6/100 → 100/100)."""
+    _yield_state.polite = enabled
+
+
+def _yield_gil() -> None:
+    """긴 매칭 루프가 GIL을 독점하지 않도록 예산 확인 주기마다 다른
+    스레드에 양보한다 (D-120). 배경 verify의 매칭 루프는 순수 파이썬이라
+    슬라이스를 통째로 쥐고, 캐시 히트 경로는 GIL을 수십 번 얻어야 하므로
+    대기가 획득 횟수만큼 누적된다 — 실측 p95 15ms 게이트가 6~14배 초과였다.
+
+    수단은 **시간 배급된 `time.sleep(0)`** 뿐이다. 실측으로 좁혔다:
+    - sleep(0)을 매 체크포인트마다: 호출당 84µs — 스캔 예산을 통째로 먹는다.
+    - `os.sched_yield`(0.7µs): GIL을 놓지 않는다 — 양보가 아니다.
+    - `select(0)`(0.6µs): GIL은 놓지만 초고속 재획득이 take_gil의 드롭
+      타이머를 계속 리셋해 대기자를 오히려 굶긴다(최대 점유 6.7→52.7ms).
+    유효한 양보는 대기자가 깨어날 시간을 실제로 주는 sleep(0)이고, 비용은
+    1ms당 1회로 배급하며, `set_thread_yields`를 켠 스레드만 낸다. 판별은
+    벤치의 부하 중 p95와 최악 사례 UNRESOLVED 수가 함께 지킨다.
+    """
+    if not getattr(_yield_state, "polite", False):
+        return
+    now = time.monotonic()
+    if now - getattr(_yield_state, "last", 0.0) >= _YIELD_INTERVAL_S:
+        _yield_state.last = now
+        time.sleep(0)
+
+
+_YIELD_INTERVAL_S = 0.001
+_yield_state = threading.local()
 
 
 def bounded_edit_distance(a: str, b: str, k: int, budget=None) -> int | None:
@@ -50,8 +89,10 @@ def bounded_edit_distance(a: str, b: str, k: int, budget=None) -> int | None:
     period = _check_period(len(b))
     previous = list(range(len(b) + 1))
     for i, char_a in enumerate(a, 1):
-        if budget is not None and i % period == 0 and budget.exhausted():
-            raise TimeoutError("bounded_edit_distance 예산 소진")
+        if i % period == 0:
+            _yield_gil()
+            if budget is not None and budget.exhausted():
+                raise TimeoutError("bounded_edit_distance 예산 소진")
         current = [i] + [0] * len(b)
         row_min = i
         for j, char_b in enumerate(b, 1):
@@ -138,8 +179,12 @@ def myers_scan_all(text: str, pattern: str, k: int, budget) -> list[tuple[int, i
         elif run_end != -1:
             hits.append((run_score, run_end))
             run_score, run_end = k + 1, -1
-        if position & 0xFFF == 0 and budget.exhausted():
-            raise TimeoutError("myers_scan 예산 소진")
+        if position & 0x3FF == 0:
+            # 주기 1024자 ≈ 1ms 안팎의 슬라이스 — 4096자는 슬라이스가 4ms를
+            # 넘어 캐시 히트 p95를 여전히 게이트 밖으로 밀었다 (D-120 실측).
+            _yield_gil()
+            if budget.exhausted():
+                raise TimeoutError("myers_scan 예산 소진")
 
     if run_end != -1:
         hits.append((run_score, run_end))
@@ -160,8 +205,10 @@ def best_substring_match(
     previous = [0] * (n + 1)
     previous_start = list(range(n + 1))
     for i in range(1, m + 1):
-        if budget is not None and i % period == 0 and budget.exhausted():
-            raise TimeoutError("best_substring_match 예산 소진")
+        if i % period == 0:
+            _yield_gil()
+            if budget is not None and budget.exhausted():
+                raise TimeoutError("best_substring_match 예산 소진")
         char_p = pattern[i - 1]
         current = [i] + [0] * n
         current_start = [0] * (n + 1)

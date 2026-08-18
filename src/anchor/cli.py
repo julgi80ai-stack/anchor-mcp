@@ -151,7 +151,7 @@ def verify(
                 older_than=_parse_older_than(older_than) if older_than else None,
                 time_budget_ms=budget_ms,
             )
-    except AnchorError as error:
+    except (AnchorError, ValueError) as error:
         typer.secho(f"실패: {error}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
@@ -290,15 +290,12 @@ def serve(
 ) -> None:  # pragma: no cover — 이벤트 루프를 점유하는 장기 실행 진입점
     """MCP 서버를 시작한다 (도구 9종). MCP 클라이언트 등록은 `anchor-mcp` 참조."""
     from anchor.config import load_config
-    from anchor.server import build_server
+    from anchor.server import build_server, serve_forever
 
     config = load_config()
     resolved = transport or config.server_transport
     server, service = build_server(db_path=db, config=config)
-    try:
-        server.run(transport="streamable-http" if resolved == "http" else "stdio")
-    finally:
-        service.close()
+    serve_forever(server, service, resolved)
 
 
 @app.command("list")
