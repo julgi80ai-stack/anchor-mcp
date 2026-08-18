@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><title>Typography and invisible characters</title>
+<script>var abBucket = "seed-x";</script>
+</head><body>
+<nav><a href="/">home</a> <a href="/about">about</a></nav>
+<article><h1>Typography and invisible characters</h1>
+<p>French orthography puts a no-break space before a colon : like this. Numbers
+such as 10 000 use a narrow no-break space. Both are a single space on screen and
+must normalize to one, or a quote copied from the page will never be found.</p>
+<p>Some documents carry a zero​width space inside a word. Others carry a soft­hyphen.
+Neither is visible, so neither belongs in the stored body. A family emoji
+👨‍👩‍👧 is different: the joiners are part of the character.</p>
+<p>Emphasis such as <strong>this phrase</strong> and <em>that phrase</em> is formatting,
+not text. The stored body keeps the words and drops the markers. Links that still
+resolve but no longer say the same thing are the dangerous case.</p>
+<p>Combining marks appear in words like café and naïve. The stored form is composed,
+because that is what a browser hands you when you copy from the screen.</p></article>
+<footer><p>Copyright 2026 Julgi.Kang — 이 픽스처는 anchor-mcp 테스트용 자작 문서다.</p></footer>
+</body></html>

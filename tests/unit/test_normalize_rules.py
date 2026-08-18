@@ -295,3 +295,35 @@ def test_invisible_zero_width_characters_are_removed():
 def test_url_split_across_lines_is_not_broken_by_a_space():
     source = "자세한 내용은 아래 주소에서 확인할 수 있다 https://example.org/a/\nb/c 를 보라."
     assert "https://example.org/a/b/c" in normalize_text(source)
+
+
+def test_emphasis_followed_by_a_particle_is_removed():
+    """한국어·일본어는 조사가 강조 바로 뒤에 붙는다 — 닫는 쪽 경계는 느슨해야 한다."""
+    assert normalize_text("**굵게**도 있다") == "굵게도 있다"
+    assert normalize_text("*기울임*을 쓴다") == "기울임을 쓴다"
+
+
+def test_short_setext_underline_is_structural():
+    """markdownify는 제목 길이에 맞춰 밑줄을 낸다 — 두 글자 제목이면 `==`."""
+    assert normalize_text("제목\n==\n\n본문이다.").startswith("제목\n==")
+
+
+def test_space_between_cjk_characters_is_dropped_in_cjk_documents():
+    """추출기가 CJK 줄바꿈을 공백으로 바꿔 내보내면 화면과 어긋난다 (D-061).
+
+    브라우저는 CJK 사이의 줄바꿈을 공백 없이 렌더하므로(CSS Text 3), 화면에서
+    복사한 인용문에는 그 공백이 없다.
+    """
+    japanese = "この文書は日本語の本文を扱う。行の折り返しが 欧文語の直後で起きる。"
+    assert "折り返しが欧文語の直後" in normalize_text(japanese)
+
+
+def test_space_between_latin_and_cjk_is_kept():
+    """라틴 낱말과 CJK 사이의 공백은 브라우저도 렌더한다 — 지우면 안 된다."""
+    japanese = "設定では HTTP リクエストヘッダを明示する必要がある。規格は改訂された。"
+    assert "HTTP リクエストヘッダ" in normalize_text(japanese)
+
+
+def test_korean_documents_keep_spaces_between_han_characters():
+    korean = "이 조문은 大韓民國 憲法 제1조에 근거한다. 나머지는 하위 법령에 위임한다."
+    assert "大韓民國 憲法" in normalize_text(korean)

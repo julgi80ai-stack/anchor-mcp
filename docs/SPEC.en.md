@@ -1,6 +1,6 @@
 # Anchor — A Provenance-Tracking Fetch Cache (EN)
 
-**Technical Specification v1.5 (as of completion)**
+**Technical Specification v1.6 (as of completion)**
 
 > **Translation note**: This is an English translation of `SPEC.md`. The Korean
 > version is normative — if the two ever disagree, the Korean text governs.
@@ -18,15 +18,17 @@
 | Governing specs | RFC 7089, RFC 9110 (conditional requests), W3C Web Annotation Data Model, MCP 2026-07-28 |
 | Design rationale | `docs/decisions/0001` (prior art and positioning), `docs/decisions/0002` (licensing and reuse) |
 
-> **v1.4 → v1.5 change summary**: Reflects the remediation of 52 defects demonstrated in a parallel audit. The schema was raised to v5 to introduce a "current live version" pointer, redirect aliases, and per-source version uniqueness (§4.1); the normalization rules were revised so that quotes copied off the screen actually resolve (§5.3, NORM_VERSION 2); robots is now evaluated at every redirect hop and a robots 5xx became a denial (§5.2); anchor thresholds and the edit-distance ratio now account for the writing system (§6.1, §6.2); the budget is enforced inside the matching stages (§6.2); and the global lock was narrowed to per-URL scope (§10). See §15 for the full list.
+> **v1.5 → v1.6 change summary**: Reflects stage 1 (normalization) of the remediation for the 101 defects demonstrated in the second parallel audit. **The normalization rules were redesigned and NORM_VERSION was raised to 3** (§5.3) — lines and blocks are recognized first, and rules that delete anything apply only inside prose lines. Quote lookup was made tolerant of block separators (§6.1), the golden corpus is now required to actually exercise the normalization rules (§12), and migrating an older database *that contains rows* was made an explicit test target (§12). See §15 for the full list.
 >
-> **v1.3 → v1.4 change summary**: Cleanup at the v1.0 release point. Configuration loading was settled on the standard library and `pydantic-settings` was removed from the dependencies (§9, §11); the conditions for optionally running the anchor benchmark were made explicit (§12); and the development-dependency policy was delegated to the ledger (§11.2). See §16 for the full list.
+> **v1.4 → v1.5 change summary**: Reflects the remediation of 52 defects demonstrated in a parallel audit. The schema was raised to v5 to introduce a "current live version" pointer, redirect aliases, and per-source version uniqueness (§4.1); the normalization rules were revised so that quotes copied off the screen actually resolve (§5.3, NORM_VERSION 2); robots is now evaluated at every redirect hop and a robots 5xx became a denial (§5.2); anchor thresholds and the edit-distance ratio now account for the writing system (§6.1, §6.2); the budget is enforced inside the matching stages (§6.2); and the global lock was narrowed to per-URL scope (§10). See §16 for the full list.
 >
-> **v1.2 → v1.3 change summary**: Reflects what was settled during the v0.1–v0.4 implementation. The `versions.pipeline_version` column and the `renormalized` and `unchanged` outcomes were formalized (§4.1, §5.2, §5.3, §7.1); the tracking-parameter removal list in URL normalization was narrowed (§5.1); robots cache persistence and the request order were clarified (§4.1, §5.2); `mcp-server-fetch`-compatible chunked reading was added (§7.1); and the SDK constraint on the Tasks wire format was recorded (§7.0). See §17 for the full list.
+> **v1.3 → v1.4 change summary**: Cleanup at the v1.0 release point. Configuration loading was settled on the standard library and `pydantic-settings` was removed from the dependencies (§9, §11); the conditions for optionally running the anchor benchmark were made explicit (§12); and the development-dependency policy was delegated to the ledger (§11.2). See §17 for the full list.
 >
-> **v1.1 → v1.2 change summary**: Reflects the results of the license audit. The `trafilatura>=1.8.0` lower bound was made mandatory (§11); MemGator operating guidance was made explicit (§5.2, §9); the provenance policy for test fixtures was split into three grades (§12); and a license gate was added to CI (§12). See §18 for the full list.
+> **v1.2 → v1.3 change summary**: Reflects what was settled during the v0.1–v0.4 implementation. The `versions.pipeline_version` column and the `renormalized` and `unchanged` outcomes were formalized (§4.1, §5.2, §5.3, §7.1); the tracking-parameter removal list in URL normalization was narrowed (§5.1); robots cache persistence and the request order were clarified (§4.1, §5.2); `mcp-server-fetch`-compatible chunked reading was added (§7.1); and the SDK constraint on the Tasks wire format was recorded (§7.0). See §18 for the full list.
 >
-> **v1.0 → v1.1 change summary**: Reflects the results of the prior-art survey by introducing Memento compatibility (§2, §5.2, §7.8), replacing the anchor matching algorithm with a performance-safe approach (§6.2), expanding the verification states to seven (§6.3), and adopting the Tasks extension of the latest MCP spec (§7.0). See §19 for the full list.
+> **v1.1 → v1.2 change summary**: Reflects the results of the license audit. The `trafilatura>=1.8.0` lower bound was made mandatory (§11); MemGator operating guidance was made explicit (§5.2, §9); the provenance policy for test fixtures was split into three grades (§12); and a license gate was added to CI (§12). See §19 for the full list.
+>
+> **v1.0 → v1.1 change summary**: Reflects the results of the prior-art survey by introducing Memento compatibility (§2, §5.2, §7.8), replacing the anchor matching algorithm with a performance-safe approach (§6.2), expanding the verification states to seven (§6.3), and adopting the Tasks extension of the latest MCP spec (§7.0). See §20 for the full list.
 
 ---
 
@@ -372,9 +374,16 @@ Carry this table verbatim into the documentation and the installation guide. Whe
 ```
 raw bytes
   → encoding detection (charset-normalizer)
-  → content extraction (trafilatura; falls back to readability-lxml on failure)
+  → content extraction (trafilatura; falls back to readability-lxml on failure,
+     **or when block structure has collapsed**)
   → markdown conversion
-  → Unicode NFC normalization
+  → unify line separators (CR, U+2028, U+2029, U+0085, U+000B, U+000C → newline)
+  → Unicode spaces → ASCII space; remove only zero-width characters that do **not**
+     participate in rendering
+  → **classify lines and blocks** (code fences, indented code, structural lines, prose)
+  → prose lines only: fold typographic line breaks → strip formatting markers and
+     formatting-only tags
+  → Unicode NFC normalization (**after** character removal)
   → collapse runs of whitespace to one, strip trailing whitespace, reduce 3+ newlines to 2
   → normalized_text
 
@@ -443,6 +452,14 @@ class Anchor:
 ```
 
 If `quote` is not present in the source, no anchor is created and `QuoteNotFound` is raised. **Not recording a citation that does not exist** is the basic contract of this tool.
+
+#### Lookup tolerant of block separators (v1.6)
+
+A quote a person dragged off the screen carries **different block separators** from the stored body. The browser hands over a single newline or a space between paragraphs and no list marker (`- `) at all, whereas the stored body has blank lines and markers. As a result, quoting two paragraphs or two list items at once — a common action — always failed.
+
+Lookup therefore runs on a form where **runs of spaces and newlines count as one and leading list markers are skipped**. The anchor's `exact`, however, is bound to **a string that actually exists in the stored body** rather than to the form the user supplied — stages 1 and 2 of §6.2 are exact-match searches, and that premise must not be broken.
+
+This tolerance **does not leak toward permitting fabrication.** Only whitespace placement differs; a sentence that is not in the body still yields `QuoteNotFound`. That error also states that the region may not have been stored — when a sentence plainly visible on the page (a summary box, a figure caption, a reference list) was not extracted as body text, telling the user only "it is not in the source" is a false statement.
 
 #### Short Quote Warning (new in v1.1)
 
@@ -944,18 +961,18 @@ Configuration loading is implemented with the standard library (tomllib + datacl
 | Layer | Target | Method |
 |---|---|---|
 | Unit | Normalization, hashing, the 4 stages of anchor matching | Pure functions, no network |
-| Golden | 30 real HTML snapshots → expected content | Fixture comparison. Prevents extractor regressions |
+| Golden | **36+** real HTML snapshots → expected content | Fixture comparison. Prevents extractor regressions. **A test asserts the corpus actually exercises the normalization rules** (v1.6) |
 | Mutation | Programmatically apply ad insertion, paragraph moves, and sentence edits to a source and verify the state determination | At least 5 cases for each of the 7 states |
 | **Anchor benchmark** | **The real quote set from Hypothesis public annotation data** | **Success rate + p99 latency. CI fails on regression** |
 | **Worst case** | **Long document + short common quote + heavy rework** | **Whether it returns `UNRESOLVED` without stalling** |
 | Integration | 304, redirects, 402, 429+Retry-After, timeouts, archive fallback | Local fixture server |
 | Interoperability | Validate a generated TimeMap with an external Memento parser | Confirm RFC 7089 compliance |
 | Property | For arbitrary text, `cite → verify(same version) == INTACT` | Hypothesis (the library) |
-| **Copy-and-cite** | **Whether a sentence copied off the screen is found in the stored content** (formatting, footnotes, NBSP, typesetting line breaks, PDF) | **Real HTML/PDF input (v1.5)** |
+| **Copy-and-cite** | **Whether a sentence copied off the screen is found in the stored content** (formatting, footnotes, NBSP, typesetting line breaks, PDF, **selections spanning several blocks**) | **Real HTML/PDF input (v1.5, v1.6)** |
 | **Language equity** | **Whether a revision of the same character resolves to different states depending on the language** | **English/Korean/Japanese/Chinese comparison (v1.5)** |
 | **Redirects** | **Per-hop robots determination, alias cache hits, conditional requests preserved** | **Local fixtures (v1.5)** |
 | **Concurrency** | **Document duplication under concurrent fetches of the same URL, parallelism across different URLs, read responsiveness during a batch** | **Thread load (v1.5)** |
-| **Atomicity and crashes** | **Reopening after an interrupted migration, integrity under threaded access** | **Separate process (v1.5)** |
+| **Atomicity and crashes** | **Reopening after an interrupted migration, integrity under threaded access, upgrading an older database that contains rows** | **Separate process (v1.5) · v1–v4 fixtures with rows (v1.6)** |
 
 **Coverage targets**: 95% or above for `anchoring/` and `normalize/`. 80% or above for the rest.
 
@@ -1027,7 +1044,30 @@ This is not a formality. There are people in this field who have held on to this
 
 ---
 
-## 15. v1.4 → v1.5 Change History
+## 15. v1.5 → v1.6 Change History
+
+Reflects **stage 1 (normalization, cluster 1)** of the remediation for the 101 defects demonstrated in the second parallel audit (10 Opus auditors, 2026-08-18). These came out of code written during the first round of remediation, so each entry also records what was broken while fixing something else.
+
+| # | Section | Change | Defect behind it |
+|---|---|---|---|
+| 1 | **5.3** | **NORM_VERSION 3** — recognize lines and blocks first; rules that delete anything apply only inside prose lines | Global substitution running ahead of line and fence recognition was the common root of all 22 cluster-1 defects |
+| 2 | 5.3 | Tag removal narrowed to **formatting-only inline tags** | Deleting anything tag-shaped erased `<updated>` and `List<String>` from prose, so an `<updated>` → `<published>` revision collapsed to the same string and verify reported INTACT |
+| 3 | 5.3 | Emphasis markers are **not stripped inside a word** | `2*3*4` became `234`, inventing a number that was never written |
+| 4 | 5.3 | NFC moved **after** character removal | Removing zero-width characters is what makes a base and a combining mark adjacent, and NFC had already run |
+| 5 | 5.3 | Code fences, indented code, and inline code are isolated | Code blocks were emptied and indentation flattened, so returned code was syntactically invalid |
+| 6 | 5.3 | **Record detection** for line folding; tighter structural markers | Logs, CSV, tables, and config files were folded so unrelated values became neighbours; conversely `2026. 3. 15.` was mistaken for a numbered list and was not folded |
+| 7 | 5.3 | The join separator is decided by the **document's writing system**; spaces between CJK characters are removed | Looking at a single boundary character inserted a space that does not exist in Japanese text. The path where the extractor turns a CJK line break into a space was closed as well |
+| 8 | 5.3 | Six line separators unified; the set of removed zero-width characters narrowed | U+2028 and friends survived in the body and broke copied quotes, while removing ZWJ, ZWNJ, LRM, and RLM damaged emoji, orthography, and paragraph direction |
+| 9 | 5.3 | A body that normalizes to empty is **not stored** | A `char_count: 0` version flipped every anchor on that document to MISSING |
+| 10 | 5.3 | Fall back when the extraction's block structure has collapsed | Headings were glued onto the following paragraph, so quotes copied off the screen did not resolve |
+| 11 | **6.1** | Quote lookup is **tolerant of block separators** — runs of spaces and newlines count as one, and leading list markers are skipped. The anchor's `exact` is bound to a string that actually exists in the stored body | Quoting two paragraphs or two list items at once — a common action — always produced `QuoteNotFound` (only 2 of 10 succeeded) |
+| 12 | 6.1 | `QuoteNotFound` distinguishes "this region may not have been stored" | The wording was identical to the refusal of a fabricated quote, so a user who copied from the page was told their sentence "is not in the source" |
+| 13 | **12** | The golden corpus must **actually exercise** the normalization rules (code blocks, tables, lists, CJK, combining marks, prose asterisks, Unicode spaces), and that coverage is pinned by a test | The 30 golden fixtures exercised none of the rules NORM_VERSION 2 introduced, so all 30 passed while normalization was deleting body text |
+| 14 | 12 | Migrating an older database **that contains rows** is an explicit test target | The regression test only migrated a database with zero rows and missed a defect that made real stores permanently unopenable |
+
+---
+
+## 16. v1.4 → v1.5 Change History
 
 Reflects the remediation of **52 defects demonstrated with reproduction scripts** in a parallel audit (10 Opus instances, 2026-08-17). They emerged in a state where all 198 existing tests passed, so each item is also a blind spot in the specification.
 
@@ -1061,7 +1101,7 @@ Reflects the remediation of **52 defects demonstrated with reproduction scripts*
 
 ---
 
-## 16. v1.3 → v1.4 Change History
+## 17. v1.3 → v1.4 Change History
 
 Cleanup at the v1.0 release (2026-08-17).
 
@@ -1074,7 +1114,7 @@ Cleanup at the v1.0 release (2026-08-17).
 
 ---
 
-## 17. v1.2 → v1.3 Change History
+## 18. v1.2 → v1.3 Change History
 
 Reflects what was settled during the v0.1–v0.4 implementation (2026-08-17). These were found with the implementation running ahead of the specification, so the grounds for each item are in the code and the tests.
 
@@ -1094,7 +1134,7 @@ Reflects what was settled during the v0.1–v0.4 implementation (2026-08-17). Th
 
 ---
 
-## 18. v1.1 → v1.2 Change History
+## 19. v1.1 → v1.2 Change History
 
 Reflects the results of the license audit (2026-08-16). All 16 unverified items were checked and reduced to zero, and in the process one substantive conflict was found.
 
@@ -1124,7 +1164,7 @@ See `THIRD-PARTY.md` for details.
 
 ---
 
-## 19. v1.0 → v1.1 Change History
+## 20. v1.0 → v1.1 Change History
 
 | # | Section | Change | Rationale |
 |---|---|---|---|

@@ -55,8 +55,11 @@ _BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
 # 마크다운 강조. **어절 내부는 건드리지 않는다** — `2*3*4`를 `234`로 바꾸면
 # 원문에 없던 수치를 만들어내는 것이다 (D-057). 여는 기호 앞과 닫는 기호
 # 뒤가 낱말 문자면 강조가 아니라 산문·수식으로 본다.
-_STRONG_RE = re.compile(r"(?<![\w*])\*\*(?=\S)([^*]+?)(?<=\S)\*\*(?![\w*])")
-_EMPHASIS_RE = re.compile(r"(?<![\w*])\*(?=\S)([^*]+?)(?<=\S)\*(?![\w*])")
+# 경계 조건은 **비대칭**이다. 여는 기호 앞이 낱말 문자면 강조가 아니라
+# 산문·수식이다(`2*3*4`). 반면 닫는 기호 **뒤**는 낱말 문자여도 된다 —
+# 한국어·일본어는 조사가 강조 바로 뒤에 붙는다(`**굵게**도`).
+_STRONG_RE = re.compile(r"(?<![\w*])\*\*(?=\S)([^*]+?)(?<=\S)\*\*(?!\*)")
+_EMPHASIS_RE = re.compile(r"(?<![\w*])\*(?=\S)([^*]+?)(?<=\S)\*(?!\*)")
 _MARKUP_PASSES = 4  # 제거가 새 매치를 만들 수 있어 고정점까지 돈다 (D-059)
 
 _INLINE_CODE_RE = re.compile(r"`[^`]*`")
@@ -83,7 +86,8 @@ _STRUCTURAL_RE = re.compile(
 # 줄을 흡수하면 접합 결과가 더는 구조로 보이지 않아, 다음 호출에서 또 접히며
 # 결과가 달라진다(멱등성 위반, D-059).
 _LIST_ITEM_RE = re.compile(r"^(?:[-*+]\s|\d{1,2}[.)]\s)")
-_SETEXT_RE = re.compile(r"^[=\-]{3,}\s*$")      # setext 밑줄 / YAML 구분선
+# setext 밑줄은 제목 길이에 맞춰 짧을 수 있다(`제목` 두 글자 → `==`).
+_SETEXT_RE = re.compile(r"^(?:=+|-{2,})\s*$")   # setext 밑줄 / YAML 구분선
 _YAML_FENCE_RE = re.compile(r"^(?:---|\.\.\.)\s*$")
 _TABLE_ROW_RE = re.compile(r"^\|.*\|\s*$")
 
@@ -103,6 +107,15 @@ _HANGUL_RANGES = ((0x1100, 0x11FF), (0x3130, 0x318F), (0xA960, 0xA97F), (0xAC00,
 
 # 일본어·중국어 한 글자가 담는 정보량이 라틴 문자의 대략 몇 배인가.
 WORDLESS_INFORMATION_RATIO = 2.5
+
+# 브라우저는 CJK 문자 사이의 줄바꿈을 공백 없이 렌더한다(CSS Text 3의 segment
+# break 규칙). 그런데 추출기는 그 줄바꿈을 공백으로 바꿔 내보내므로, 화면에
+# 붙어 보이던 문장이 저장 본문에서는 공백을 사이에 두게 되어 복사 인용이
+# 실패한다 (D-061). 문서가 일본어·중국어일 때만 되돌린다.
+_WORDLESS_CLASS = "[" + "".join(
+    f"\\U{start:08x}-\\U{end:08x}" for start, end in _WORDLESS_RANGES
+) + "]"
+_WORDLESS_SPACE_RE = re.compile(f"(?<={_WORDLESS_CLASS}) +(?={_WORDLESS_CLASS})")
 
 
 def _in_ranges(char: str, ranges: tuple[tuple[int, int], ...]) -> bool:
@@ -291,6 +304,11 @@ def normalize_text(text: str) -> str:
         else _HORIZONTAL_WS.sub(" ", _strip_inline_markup(line)).strip()
         for kind, line in folded
     ]
+    if not joiner:  # 일본어·중국어 문서
+        lines = [
+            line if kind == _CODE else _WORDLESS_SPACE_RE.sub("", line)
+            for (kind, _), line in zip(folded, lines)
+        ]
 
     # 문자 제거가 끝난 **뒤에** NFC를 건다 — 폭 없는 문자를 사이에서 지우면
     # 기반 문자와 결합 문자가 비로소 인접하는데, 앞에서 걸면 그 조합이

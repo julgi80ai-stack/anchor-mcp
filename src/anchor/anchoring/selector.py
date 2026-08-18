@@ -8,6 +8,8 @@ quote가 원문에 없으면 QuoteNotFound를 던진다.
 
 from __future__ import annotations
 
+import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from anchor.errors import QuoteNotFound, QuoteTooShort
@@ -48,6 +50,65 @@ def scale_for_script(threshold: int, text: str) -> int:
     return max(4, round(threshold / WORDLESS_INFORMATION_RATIO))
 
 
+# 화면에서 끌어 복사한 인용문은 저장 본문과 **블록 구분자가 다르다**. 브라우저는
+# 문단 사이를 줄바꿈 하나나 공백으로 주고 목록 표지(`- `)는 아예 주지 않는데,
+# 저장 본문에는 빈 줄과 표지가 있다. 그래서 두 문단·두 목록 항목을 한 번에
+# 인용하는 흔한 행동이 전부 `QuoteNotFound`가 됐다 (D-074).
+_LIST_MARKER_RE = re.compile(r"(?:[-*+]|\d{1,2}[.)])\s+")
+_FORM_WHITESPACE = " \t\n"
+
+
+def _form_stream(text: str) -> Iterator[tuple[str, int]]:
+    """비교용 검색형과 원본 오프셋을 함께 흘려보낸다.
+
+    공백·줄바꿈의 연속은 공백 하나로 접고, 줄머리의 목록 표지는 건너뛴다.
+    오프셋 배열을 통째로 들고 있지 않으려고 스트림으로 만든다 — 2MB 문서에서
+    정수 배열은 수십 MB가 된다.
+    """
+    emitted = False
+    pending_space = False
+    at_line_start = True
+    index = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char in _FORM_WHITESPACE:
+            pending_space = emitted
+            if char == "\n":
+                at_line_start = True
+            index += 1
+            continue
+        if at_line_start:
+            marker = _LIST_MARKER_RE.match(text, index)
+            if marker is not None:
+                index = marker.end()
+                continue
+        at_line_start = False
+        if pending_space:
+            yield " ", index
+            pending_space = False
+        yield char, index
+        emitted = True
+        index += 1
+
+
+def _search_form(text: str) -> str:
+    return "".join(char for char, _ in _form_stream(text))
+
+
+def _span_in_source(text: str, start_in_form: int, length_in_form: int) -> tuple[int, int]:
+    """검색형의 구간을 원본 오프셋 구간으로 되돌린다."""
+    last = start_in_form + length_in_form - 1
+    start = end = -1
+    for position, (_, index) in enumerate(_form_stream(text)):
+        if position == start_in_form:
+            start = index
+        if position == last:
+            end = index + 1
+            break
+    return start, end
+
+
 def build_selector(
     text: str,
     quote: str,
@@ -57,27 +118,42 @@ def build_selector(
     short_quote_chars: int = 32,
 ) -> Selector:
     # 호출자의 인용문도 본문과 같은 규칙으로 정규화해야 비교가 성립한다.
-    exact = normalize_text(quote)
-    minimum = scale_for_script(min_quote_chars, exact)
-    short_limit = scale_for_script(short_quote_chars, exact)
-    if len(exact) < minimum:
+    requested = normalize_text(quote)
+    minimum = scale_for_script(min_quote_chars, requested)
+    short_limit = scale_for_script(short_quote_chars, requested)
+    if len(requested) < minimum:
         raise QuoteTooShort(
-            f"Quote is {len(exact)} chars; at least {minimum} required for this script, "
-            f"one complete sentence recommended — 인용문이 {len(exact)}자 "
+            f"Quote is {len(requested)} chars; at least {minimum} required for this script, "
+            f"one complete sentence recommended — 인용문이 {len(requested)}자 "
             f"(이 문자 체계의 최소 {minimum}자 필요)"
         )
 
-    offset = text.find(exact)
-    if offset == -1:
-        raise QuoteNotFound("Quote not found in the source text; nonexistent citations are never recorded — 인용문이 원문에 없어 기록하지 않습니다")
-    occurrences = _count_occurrences(text, exact)
+    haystack = _search_form(text)
+    needle = _search_form(requested)
+    position = haystack.find(needle) if needle else -1
+    if position == -1:
+        raise QuoteNotFound(
+            "Quote not found in this document's stored text; nonexistent citations are never "
+            "recorded. If you copied it from the page, that region may not have been extracted "
+            "as body text (navigation, figure captions, sidebars) — check with get_version. "
+            "— 이 문서의 저장된 본문에서 인용문을 찾지 못했습니다. 없는 인용은 기록하지 "
+            "않습니다. 화면에서 복사했다면 그 영역이 본문으로 추출되지 않았을 수 있습니다 "
+            "(내비게이션·그림 설명·사이드바) — get_version으로 저장된 본문을 확인하세요."
+        )
+
+    # 앵커의 `exact`는 **저장 본문에 실재하는 문자열**이어야 한다 — 매칭
+    # 1·2단계가 `text.find(exact)`로 돌기 때문이다. 사용자가 준 형태가 아니라
+    # 원문의 형태에 닻을 내린다.
+    offset, end = _span_in_source(text, position, len(needle))
+    exact = text[offset:end]
+    occurrences = _count_occurrences(haystack, needle)
 
     return Selector(
         exact=exact,
         prefix=text[max(0, offset - context_chars) : offset],
-        suffix=text[offset + len(exact) : offset + len(exact) + context_chars],
+        suffix=text[end : end + context_chars],
         position_hint=offset,
-        quality=Quality.SHORT if len(exact) < short_limit else Quality.OK,
+        quality=Quality.SHORT if len(requested) < short_limit else Quality.OK,
         occurrences=occurrences,
     )
 

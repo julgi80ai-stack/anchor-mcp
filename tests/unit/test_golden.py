@@ -20,9 +20,53 @@ CASES = sorted(path.stem for path in GOLDEN_DIR.glob("*.html"))
 
 
 def test_golden_corpus_shape():
-    assert len(CASES) == 30
+    assert len(CASES) >= 36
     korean = [name for name in CASES if name.startswith("ko-")]
     assert len(korean) >= 10  # 최소 10건은 한국어 (SPEC §12.1)
+
+
+def test_golden_corpus_exercises_the_normalization_rules():
+    """코퍼스가 정규화 규칙을 실제로 밟는지 확인한다 (D-076).
+
+    2차 감사에서 골든 30건은 NORM_VERSION 2가 도입한 규칙을 **하나도** 시험하지
+    않았다 — `<pre>`·표·문단 내 줄바꿈·CJK·결합 문자·산문 속 별표가 전부 0건.
+    그래서 정규화가 본문을 삭제하고 있는데도 30건이 전부 통과했다. 커버리지가
+    다시 0으로 내려가지 못하도록 여기서 고정한다.
+    """
+    sources = {stem: (GOLDEN_DIR / f"{stem}.html").read_text("utf-8") for stem in CASES}
+    bodies = {stem: (GOLDEN_DIR / f"{stem}.expected.md").read_text("utf-8") for stem in CASES}
+
+    def any_body(predicate) -> bool:
+        return any(predicate(text) for text in bodies.values())
+
+    def any_source(predicate) -> bool:
+        return any(predicate(text) for text in sources.values())
+
+    checks = {
+        "코드 블록": lambda body: "```" in body,
+        "코드 블록 안 들여쓰기": lambda body: "\n    " in body,
+        "표": lambda body: "\n| " in body,
+        "목록": lambda body: "\n- " in body,
+        "산문 속 별표": lambda body: "2*3*4" in body,
+        "산문 속 꺾쇠": lambda body: "List<String>" in body,
+        "인라인 코드": lambda body: "`" in body,
+        "한자·가나": lambda body: any(
+            "\u3040" <= ch <= "\u30ff" or "\u4e00" <= ch <= "\u9fff" for ch in body
+        ),
+        "결합 문자 합성형": lambda body: "café" in body,
+    }
+    missing = [name for name, predicate in checks.items() if not any_body(predicate)]
+    assert not missing, f"골든이 밟지 않는 구조: {missing}"
+
+    source_checks = {
+        "문단 안 줄바꿈": lambda html: "\n" in html.split("<p>", 1)[-1].split("</p>", 1)[0],
+        "유니코드 공백": lambda html: any(ch in html for ch in "\u00a0\u202f\u2009"),
+        "폭 없는 문자": lambda html: any(ch in html for ch in "\u200b\u00ad"),
+        "ZWJ 이모지": lambda html: "\u200d" in html,
+        "위첨자 각주": lambda html: "<sup>" in html,
+    }
+    missing_sources = [name for name, predicate in source_checks.items() if not any_source(predicate)]
+    assert not missing_sources, f"골든 원본이 담지 않는 조건: {missing_sources}"
 
 
 @pytest.mark.parametrize("stem", CASES)
