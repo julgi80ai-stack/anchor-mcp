@@ -146,6 +146,10 @@ class AttentionItem:
     match_score: float | None
     edit_distance: int | None
     truncated: bool = False  # 문서가 상한에서 잘려 일부만 검사했다
+    # 앵커를 만든 자리와 지금 찾은 자리. 둘이 멀면 같은 문서의 **다른 절**에서
+    # 왔다는 뜻이다 — 편집거리만 보고는 알 수 없다 (D-115).
+    position_hint: int | None = None
+    found_offset: int | None = None
 
 
 @dataclass(frozen=True)

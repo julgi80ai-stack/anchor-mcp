@@ -173,6 +173,10 @@ def verify(
             typer.echo(f"  현재: {item.after}")
         if item.match_score is not None:
             typer.echo(f"  (score {item.match_score:.2f}, 편집거리 {item.edit_distance})")
+        if item.found_offset is not None and item.position_hint is not None:
+            moved = item.found_offset - item.position_hint
+            if abs(moved) > 500:
+                typer.echo(f"  (원래 자리에서 {moved:+,}자 — 다른 절일 수 있습니다)")
 
 
 @app.command()

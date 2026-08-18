@@ -477,6 +477,8 @@ class Anchor:
                             match_score=result.score,
                             edit_distance=result.edit_distance,
                             truncated=result.truncated,
+                            position_hint=anchor.position_hint,
+                            found_offset=result.found_offset,
                         )
                     )
 

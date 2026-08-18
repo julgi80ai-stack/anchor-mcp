@@ -164,7 +164,22 @@ def wordless_density(text: str) -> float:
 
 
 def is_wordless_text(text: str) -> bool:
+    """문서 전체를 한 문자 체계로 **분류**한다 (CJK 사이 공백 접합 판단용)."""
     return wordless_density(text) >= 0.5
+
+
+def wordless_edit_factor(text: str) -> float:
+    """편집거리 상한 k에 곱할 계수. 밀도 0에서 1.0, 밀도 1에서 2.5로 **연속**이다.
+
+    분류(0.5 경성 임계)를 그대로 k에 쓰면 계단 바로 아래가 항상 틀린다.
+    라틴 약어·연도·백분율이 섞인 일본어·중국어 문장은 흔히 밀도가 0.5 밑으로
+    내려가는데(`GDPは3.2%増加した。`는 0.462), 그 순간 k가 2.5배 작아져
+    두 글자 교체가 ALTERED가 아니라 MISSING이 된다 (D-113).
+
+    문장이 나르는 정보량은 CJK 글자가 차지하는 비율에 따라 매끄럽게 변한다.
+    계수도 그렇게 둔다 — 경계가 없으면 경계 아래도 없다.
+    """
+    return 1.0 + (WORDLESS_INFORMATION_RATIO - 1.0) * wordless_density(text)
 
 
 # -- 인라인 마크업 ------------------------------------------------------------

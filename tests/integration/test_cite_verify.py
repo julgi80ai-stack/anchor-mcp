@@ -43,6 +43,10 @@ def test_verify_detects_alteration_with_before_after(fixture_server, anchor):
     assert item.before == QUOTE
     assert "제일 위험하다" in (item.after or "")
     assert item.edit_distance is not None and item.edit_distance <= 4
+    # 어디서 찾았는지를 함께 준다. 편집거리만으로는 그것이 같은 자리의
+    # 개정인지 다른 절의 형제 문단인지 호출자가 알 수 없다 (D-115).
+    assert item.found_offset is not None and item.position_hint is not None
+    assert abs(item.found_offset - item.position_hint) < 500
 
 
 def test_verify_detects_missing_quote(fixture_server, anchor):
