@@ -155,3 +155,59 @@ def test_aggregator_supplied_uri_is_not_fetched_from_an_arbitrary_host(
     with Anchor(config=config) as anchor:
         hit = anchor._archive.lookup(f"{base_url}/article")
     assert hit is None, "robots가 막은 경로를 애그리게이터 경유로 가져왔다"
+
+
+# -- D-190: 선언된 charset ----------------------------------------------------
+
+
+def test_declared_charset_is_honoured(tmp_path, fixture_server):
+    """robots.txt의 선언된 charset을 무시하면 규칙이 사라진다 (D-190).
+
+    utf-8 하드코딩 디코딩은 UTF-16 문서를 전부 U+FFFD로 만들어 파서가
+    지시자를 하나도 못 읽는다 — 결과는 소유자의 금지가 없는 것. D-094·095가
+    없애려던 실패 부류가 디코딩 계층에서 재현된 것이다.
+    """
+    base_url, state = fixture_server
+    state.robots_body_override = "User-agent: *\nDisallow: /\n".encode("utf-16")
+    state.robots_content_type = "text/plain; charset=utf-16"
+    with Anchor(config=_config(tmp_path)) as anchor:
+        with pytest.raises(RobotsDisallowed) as caught:
+            anchor.fetch(f"{base_url}/article")
+    assert caught.value.reason == "explicit", "선언된 charset이 무시돼 금지가 사라졌다"
+
+
+# -- D-191: 상한이 전송 청크보다 작을 때 --------------------------------------
+
+
+def test_a_cap_smaller_than_one_chunk_keeps_the_leading_rules(tmp_path, fixture_server):
+    """"읽은 데까지 판정"은 상한이 청크보다 작아도 성립해야 한다 (D-191).
+
+    경계를 넘은 청크를 통째로 버리면, 상한 < 전송 청크(≈64KiB)인 구성에서
+    **전량 폐기 → 규칙 없음 → 전면 허용**이 되고 24시간 캐시된다. 첫 줄의
+    `Disallow: /`가 살아남아야 한다.
+    """
+    base_url, state = fixture_server
+    filler = ("# filler line\n" * 20000).encode("utf-8")  # 약 260KB — 한 청크보다 크다
+    state.robots_body_override = b"User-agent: *\nDisallow: /\n" + filler
+    config = _config(tmp_path, max_content_bytes=1024)
+    with Anchor(config=config) as anchor:
+        with pytest.raises(RobotsDisallowed) as caught:
+            anchor.fetch(f"{base_url}/article")
+    assert caught.value.reason == "explicit", "상한 초과에서 규칙이 통째로 사라졌다"
+
+
+# -- D-192: Location 없는 3xx -------------------------------------------------
+
+
+def test_a_redirect_without_location_is_not_an_unlimited_allow(tmp_path, fixture_server):
+    """Location 없는 3xx는 "규칙을 물어보지 못함"이다 (D-192).
+
+    "제한 없음"으로 24시간 캐시하면, 같은 판정 불능인 홉 한도 초과(거부)와
+    새 코드 안에서 판정이 갈린다. 모르면 보류한다.
+    """
+    base_url, state = fixture_server
+    state.robots_status = 302  # robots_location 없음 → Location 헤더 없는 302
+    with Anchor(config=_config(tmp_path)) as anchor:
+        with pytest.raises(RobotsDisallowed) as caught:
+            anchor.fetch(f"{base_url}/article")
+    assert caught.value.reason == "unavailable"

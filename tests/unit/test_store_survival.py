@@ -522,3 +522,85 @@ def test_inserting_the_same_version_twice_converges(tmp_path):
     finally:
         first.close()
         second.close()
+
+
+def _seed_document(repository: Repository, url: str, body: str) -> str:
+    now = utcnow_iso()
+    document = repository.create_document(url=url, original_url=url, title=None, now=now)
+    version = repository.insert_version(
+        document_id=document.id,
+        text_hash=f"b3:{url}",
+        raw_hash=f"b3:raw-{url}",
+        pipeline_version="test/1",
+        captured_at=now,
+        byte_size=len(body),
+        normalized_text=body,
+        http_status=200,
+    )
+    repository.observe_version(document.id, version.id, now)
+    return document.id
+
+
+def test_inserting_an_anchor_after_a_merge_is_a_domain_error(tmp_path):
+    """문서 행이 병합으로 사라진 뒤의 앵커 삽입은 **도메인 오류**여야 한다 (D-185).
+
+    `merge_document`는 이 코드베이스에서 `documents` 행을 지우는 유일한
+    경로다. CLI와 MCP 서버가 같은 DB를 공유하므로, 한쪽의 페치가 병합을
+    일으키면 다른 쪽의 `cite`가 그 사이에 있던 문서 id로 삽입을 시도한다 —
+    맨 `sqlite3.IntegrityError`가 새면 MCP 호출자의 배치가 통째로 죽는다.
+    """
+    path = tmp_path / "merge-cite.db"
+    repository, other = Repository(path), Repository(path)
+    try:
+        source = _seed_document(repository, "https://e.test/a", "A 본문이다. " * 30)
+        target = _seed_document(repository, "https://e.test/b", "B 본문이다. " * 30)
+        version = repository.current_version(source)
+        assert version is not None
+
+        other.merge_document(source, target)  # 다른 프로세스의 페치가 병합을 일으켰다
+
+        with pytest.raises(AnchorError):
+            repository.insert_anchor(
+                document_id=source,
+                created_version=version.id,
+                exact="A 본문이다.",
+                prefix="",
+                suffix="",
+                position_hint=0,
+                exact_hash="b3:q",
+                quality="ok",
+                note=None,
+                created_at=utcnow_iso(),
+            )
+    finally:
+        repository.close()
+        other.close()
+
+
+def test_merge_moves_the_accounting_rows(tmp_path):
+    """병합은 회계(fetch_log)도 함께 옮겨야 한다 (D-195).
+
+    남겨 두면 고아 행이 되고 `bytes_saved_estimate`가 그만큼 절감량을
+    축소 보고한다.
+    """
+    path = tmp_path / "merge-log.db"
+    repository = Repository(path)
+    try:
+        source = _seed_document(repository, "https://e.test/a", "A 본문이다. " * 30)
+        target = _seed_document(repository, "https://e.test/b", "B 본문이다. " * 30)
+        for _ in range(3):
+            repository.log_fetch(
+                document_id=source, outcome="cache_hit", http_status=None,
+                bytes_down=0, elapsed_ms=1, requested_at=utcnow_iso(),
+            )
+        repository.merge_document(source, target)
+        orphans = repository._connection.execute(
+            "SELECT COUNT(*) AS n FROM fetch_log WHERE document_id = ?", (source,)
+        ).fetchone()["n"]
+        moved = repository._connection.execute(
+            "SELECT COUNT(*) AS n FROM fetch_log WHERE document_id = ?", (target,)
+        ).fetchone()["n"]
+    finally:
+        repository.close()
+    assert orphans == 0, f"고아 회계 행 {orphans}건"
+    assert moved == 3

@@ -322,6 +322,27 @@ class Repository:
         ).fetchone()
         return self._to_document(row) if row else None
 
+    def rename_document_url(self, document_id: str, new_url: str) -> bool:
+        """정본 URL을 옮긴다 (D-194). 목적지를 다른 문서가 선점했으면 False.
+
+        같은 트랜잭션에서 확인하고 옮기므로, False를 받은 호출자는 병합으로
+        수렴하면 된다 — 어느 순서에서도 한 행으로 모인다.
+        """
+        with self._connection:
+            taken = self._connection.execute(
+                "SELECT id FROM documents WHERE url = ?", (new_url,)
+            ).fetchone()
+            if taken is not None and taken["id"] != document_id:
+                return False
+            self._connection.execute(
+                "UPDATE documents SET url = ? WHERE id = ?", (new_url, document_id)
+            )
+            # 새 정본이 예전에 별칭이었다면 자기 자신을 가리키게 된다 — 지운다.
+            self._connection.execute(
+                "DELETE FROM document_aliases WHERE url = ?", (new_url,)
+            )
+            return True
+
     def remove_alias(self, url: str) -> None:
         """별칭을 지운다. 옛 별칭이 자기 콘텐츠를 서빙하기 시작하면 그것은
         더는 같은 리소스가 아니다 (D-099)."""
@@ -336,8 +357,16 @@ class Repository:
         `verifications.checked_version`에는 다른 문서의 버전 id가 남는다 —
         감사 추적이 앞뒤가 안 맞고, `has_pending_verification`은 영영 참이다.
 
-        같은 본문이 양쪽에 있으면(UNIQUE(document_id, text_hash, source))
-        A의 버전을 옮기는 대신 **B의 것을 가리키게** 바꾼다.
+        같은 (본문, 출처)가 양쪽에 있으면 **가장 이른 캡처**를 남긴다 (D-186).
+        301은 "같은 리소스"라는 선언이므로 같은 본문의 Memento-Datetime은 두
+        URL을 통틀어 처음 관측된 때다 — 아무 쪽이나 지우면 인용의
+        `data-versiondate`가 다른 스냅샷으로 바뀌고, 인용 당시의 버전 행이
+        사라져 확인조차 못 하게 된다.
+
+        옮긴 뒤 관측 순번을 **다시 매긴다** (D-184). 두 문서가 각자 1부터
+        매겼으므로 옮기기만 하면 같은 순번이 여러 개 남아 `latest~N`이
+        일어난 적 없는 전이를 보여준다. 문서를 가로지르는 순서의 근거는
+        관측 시각뿐이다. 회계(fetch_log)도 함께 옮긴다 (D-195).
         """
         if source_id == target_id:
             return
@@ -347,7 +376,10 @@ class Repository:
                 "UPDATE documents SET current_version = NULL WHERE id = ?", (source_id,)
             )
             duplicates = connection.execute(
-                """SELECT s.id AS source_version, t.id AS target_version
+                """SELECT s.id AS source_version, t.id AS target_version,
+                          s.captured_at AS source_captured, t.captured_at AS target_captured,
+                          s.last_observed_at AS source_observed,
+                          t.last_observed_at AS target_observed
                    FROM versions s JOIN versions t
                      ON t.document_id = ? AND t.text_hash = s.text_hash
                         AND t.source = s.source
@@ -355,28 +387,49 @@ class Repository:
                 (target_id, source_id),
             ).fetchall()
             for row in duplicates:
+                keep, drop = (
+                    (row["source_version"], row["target_version"])
+                    if row["source_captured"] < row["target_captured"]
+                    else (row["target_version"], row["source_version"])
+                )
                 for table, column in (
                     ("anchors", "created_version"),
                     ("verifications", "checked_version"),
+                    ("documents", "current_version"),
                 ):
                     connection.execute(
                         f"UPDATE {table} SET {column} = ? WHERE {column} = ?",
-                        (row["target_version"], row["source_version"]),
+                        (keep, drop),
                     )
                 connection.execute(
-                    "DELETE FROM versions WHERE id = ?", (row["source_version"],)
+                    "UPDATE versions SET last_observed_at = ? WHERE id = ?",
+                    (max(row["source_observed"], row["target_observed"]), keep),
+                )
+                connection.execute("DELETE FROM versions WHERE id = ?", (drop,))
+            for table in ("versions", "anchors", "document_aliases", "fetch_log"):
+                connection.execute(
+                    f"UPDATE {table} SET document_id = ? WHERE document_id = ?",
+                    (target_id, source_id),
                 )
             connection.execute(
-                "UPDATE versions SET document_id = ? WHERE document_id = ?",
-                (target_id, source_id),
+                """UPDATE versions SET last_observed_seq = (
+                       SELECT rn FROM (
+                           SELECT id, ROW_NUMBER() OVER (
+                               ORDER BY last_observed_at ASC, last_observed_seq ASC, id ASC
+                           ) AS rn FROM versions WHERE document_id = :doc
+                       ) numbered WHERE numbered.id = versions.id
+                   ) WHERE document_id = :doc""",
+                {"doc": target_id},
             )
+            # 포인터가 가리키는 행이 관측 순서 맨 앞이어야 한다 (D-180과 같은 원칙).
             connection.execute(
-                "UPDATE anchors SET document_id = ? WHERE document_id = ?",
-                (target_id, source_id),
-            )
-            connection.execute(
-                "UPDATE document_aliases SET document_id = ? WHERE document_id = ?",
-                (target_id, source_id),
+                """UPDATE versions SET last_observed_seq = (
+                       SELECT COALESCE(MAX(last_observed_seq), 0) + 1
+                       FROM versions WHERE document_id = :doc
+                   )
+                   WHERE document_id = :doc
+                     AND id = (SELECT current_version FROM documents WHERE id = :doc)""",
+                {"doc": target_id},
             )
             source_url = connection.execute(
                 "SELECT url FROM documents WHERE id = ?", (source_id,)
@@ -843,6 +896,15 @@ class Repository:
     ) -> AnchorRecord:
         anchor_id = uuid7()
         with self._connection:
+            if self._connection.execute(
+                "SELECT 1 FROM documents WHERE id = ?", (document_id,)
+            ).fetchone() is None:
+                # 병합이 문서 행을 지웠다 — documents를 지우는 유일한 경로다.
+                # 맨 IntegrityError가 새면 MCP 배치가 통째로 죽는다 (D-185).
+                raise DocumentNotFound(
+                    f"Document vanished (merged elsewhere?) — "
+                    f"문서가 사라졌습니다(병합?): {document_id}"
+                )
             self._connection.execute(
                 """INSERT INTO anchors
                    (id, document_id, created_version, exact, prefix, suffix,

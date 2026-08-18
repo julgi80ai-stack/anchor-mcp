@@ -7,9 +7,13 @@
 
 폴백 대상은 자체 호스팅 MemGator(설정의 aggregator) 또는 Wayback CDX API.
 기본 비활성 — 외부 서비스에 조용히 의존하지 않는다 (SPEC §9). MemGator는
-HTTP로만 호출하며 코드를 포함하지 않는다 (ADR-0002 방식 1). 애그리게이터·
-아카이브 API 호출은 사용자가 명시적으로 활성화한 API 연동이므로 robots
-판정 없이 레이트 제한과 User-Agent만 적용한다.
+HTTP로만 호출하며 코드를 포함하지 않는다 (ADR-0002 방식 1).
+
+robots 판정의 경계 (D-090·D-193): **본문을 가져오는 URI-M 요청에는 robots
+판정이 걸린다** — 직접 페치가 explicit으로 막히는 경로를 애그리게이터 한
+겹으로 우회할 수 없어야 하기 때문이다. 애그리게이터·CDX **조회** 요청은
+사용자가 명시적으로 활성화한 API 연동이므로 레이트 제한과 User-Agent만
+적용한다 — 그 서비스의 이용 약관을 따르는 것으로 본다.
 """
 
 from __future__ import annotations

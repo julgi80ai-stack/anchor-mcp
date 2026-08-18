@@ -17,7 +17,8 @@ from dataclasses import dataclass, replace
 
 import httpx
 
-from anchor.errors import ContentTooLarge, FetchFailed, RobotsDisallowed
+from anchor.errors import ContentTooLarge, FetchFailed, InvalidURL, RobotsDisallowed
+from anchor.fetcher.urlnorm import normalize_url
 
 ACCEPT_HEADER = "text/html, application/xhtml+xml, text/plain, application/pdf"
 RETRYABLE_STATUSES = frozenset({403, 429})
@@ -85,7 +86,14 @@ class ConditionalFetcher:
         # 반대로 첫 홉에만 싣는 것도 틀리다. 리다이렉트되는 별칭으로 재확인할
         # 때 검증자가 붙어야 하는 곳은 별칭이 아니라 **정본**이다 (D-007).
         # 그래서 "어느 리소스의 검증자인가"를 받아 그 홉에서만 싣는다.
-        validator_target = str(httpx.URL(validators_for or url))
+        # 비교는 **정규화 형태**로 한다 (D-187). 날것 문자열로 재면 질의
+        # 정렬·추적 파라미터·프래그먼트가 붙는 순간 영영 일치하지 않아
+        # 조건부 요청이 조용히 무력해진다 — 같은 리소스인가라는 질문에는
+        # 같은 리소스 판별 규칙(§5.1)으로 답해야 한다.
+        try:
+            validator_target = normalize_url(validators_for or url)
+        except InvalidURL:
+            validator_target = None
         conditional = {}
         if etag:
             conditional["If-None-Match"] = etag
@@ -94,7 +102,14 @@ class ConditionalFetcher:
 
         def headers_for(hop_url: str) -> dict[str, str]:
             merged = dict(base_headers)
-            if str(httpx.URL(hop_url)) == validator_target:
+            try:
+                same = (
+                    validator_target is not None
+                    and normalize_url(hop_url) == validator_target
+                )
+            except InvalidURL:
+                same = False
+            if same:
                 merged.update(conditional)
             return merged
 
@@ -137,7 +152,25 @@ class ConditionalFetcher:
                     http_status=response.status,
                     reason="redirect",
                 )
-            destination = httpx.URL(current).join(location)
+            try:
+                destination = httpx.URL(current).join(location)
+            except httpx.InvalidURL as error:
+                # `httpx.InvalidURL`은 `httpx.HTTPError`의 하위가 **아니다**.
+                # 여기서 계층 안으로 접지 않으면 mailto:·about:blank Location
+                # 하나가 재검증 배치 전체를 죽인다 (D-106).
+                raise FetchFailed(
+                    f"Unfollowable Location — 따라갈 수 없는 Location: "
+                    f"{location!r} ({current})",
+                    http_status=response.status,
+                    reason="redirect",
+                ) from error
+            if destination.scheme not in ("http", "https"):
+                # join이 성공해도 http(s)가 아니면 웹 자원이 아니다.
+                raise FetchFailed(
+                    f"Non-http Location — http(s)가 아닌 Location: {location!r}",
+                    http_status=response.status,
+                    reason="redirect",
+                )
             if httpx.URL(current).scheme == "https" and destination.scheme == "http":
                 # https로 요청했는데 평문으로 내려간다. 조용히 따라가면
                 # 무결성 보장이 없는 채널에서 받은 본문이 인용 근거가 되고
@@ -205,6 +238,17 @@ class ConditionalFetcher:
                     location=response.headers.get("Location"),
                 )
                 return fetched
+        except httpx.InvalidURL as error:
+            # `httpx.InvalidURL`은 `httpx.HTTPError`의 하위가 **아니다**. 게다가
+            # httpx는 `follow_redirects=False`여도 `next_request`를 만들기 위해
+            # Location을 미리 해석하므로, `mailto:`·`about:blank` Location이면
+            # **첫 응답을 받는 자리에서** 이 예외가 난다 — 우리 홉 루프의 방어가
+            # 닿기 전이다. 여기서 계층 안으로 접지 않으면 문서 하나가 재검증
+            # 배치 전체를 죽인다 (D-106).
+            raise FetchFailed(
+                f"Server sent an unfollowable Location — 따라갈 수 없는 Location: {url}",
+                reason="redirect",
+            ) from error
         except httpx.ConnectTimeout as error:
             # 연결이 아예 성립하지 않는 것은 **호스트 소멸의 흔한 모습**이다
             # (방화벽 DROP·블랙홀 IP·주차된 도메인). 살아 있지만 느린 서버의

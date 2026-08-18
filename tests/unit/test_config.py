@@ -5,7 +5,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from anchor.config import Config, load_config
+from anchor.errors import ConfigError
 
 FULL_TOML = """
 [storage]
@@ -94,3 +97,30 @@ def test_disabling_robots_prints_warning(tmp_path, capsys):
     config = load_config(path)
     assert config.respect_robots is False
     assert "respect_robots=false" in capsys.readouterr().err
+
+
+def test_env_wins_even_when_the_file_value_is_invalid(tmp_path, monkeypatch):
+    """환경변수는 파일 값이 **잘못됐어도** 이긴다 (SPEC §9, D-188).
+
+    검증이 생성자로 옮겨지며 TOML→환경변수 겹침의 **중간 상태**에서 터지게
+    됐다 — 파일의 잘못된 값을 환경변수가 덮도록 배포해 둔 구성에서 서버가
+    아예 뜨지 않고, 오류 메시지는 사용자가 이미 덮어 놓은 값을 가리킨다.
+    검증은 **최종 상태**에 대해서만 의미가 있다.
+    """
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "[fetch]\ntimeout_seconds = 0.0\nuser_agent = \"\"\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("ANCHOR_TIMEOUT_SECONDS", "30")
+    monkeypatch.setenv("ANCHOR_USER_AGENT", "EnvAgent/2.0 (+https://example.invalid)")
+    config = load_config(path)
+    assert config.timeout_seconds == 30.0
+    assert config.user_agent.startswith("EnvAgent/2.0")
+
+
+def test_an_invalid_final_state_is_still_rejected(tmp_path):
+    """환경변수가 고쳐 주지 않으면 최종 상태 검증은 그대로 살아 있어야 한다."""
+    path = tmp_path / "config.toml"
+    path.write_text("[fetch]\ntimeout_seconds = 0.0\n", encoding="utf-8")
+    with pytest.raises(ConfigError):
+        load_config(path)

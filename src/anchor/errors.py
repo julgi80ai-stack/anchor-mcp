@@ -39,6 +39,15 @@ class ConfigError(AnchorError):
     """설정 파일·환경변수의 문법 또는 값 범위 오류."""
 
 
+class InvalidURL(AnchorError):
+    """입력 URL이 http(s) URL이 아니다 — 스킴 없음·포트 오류 등 (D-107·D-108).
+
+    잘못된 입력은 잘못된 입력이라고 말한다. 맨 `ValueError`로 새면 MCP
+    배치가 죽고, robots 판정까지 흘러가면 사용자의 오타가 "사이트 소유자의
+    거부"로 보고된다 — 사실 보고 원칙 위반 중 가장 나쁜 부류다.
+    """
+
+
 class QuoteNotFound(AnchorError):
     """인용문이 원문에 없다. 존재하지 않는 인용은 기록하지 않는다 (SPEC §6.1)."""
 

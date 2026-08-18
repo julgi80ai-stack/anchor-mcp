@@ -291,7 +291,19 @@ class Anchor:
         )
 
     def cite(self, document_ref: str, quote: str, note: str | None = None) -> CiteResult:
-        """인용문에 앵커를 부여한다 (SPEC §7.2). document_ref는 문서 id 또는 URL."""
+        """인용문에 앵커를 부여한다 (SPEC §7.2). document_ref는 문서 id 또는 URL.
+
+        선택자 생성(§10 예산상 최대 200ms) 사이에 다른 프로세스의 페치가
+        병합을 일으켜 문서가 옮겨갈 수 있다 (D-185). 별칭이 새 소속을
+        가리키므로 한 번 따라가 재시도한다 — 원래부터 없던 문서라면 같은
+        DocumentNotFound가 다시 나온다.
+        """
+        try:
+            return self._cite_once(document_ref, quote, note)
+        except DocumentNotFound:
+            return self._cite_once(document_ref, quote, note)
+
+    def _cite_once(self, document_ref: str, quote: str, note: str | None) -> CiteResult:
         document = self._resolve_document(document_ref)
         latest = self._repository.current_version(document.id)
         if latest is None:
@@ -386,7 +398,22 @@ class Anchor:
                 stopped_early = True
                 break
             document = self._repository.get_document(document_id)
-            assert document is not None, "앵커는 문서 없이 존재할 수 없다 (FK)"
+            if document is None:
+                # 다른 프로세스의 페치가 배치 중간에 병합을 일으켰다 (D-185).
+                # merge_document는 앵커를 함께 옮기므로, 다시 조회해 새 소속을
+                # 따라간다 — AssertionError로 배치 전체를 죽이지 않는다.
+                refreshed = self._repository.select_anchors(
+                    anchor_ids=[record.id for record in document_anchors]
+                )
+                homes = {record.document_id for record in refreshed}
+                if len(homes) == 1:
+                    document = self._repository.get_document(homes.pop())
+                    document_anchors = refreshed
+            if document is None:
+                # 그래도 못 찾으면 이 묶음만 보류하고 배치는 계속 간다.
+                for record in document_anchors:
+                    summary[matcher.UNRESOLVED] += 1
+                continue
 
             failure_state: str | None = None
             try:
@@ -722,10 +749,14 @@ class Anchor:
         moved = final_url != norm_url and response.permanent_redirect
         canonical_url = final_url if moved else norm_url
 
-        if document is not None and not moved and document.url != norm_url:
+        if document is not None and final_url == norm_url and document.url != norm_url:
             # 옛 별칭이 리다이렉트를 멈추고 **자기 콘텐츠**를 서빙하기
-            # 시작했다. 더는 같은 리소스가 아니므로, 목적지 문서의 이력에
-            # 다른 리소스의 본문을 꽂아서는 안 된다 (D-099).
+            # 시작했다(리다이렉트 없이 200). 더는 같은 리소스가 아니므로,
+            # 목적지 문서의 이력에 다른 리소스의 본문을 꽂아서는 안 된다
+            # (D-099). 판정은 `final_url == norm_url`이다 — `not moved`로
+            # 재면 **일시** 리다이렉트로 도달한 별칭(여전히 리다이렉트 중)이
+            # 여기 걸려, 별칭이 파괴되고 목적지의 본문을 담은 유령 문서가
+            # 생긴다 (D-183).
             self._repository.remove_alias(norm_url)
             document = None
         elif moved:
@@ -735,7 +766,24 @@ class Anchor:
                 # 합치지 않으면 A의 앵커가 B의 본문과 대조되면서 검증 기록에는
                 # 다른 문서의 버전 id가 남는다 (D-103).
                 self._repository.merge_document(document.id, landed.id)
-            document = landed or document
+                document = landed
+            elif landed is None and document is not None and document.url != final_url:
+                # 등록된 문서가 이사했다 — 정본 URL을 옮기고 옛 주소는
+                # 별칭으로 남긴다 (D-194). 그대로 두면 documents.url이 옛
+                # 주소에 남아 "영구만 정본을 바꾼다"(§5.1)가 신규 문서에서만
+                # 성립하고, 자기 자신을 가리키는 별칭이 생긴다.
+                old_url = document.url
+                if self._repository.rename_document_url(document.id, final_url):
+                    self._repository.add_alias(old_url, document.id)
+                    document = self._repository.get_document(document.id)
+                else:
+                    # 그 사이 다른 호출이 목적지 문서를 만들었다 — 병합으로 수렴
+                    landed = self._repository.get_document_by_any_url(final_url)
+                    if landed is not None and landed.id != document.id:
+                        self._repository.merge_document(document.id, landed.id)
+                        document = landed
+            else:
+                document = landed or document
 
         if document is None:
             document = self._repository.create_document(

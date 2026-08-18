@@ -28,18 +28,32 @@ from anchor.service import Anchor  # noqa: E402
 FAILURES: list[str] = []
 
 
-def gate(name: str, condition: bool, detail: str, *, undecidable: str | None = None) -> None:
-    """게이트 판정. `undecidable`이 주어지면 실패가 아니라 **판정 불가**다.
-
-    측정 바닥이 이미 예산을 넘은 상황에서 FAIL을 내면, 코드 회귀와 기계
-    상태를 구분할 수 없는 신호가 된다 — 읽는 사람이 반드시 한 번은 오해한다.
-    """
-    if not condition and undecidable is not None:
-        print(f"SKIP  {name}: 판정 불가 — {undecidable}")
-        return
+def gate(name: str, condition: bool, detail: str) -> None:
     print(f"{'PASS' if condition else 'FAIL'}  {name}: {detail}")
     if not condition:
         FAILURES.append(name)
+
+
+def judge_cache_hit(p95: float, floor: float, budget: float = 15.0) -> tuple[bool, str]:
+    """cache_hit 게이트 판정 — 어떤 기계에서도 회귀는 잡되, 디스크를 코드로
+    오인하지 않는다 (D-189).
+
+    커밋 바닥(floor)이 예산 안이면 절대 기준으로 판정한다. 바닥이 이미
+    예산을 넘는 기계에서는 **바닥을 뺀 순비용**으로 판정한다 — "판정 불가"로
+    통째로 건너뛰면 예산의 7배짜리 회귀도 SKIP 뒤에 숨고, 마지막 줄의
+    "모든 게이트 통과"가 근거 없는 문장이 된다.
+    """
+    if floor < budget:
+        return (
+            p95 < budget,
+            f"p95={p95:.2f}ms (절대 기준, 커밋 바닥 {floor:.2f}ms)",
+        )
+    net = p95 - floor
+    return (
+        net < budget,
+        f"순비용={net:.2f}ms (p95={p95:.2f}ms − 바닥 {floor:.2f}ms; "
+        f"바닥이 예산 {budget:.0f}ms를 넘는 기계라 순비용 기준)",
+    )
 
 
 def commit_floor_ms() -> float:
@@ -96,17 +110,8 @@ def bench_cache_hit() -> None:
                 assert result.outcome == "cache_hit"
     p95 = percentile(samples, 0.95)
     floor = commit_floor_ms()
-    gate(
-        "cache_hit p95 < 15ms",
-        p95 < 15.0,
-        f"p95={p95:.2f}ms (n=100, 본문 ~100KB, 커밋 바닥 {floor:.2f}ms)",
-        undecidable=(
-            f"이 기계의 SQLite 커밋 p95가 이미 {floor:.2f}ms다 (예산 15ms). "
-            "코드가 아니라 디스크를 재고 있다"
-            if floor >= 15.0
-            else None
-        ),
-    )
+    ok, detail = judge_cache_hit(p95, floor)
+    gate("cache_hit p95 < 15ms", ok, detail + " (n=100, 본문 ~100KB)")
 
 
 def bench_matcher_worst_case() -> None:

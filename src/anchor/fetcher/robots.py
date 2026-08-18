@@ -101,7 +101,12 @@ class RobotsGate:
         for _ in range(_MAX_ROBOTS_REDIRECTS + 1):
             status, body, hop_bytes, location = self._one_hop(url)
             bytes_down += hop_bytes
-            if status not in _REDIRECT_STATUSES or not location:
+            if 300 <= status < 400 and (status not in _REDIRECT_STATUSES or not location):
+                # Location 없는 3xx·목록 밖 3xx(300·305) — 규칙을 물어보지
+                # 못했다. "제한 없음"으로 캐시하면 같은 판정 불능인 홉 한도
+                # 초과(거부)와 판정이 갈린다 (D-192).
+                return None, "", bytes_down
+            if status not in _REDIRECT_STATUSES:
                 return status, body, bytes_down
             url = str(httpx.URL(url).join(location))
         return None, "", bytes_down
@@ -114,19 +119,39 @@ class RobotsGate:
             timeout=self._timeout_seconds,
         ) as response:
             chunks: list[bytes] = []
-            total = 0
+            received = 0
             for chunk in response.iter_bytes():
-                total += len(chunk)
-                if total > self._max_content_bytes:
-                    # 상한을 넘긴 robots.txt는 **읽은 데까지만** 쓴다.
-                    # 규칙을 통째로 버리면 소유자의 금지가 사라지므로,
-                    # 버리는 쪽보다 부분 적용이 정직에 가깝다.
+                received += len(chunk)
+                if received > self._max_content_bytes:
+                    # 상한을 넘긴 robots.txt는 **읽은 데까지만** 쓴다. 경계
+                    # 청크는 잘라서 보관한다 — 통째로 버리면 상한이 전송
+                    # 청크보다 작은 구성에서 규칙 전체가 사라져 전면 허용이
+                    # 24시간 캐시된다 (D-191).
+                    keep = self._max_content_bytes - (received - len(chunk))
+                    chunks.append(chunk[:keep])
+                    truncated = True
                     break
                 chunks.append(chunk)
-            content = b"".join(chunks)[: self._max_content_bytes]
+            else:
+                truncated = False
+            content = b"".join(chunks)
             status = response.status_code
-            body = content.decode("utf-8", errors="replace") if status == 200 else ""
-            return status, body, len(content), response.headers.get("Location")
+            if status == 200:
+                # 선언된 charset을 존중한다. utf-8 하드코딩은 UTF-16 문서를
+                # 전부 U+FFFD로 만들어 규칙이 통째로 사라진다 (D-190).
+                encoding = response.charset_encoding or "utf-8"
+                try:
+                    body = content.decode(encoding, errors="replace")
+                except (LookupError, ValueError):
+                    body = content.decode("utf-8", errors="replace")
+                if truncated and body.endswith("\ufffd"):
+                    # 절단이 다중바이트 문자 중간을 잘랐다 — 꼬리의 대체
+                    # 문자는 데이터가 아니라 자른 흔적이다.
+                    body = body[:-1]
+            else:
+                body = ""
+            # 회계는 보관량이 아니라 **실수령량**이다 (D-191).
+            return status, body, received, response.headers.get("Location")
 
     @staticmethod
     def _origin(url: str) -> str:

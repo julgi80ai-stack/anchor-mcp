@@ -45,7 +45,8 @@ class FixtureState:
         # 실제 사이트의 평범한 모습이고, 거기가 계약이 깨지는 자리다.
         self.robots_status: int = 200
         self.robots_location: str | None = None   # 3xx일 때의 Location
-        self.robots_body_override: bytes | None = None  # BOM·크기 시험용 원바이트
+        self.robots_body_override: bytes | None = None  # BOM·크기·인코딩 시험용 원바이트
+        self.robots_content_type: str = "text/plain"    # charset 축 (D-190)
         self.robots_delay: float = 0.0
         self.status_override: int | None = None
         self.requests: list[str] = []  # 수신한 경로 순서
@@ -56,6 +57,10 @@ class FixtureState:
         # 리다이렉트 맵: 요청 경로 → Location (상대·절대 모두 가능)
         self.redirects: dict[str, str] = {}
         self.redirect_status: int = 301
+        # 경로별 상태코드 — 혼합 사슬(별칭은 301인데 목적지가 302)이 실제
+        # 웹의 평범한 모습이고, 전역 단일 값으로는 그 축이 존재하지 않는다
+        # (D-183이 살아남은 이유).
+        self.redirect_statuses: dict[str, int] = {}
         # 경로마다 다른 본문·검증자. 어느 경로든 같은 HTML을 주면 "남의 문서에
         # 본문이 섞였다"를 관측할 수 없다 — 섞여도 똑같이 보이기 때문이다.
         self.bodies: dict[str, str] = {}
@@ -88,7 +93,7 @@ class _Handler(BaseHTTPRequestHandler):
                 else state.robots.encode("utf-8")
             )
             self.send_response(200 if self.path != "/robots.txt" else state.robots_status)
-            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Type", state.robots_content_type)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -100,7 +105,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         if self.path in state.redirects:
-            self.send_response(state.redirect_status)
+            self.send_response(
+                state.redirect_statuses.get(self.path, state.redirect_status)
+            )
             self.send_header("Location", state.redirects[self.path])
             self.send_header("Content-Length", "0")
             self.end_headers()

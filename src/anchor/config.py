@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import sys
 import tomllib
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, fields
 from pathlib import Path
 
 from anchor.errors import ConfigError
@@ -130,7 +130,12 @@ def _coerce_env(raw: str, kind: type, name: str) -> object:
 
 
 def load_config(path: Path | None = None) -> Config:
-    config = Config()
+    # 겹침(TOML → 환경변수)을 **딕셔너리에서** 끝내고 Config는 한 번만 만든다.
+    # 중간 상태의 Config를 만들면 생성자 검증(D-098)이 거기서 터진다 — 파일의
+    # 잘못된 값을 환경변수가 덮도록 배포한 구성에서 서버가 아예 뜨지 않고,
+    # 오류는 사용자가 이미 덮어 놓은 값을 가리킨다 (D-188, SPEC §9 "환경변수가
+    # 항상 우선"). 검증은 최종 상태에 대해서만 의미가 있다.
+    merged: dict[str, object] = {}
 
     config_path = (path or DEFAULT_CONFIG_PATH).expanduser()
     if config_path.is_file():
@@ -210,7 +215,7 @@ def load_config(path: Path | None = None) -> Config:
             # 소수를 받을 수 있어야 한다 — int()로 절삭하면 0.5가 0바이트가 된다 (D-029).
             megabytes = _require(fetch["max_content_mb"], float, "fetch.max_content_mb")
             overrides["max_content_bytes"] = int(float(megabytes) * 1024 * 1024)
-        config = replace(config, **overrides)
+        merged.update(overrides)
 
     for name, (field_name, kind) in _ENV_OVERRIDES.items():
         raw = os.environ.get(name)
@@ -219,9 +224,9 @@ def load_config(path: Path | None = None) -> Config:
         value = _coerce_env(raw, kind, name)
         if field_name == "max_content_bytes":
             value = int(float(value) * 1024 * 1024)
-        config = replace(config, **{field_name: value})
+        merged[field_name] = value
 
-    _validate(config)
+    config = Config(**merged)  # 생성 = 최종 상태 검증 (__post_init__, D-098)
 
     if not config.respect_robots:
         print(
