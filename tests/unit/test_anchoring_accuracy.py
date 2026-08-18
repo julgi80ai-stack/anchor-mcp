@@ -455,6 +455,38 @@ def test_moved_with_the_old_slot_taken_is_held_not_asserted():
     assert not result.found_text
 
 
+def test_an_absent_quote_is_scanned_only_once_per_core():
+    """정말 없는 인용문에 **같은 스캔을 두 번** 하면 안 된다 (D-178 조치의 안전선).
+
+    D-178 조치가 "좁은 임계로 빈손이면 느슨하게 한 번 더"를 두면서, 두 임계가
+    같을 때도 전문 스캔이 두 번 돌았다. 인용문이 실제로 없는 큰 문서가 가장
+    흔한 최악 사례인데 그 한 번이 예산을 넘겨 맞는 답(MISSING)을 UNRESOLVED로
+    바꿨다(§10 최악 사례에서 100/100으로 실측).
+
+    시간으로 재면 기계 속도에 따라 초록·빨강이 바뀐다 — 실제로 그렇게 됐다.
+    **스캔 횟수**를 세면 어느 기계에서나 같은 답이 나온다.
+    """
+    from anchor.anchoring import approx
+
+    big_text = "채움 문장이 끝없이 이어지는 대폭 개편 문서다. " * 5000
+    quote = "이 문서 어디에도 없는 인용문 7번이다, 확실히."  # k > 3 → Myers 경로
+    calls = []
+    original = approx.myers_scan_all
+
+    def counting(text, pattern, k, budget):
+        calls.append(pattern)
+        return original(text, pattern, k, budget)
+
+    approx.myers_scan_all = counting
+    try:
+        found = approx.fuzzy_search_myers(big_text, quote, 6, Budget(60_000.0))
+    finally:
+        approx.myers_scan_all = original
+
+    assert found is None, "없는 인용문을 찾았다고 했다"
+    assert len(calls) == 1, f"코어 하나짜리 인용문을 {len(calls)}번 훑었다"
+
+
 def test_an_absent_quote_in_a_large_document_is_still_missing():
     """정말 없는 인용문은 **없다고** 말해야 한다 — 보류가 아니라 (D-178 조치의 안전선).
 
@@ -471,6 +503,6 @@ def test_an_absent_quote_in_a_large_document_is_still_missing():
         prefix="존재하지 않는 앞 문맥",
         suffix="존재하지 않는 뒤 문맥",
         position_hint=len(big_text) // 2,
-        budget_ms=200,
+        budget_ms=60_000,  # 판정 자체를 본다 — 예산 경계는 위 테스트가 센다
     )
     assert result.state == MISSING, f"없다고 말할 수 있는데 보류했다 ({result.state})"

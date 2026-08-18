@@ -84,14 +84,15 @@ def test_oversized_robots_does_not_land_in_the_database(tmp_path, fixture_server
     base_url, state = fixture_server
     filler = "# " + "가" * 200 + "\n"
     state.robots_body_override = (
-        "User-agent: *\nDisallow: /private\n" + filler * 4000
+        "User-agent: *\nDisallow: /private\n" + filler * 600
     ).encode("utf-8")
-    config = _config(tmp_path, max_content_bytes=64 * 1024)
+    # 상한을 넉넉히 넘기되 픽스처 서버가 부하에서 흔들릴 만큼 크지 않게 둔다.
+    config = _config(tmp_path, max_content_bytes=16 * 1024)
     with Anchor(config=config) as anchor:
         anchor.fetch(f"{base_url}/article")  # 규칙을 못 읽었어도 페치는 성립
         stored = anchor._repository.get_robots(base_url)
     assert stored is not None
-    assert len(stored.body.encode("utf-8")) <= 64 * 1024, "상한을 넘겨 저장했다"
+    assert len(stored.body.encode("utf-8")) <= 16 * 1024, "상한을 넘겨 저장했다"
 
 
 def test_robots_request_uses_the_configured_timeout(tmp_path, fixture_server):

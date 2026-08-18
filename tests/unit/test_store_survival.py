@@ -464,3 +464,61 @@ def test_observing_a_vanished_version_raises_an_anchor_error(tmp_path):
             repository.observe_version(document_id, victim, "2026-08-18T00:00:00Z")
     finally:
         repository.close()
+
+
+def test_creating_the_same_document_twice_converges(tmp_path):
+    """같은 URL을 두 곳에서 만들어도 **한 행으로 수렴**해야 한다 (D-101).
+
+    서비스의 스트라이프 락은 **입력 URL**로 잡히는데 문서는 **최종 URL**로
+    만들어진다. 서로 다른 두 URL이 같은 목적지로 리다이렉트되면(캐노니컬
+    리다이렉트 — 링크 부패 도구가 가장 흔히 만나는 형태) 두 호출이 다른
+    스트라이프를 잡고 나란히 "문서 없음"으로 판단한다.
+
+    스레드 경합에 기대면 창이 열리지 않은 채 초록이 나온다(실제로 그랬다).
+    창을 직접 연다 — 두 저장소가 순서대로 같은 URL을 만들게 한다.
+    """
+    path = tmp_path / "converge.db"
+    first, second = Repository(path), Repository(path)
+    try:
+        url = "https://e.test/canonical"
+        now = utcnow_iso()
+        a = first.create_document(url=url, original_url="https://e.test/one", title=None, now=now)
+        b = second.create_document(url=url, original_url="https://e.test/two", title=None, now=now)
+        assert a.id == b.id, "같은 정본이 두 문서로 갈렸다"
+        assert len(first.list_documents()) == 1
+    finally:
+        first.close()
+        second.close()
+
+
+def test_inserting_the_same_version_twice_converges(tmp_path):
+    """같은 본문을 두 곳에서 넣어도 한 행으로 수렴해야 한다 (D-101).
+
+    문서 생성이 한 행으로 모인 직후 두 호출이 **같은 본문**을 나란히 넣으려
+    해서 `UNIQUE(document_id, text_hash, source)`에 걸린다 — 문서 경합을
+    막고 나서야 드러난 두 번째 층이다.
+    """
+    path = tmp_path / "converge-v.db"
+    first, second = Repository(path), Repository(path)
+    try:
+        now = utcnow_iso()
+        document = first.create_document(
+            url="https://e.test/d", original_url="https://e.test/d", title=None, now=now
+        )
+        kwargs = dict(
+            document_id=document.id,
+            text_hash="b3:same",
+            raw_hash="b3:raw",
+            pipeline_version="test/1",
+            captured_at=now,
+            byte_size=10,
+            normalized_text="같은 본문이다.",
+            http_status=200,
+        )
+        a = first.insert_version(**kwargs)
+        b = second.insert_version(**kwargs)
+        assert a.id == b.id, "같은 본문이 두 버전으로 갈렸다"
+        assert len(first.list_versions(document.id)) == 1
+    finally:
+        first.close()
+        second.close()

@@ -56,6 +56,10 @@ class FixtureState:
         # 리다이렉트 맵: 요청 경로 → Location (상대·절대 모두 가능)
         self.redirects: dict[str, str] = {}
         self.redirect_status: int = 301
+        # 경로마다 다른 본문·검증자. 어느 경로든 같은 HTML을 주면 "남의 문서에
+        # 본문이 섞였다"를 관측할 수 없다 — 섞여도 똑같이 보이기 때문이다.
+        self.bodies: dict[str, str] = {}
+        self.etags: dict[str, str] = {}
         # 실패 응답에도 본문을 실을지 (크기 상한 검증용)
         self.status_override_with_body: bool = False
         # 애그리게이터 응답을 이상한 페이로드로 바꿔치기 (파싱 견고성 검증용)
@@ -117,19 +121,19 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
             return
 
-        if state.etag and self.headers.get("If-None-Match") == state.etag:
+        etag = state.etags.get(self.path, state.etag)
+        if etag and self.headers.get("If-None-Match") == etag:
             self.send_response(304)
-            if state.etag:
-                self.send_header("ETag", state.etag)
+            self.send_header("ETag", etag)
             self.end_headers()
             return
 
-        body = state.html.encode("utf-8")
+        body = state.bodies.get(self.path, state.html).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        if state.etag:
-            self.send_header("ETag", state.etag)
+        if etag:
+            self.send_header("ETag", etag)
         self.end_headers()
         self.wfile.write(body)
 

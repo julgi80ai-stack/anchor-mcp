@@ -22,6 +22,9 @@ from anchor.errors import ContentTooLarge, FetchFailed, RobotsDisallowed
 ACCEPT_HEADER = "text/html, application/xhtml+xml, text/plain, application/pdf"
 RETRYABLE_STATUSES = frozenset({403, 429})
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+# 301·308만 "영구히 옮겼다"이다. 302·307은 지금만 다른 곳을 보라는 뜻이고,
+# 303은 다른 리소스를 보라는 뜻이라 정본 URL을 바꿀 근거가 아니다 (D-102).
+PERMANENT_REDIRECTS = frozenset({301, 308})
 MAX_RETRIES = 3
 # 이보다 오래 기다리라는 응답은 재시도하지 않고 그대로 보고한다. 몰래
 # 일찍 두드리는 것보다 "확인 불가"가 정직하다 (SPEC §5.4).
@@ -40,6 +43,8 @@ class FetchResponse:
     bytes_down: int
     elapsed_ms: int
     location: str | None = None  # 3xx의 Location 헤더
+    # 리다이렉트 사슬이 **전부** 영구였는가. 하나라도 일시가 섞이면 거짓이다.
+    permanent_redirect: bool = False
 
 
 class ConditionalFetcher:
@@ -64,25 +69,46 @@ class ConditionalFetcher:
         *,
         etag: str | None = None,
         last_modified: str | None = None,
+        validators_for: str | None = None,
         before_hop: Callable[[str], int] | None = None,
     ) -> FetchResponse:
         """조건부 GET. `before_hop`은 매 홉 직전에 호출되어 robots 판정과
         레이트 제한을 수행하고, 그 과정에서 내려받은 바이트를 돌려준다."""
-        headers = {"User-Agent": self._user_agent, "Accept": ACCEPT_HEADER}
+        base_headers = {"User-Agent": self._user_agent, "Accept": ACCEPT_HEADER}
+        # 검증자는 **우리가 그것을 받은 리소스에만** 유효하다 (D-100).
+        #
+        # 모든 홉에 실어 보내면, 목적지가 RFC 9110 §13.1.3대로 자기 검증자와
+        # 비교해 정직하게 304를 줬을 때 Anchor가 "변한 것 없음"으로 읽어 옛
+        # 본문을 현재 내용으로 계속 반환한다 — 이사한 사실이 영구히 감지되지
+        # 않고, 부수로 타 호스트에 ETag가 샌다.
+        #
+        # 반대로 첫 홉에만 싣는 것도 틀리다. 리다이렉트되는 별칭으로 재확인할
+        # 때 검증자가 붙어야 하는 곳은 별칭이 아니라 **정본**이다 (D-007).
+        # 그래서 "어느 리소스의 검증자인가"를 받아 그 홉에서만 싣는다.
+        validator_target = str(httpx.URL(validators_for or url))
+        conditional = {}
         if etag:
-            headers["If-None-Match"] = etag
+            conditional["If-None-Match"] = etag
         if last_modified:
-            headers["If-Modified-Since"] = last_modified
+            conditional["If-Modified-Since"] = last_modified
+
+        def headers_for(hop_url: str) -> dict[str, str]:
+            merged = dict(base_headers)
+            if str(httpx.URL(hop_url)) == validator_target:
+                merged.update(conditional)
+            return merged
 
         started = time.monotonic()
         overhead_bytes = 0
         attempted_bytes = 0
         current = url
+        permanent = True
 
         for hop in range(self._max_redirects + 1):
             if before_hop is not None:
                 overhead_bytes += before_hop(current)
 
+            headers = headers_for(current)
             response = self._request(current, headers)
             attempted_bytes += response.bytes_down
             for attempt in range(MAX_RETRIES):
@@ -101,6 +127,7 @@ class ConditionalFetcher:
                     response,
                     elapsed_ms=elapsed_ms,
                     bytes_down=attempted_bytes + overhead_bytes,
+                    permanent_redirect=permanent and current != url,
                 )
 
             location = response.location
@@ -110,7 +137,19 @@ class ConditionalFetcher:
                     http_status=response.status,
                     reason="redirect",
                 )
-            current = str(httpx.URL(current).join(location))
+            destination = httpx.URL(current).join(location)
+            if httpx.URL(current).scheme == "https" and destination.scheme == "http":
+                # https로 요청했는데 평문으로 내려간다. 조용히 따라가면
+                # 무결성 보장이 없는 채널에서 받은 본문이 인용 근거가 되고
+                # 정본 URL이 평문으로 기록된다 (D-104).
+                raise FetchFailed(
+                    f"Refusing https → http downgrade — 평문으로의 강등 거부: "
+                    f"{current} → {destination}",
+                    http_status=response.status,
+                    reason="redirect",
+                )
+            permanent = permanent and response.status in PERMANENT_REDIRECTS
+            current = str(destination)
 
         raise FetchFailed(
             f"Too many redirects — 리다이렉트 한도 초과: {url}", reason="redirect"

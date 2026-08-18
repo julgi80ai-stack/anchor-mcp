@@ -322,6 +322,72 @@ class Repository:
         ).fetchone()
         return self._to_document(row) if row else None
 
+    def remove_alias(self, url: str) -> None:
+        """별칭을 지운다. 옛 별칭이 자기 콘텐츠를 서빙하기 시작하면 그것은
+        더는 같은 리소스가 아니다 (D-099)."""
+        with self._connection:
+            self._connection.execute("DELETE FROM document_aliases WHERE url = ?", (url,))
+
+    def merge_document(self, source_id: str, target_id: str) -> None:
+        """영구 리다이렉트로 하나가 된 두 문서를 합친다 (D-103).
+
+        A가 301로 B를 가리키면 HTTP 의미론상 **같은 리소스**다. 그런데 A의
+        행이 따로 남아 있으면, A의 앵커가 B의 본문과 대조되면서
+        `verifications.checked_version`에는 다른 문서의 버전 id가 남는다 —
+        감사 추적이 앞뒤가 안 맞고, `has_pending_verification`은 영영 참이다.
+
+        같은 본문이 양쪽에 있으면(UNIQUE(document_id, text_hash, source))
+        A의 버전을 옮기는 대신 **B의 것을 가리키게** 바꾼다.
+        """
+        if source_id == target_id:
+            return
+        with self._connection:
+            connection = self._connection
+            connection.execute(
+                "UPDATE documents SET current_version = NULL WHERE id = ?", (source_id,)
+            )
+            duplicates = connection.execute(
+                """SELECT s.id AS source_version, t.id AS target_version
+                   FROM versions s JOIN versions t
+                     ON t.document_id = ? AND t.text_hash = s.text_hash
+                        AND t.source = s.source
+                   WHERE s.document_id = ?""",
+                (target_id, source_id),
+            ).fetchall()
+            for row in duplicates:
+                for table, column in (
+                    ("anchors", "created_version"),
+                    ("verifications", "checked_version"),
+                ):
+                    connection.execute(
+                        f"UPDATE {table} SET {column} = ? WHERE {column} = ?",
+                        (row["target_version"], row["source_version"]),
+                    )
+                connection.execute(
+                    "DELETE FROM versions WHERE id = ?", (row["source_version"],)
+                )
+            connection.execute(
+                "UPDATE versions SET document_id = ? WHERE document_id = ?",
+                (target_id, source_id),
+            )
+            connection.execute(
+                "UPDATE anchors SET document_id = ? WHERE document_id = ?",
+                (target_id, source_id),
+            )
+            connection.execute(
+                "UPDATE document_aliases SET document_id = ? WHERE document_id = ?",
+                (target_id, source_id),
+            )
+            source_url = connection.execute(
+                "SELECT url FROM documents WHERE id = ?", (source_id,)
+            ).fetchone()
+            connection.execute("DELETE FROM documents WHERE id = ?", (source_id,))
+            if source_url is not None:
+                connection.execute(
+                    "INSERT OR REPLACE INTO document_aliases (url, document_id) VALUES (?, ?)",
+                    (source_url["url"], target_id),
+                )
+
     def add_alias(self, url: str, document_id: str) -> None:
         with self._connection:
             self._connection.execute(
@@ -348,13 +414,24 @@ class Repository:
     ) -> Document:
         document_id = uuid7()
         with self._connection:
+            # 이미 있으면 그 행을 쓴다. 서비스 계층의 락은 **입력 URL**로
+            # 잡히는데 문서는 **최종 URL**로 만들어지므로, 서로 다른 두 URL이
+            # 같은 목적지로 리다이렉트되면(캐노니컬 리다이렉트 — 링크 부패
+            # 도구가 가장 흔히 만나는 형태) 두 스레드가 다른 스트라이프를 잡고
+            # 나란히 "문서 없음"으로 판단한다. 락을 겹쳐 잡는 대신 생성 자체를
+            # 멱등으로 두면 어떤 순서에서도 한 행으로 수렴한다 (D-101).
             self._connection.execute(
                 """INSERT INTO documents
                    (id, url, original_url, title, first_seen_at, last_checked_at,
                     status, etag, last_modified, robots_allowed)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                   ON CONFLICT(url) DO NOTHING""",
                 (document_id, url, original_url, title, now, now, status, etag, last_modified),
             )
+            existing = self._connection.execute(
+                "SELECT id FROM documents WHERE url = ?", (url,)
+            ).fetchone()
+            document_id = existing["id"]
             # 커밋 뒤 락 밖에서 재조회하면 그 틈에 gc가 지운 경우 `assert`가
             # 터져, 성공적으로 기록된 행이 실패로 보인다 (D-082).
             row = self._connection.execute(
@@ -550,7 +627,8 @@ class Repository:
                    VALUES (?, ?, ?, ?, ?, ?, ?,
                            (SELECT COALESCE(MAX(last_observed_seq), 0) + 1 FROM versions
                             WHERE document_id = ?),
-                           ?, ?, ?, ?, ?, ?)""",
+                           ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(document_id, text_hash, source) DO NOTHING""",
                 (
                     version_id,
                     document_id,
@@ -568,14 +646,19 @@ class Repository:
                     source_uri,
                 ),
             )
+            # 이미 있으면 그 행을 쓴다. 같은 목적지로 리다이렉트되는 두 URL을
+            # 동시에 페치하면 문서 생성이 한 행으로 수렴한 뒤 **같은 본문**을
+            # 나란히 넣으려 해서 UNIQUE에 걸린다 (D-101).
+            row = self._connection.execute(
+                """SELECT * FROM versions
+                   WHERE document_id = ? AND text_hash = ? AND source = ?""",
+                (document_id, text_hash, source),
+            ).fetchone()
             if observe:
                 self._connection.execute(
                     "UPDATE documents SET current_version = ? WHERE id = ?",
-                    (version_id, document_id),
+                    (row["id"], document_id),
                 )
-            row = self._connection.execute(
-                "SELECT * FROM versions WHERE id = ?", (version_id,)
-            ).fetchone()
         return self._to_version(row)
 
     def get_version_text(self, version_id: str) -> str:

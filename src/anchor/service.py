@@ -212,6 +212,9 @@ class Anchor:
                 norm_url,
                 etag=document.etag if document else None,
                 last_modified=document.last_modified if document else None,
+                # 검증자를 받은 리소스는 **문서의 정본 URL**이다. 사용자가
+                # 별칭으로 재확인해도 검증자는 정본 홉에서만 실린다 (D-100).
+                validators_for=document.url if document else None,
                 before_hop=before_hop,
             )
         except (RobotsDisallowed, FetchFailed) as error:
@@ -710,14 +713,33 @@ class Anchor:
         raw_hash = hash_bytes(response.content)
         text_hash = hash_text(normalized.text)
 
-        # 리다이렉트를 따라갔다면 문서는 정규화된 목적지 URL로 귀속된다.
+        # 리다이렉트를 따라갔다면 문서는 정규화된 목적지 URL로 귀속된다 —
+        # 단 **영구 리다이렉트일 때만**이다. 302·307은 "지금만 다른 곳을
+        # 보라"는 뜻이라 정본 URL을 바꿀 근거가 아니다. 동의 장벽·지역 게이트를
+        # 거치는 구성에서 인터스티셜 URL이 Memento의 URI-R로 굳고 장벽이
+        # 사라진 뒤에도 되돌아오지 않는다 (D-102).
         final_url = normalize_url(response.final_url)
-        if final_url != norm_url:
-            document = self._repository.get_document_by_any_url(final_url) or document
+        moved = final_url != norm_url and response.permanent_redirect
+        canonical_url = final_url if moved else norm_url
+
+        if document is not None and not moved and document.url != norm_url:
+            # 옛 별칭이 리다이렉트를 멈추고 **자기 콘텐츠**를 서빙하기
+            # 시작했다. 더는 같은 리소스가 아니므로, 목적지 문서의 이력에
+            # 다른 리소스의 본문을 꽂아서는 안 된다 (D-099).
+            self._repository.remove_alias(norm_url)
+            document = None
+        elif moved:
+            landed = self._repository.get_document_by_any_url(final_url)
+            if landed is not None and document is not None and landed.id != document.id:
+                # 각각 등록돼 있던 두 문서가 영구 리다이렉트로 하나가 됐다.
+                # 합치지 않으면 A의 앵커가 B의 본문과 대조되면서 검증 기록에는
+                # 다른 문서의 버전 id가 남는다 (D-103).
+                self._repository.merge_document(document.id, landed.id)
+            document = landed or document
 
         if document is None:
             document = self._repository.create_document(
-                url=final_url,
+                url=canonical_url,
                 original_url=norm_url,
                 title=normalized.title,
                 now=now,
@@ -725,7 +747,7 @@ class Anchor:
                 last_modified=response.last_modified,
             )
             version = self._insert_version(document, response, raw_hash, text_hash, normalized, now)
-            if final_url != norm_url:
+            if moved:
                 # 사용자가 넘긴 URL로도 이 문서를 찾을 수 있어야 한다 (D-007).
                 self._repository.add_alias(norm_url, document.id)
             return self._finish(
@@ -743,7 +765,7 @@ class Anchor:
             last_modified=response.last_modified,
             title=normalized.title,
         )
-        if final_url != norm_url:
+        if moved:
             self._repository.add_alias(norm_url, document.id)
         refreshed = self._repository.get_document_by_url(document.url)
         assert refreshed is not None
