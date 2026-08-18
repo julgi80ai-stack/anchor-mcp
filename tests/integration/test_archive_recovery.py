@@ -182,3 +182,80 @@ def test_reusing_a_reverted_version_survives_concurrent_collection(tmp_path, fix
 
     assert result.version_id, "재사용 대상이 사라지자 페치가 실패했다"
     assert result.version_id != first.version_id
+
+
+# -- D-181: 연결 자체가 안 되는 호스트 ---------------------------------------
+
+
+def test_connection_timeout_is_treated_as_a_vanished_host(monkeypatch):
+    """연결이 아예 성립하지 않는 것은 **호스트 소멸의 흔한 모습**이다 (D-181).
+
+    `httpx.ConnectTimeout`은 `TimeoutException`의 하위 클래스라, D-088의
+    자격 화이트리스트가 이것까지 "회복 가능한 일시 실패"로 묶어 아카이브
+    구제를 막았다. 방화벽 DROP·블랙홀 IP·주차된 도메인이 전부 이 모습이다 —
+    살아 있지만 느린 서버의 읽기 타임아웃과 같은 칸에 둘 수 없다.
+
+    블랙홀 주소로는 재현할 수 없다(샌드박스는 대개 즉시 `ConnectError`를
+    돌려준다). 분류 자체를 확인한다 — 결함이 사는 자리가 거기다.
+    """
+    import httpx
+
+    from anchor.fetcher.client import ConditionalFetcher
+    from anchor.service import _may_consult_archive
+
+    def raise_connect_timeout(*args, **kwargs):
+        raise httpx.ConnectTimeout("connect timed out")
+
+    with httpx.Client() as client:
+        monkeypatch.setattr(client, "stream", raise_connect_timeout)
+        fetcher = ConditionalFetcher(
+            client, user_agent="test", max_content_bytes=1_000_000, retry_backoff_base=0.001
+        )
+        with pytest.raises(FetchFailed) as caught:
+            fetcher.get("https://vanished.invalid/doc")
+
+    assert caught.value.reason == "network", "연결 타임아웃이 일시 실패로 분류됐다"
+    assert _may_consult_archive(caught.value), "연결조차 안 되는 호스트가 구제에서 배제됐다"
+
+
+def test_read_timeout_still_does_not_fall_back(tmp_path, fixture_server):
+    """읽기 타임아웃은 여전히 폴백 대상이 아니다 (D-088의 안전선)."""
+    base_url, state = fixture_server
+    state.archive_html = article_html(extra_sentence=" 아카이브 판본이다.")
+    config = _archive_config(tmp_path, base_url, timeout_seconds=0.3)
+    with Anchor(config=config) as anchor:
+        anchor.fetch(f"{base_url}/article")
+        state.response_delay = 1.5
+        with pytest.raises(FetchFailed) as caught:
+            anchor.fetch(f"{base_url}/article", max_age=0)
+    assert caught.value.reason == "timeout"
+
+
+# -- D-182: 아카이브 경로의 같은 틈 -------------------------------------------
+
+
+def test_archive_ingest_survives_concurrent_collection(tmp_path, fixture_server):
+    """아카이브 인제스트도 찾기와 가리키기가 한 트랜잭션이어야 한다 (D-182).
+
+    D-177은 되돌림 재사용의 틈만 닫았다. 아카이브 버전은 `captured_at`이
+    과거 Memento 시각이라 gc 회수 순위가 낮고, 저장 직후엔 아무도 참조하지
+    않으므로 지울 자격이 있다 — 그 틈으로 맨 `sqlite3.IntegrityError`가
+    MCP 호출자에게 올라가면 검증 보고서 전체가 사라진다.
+    """
+    base_url, state = fixture_server
+    state.archive_html = article_html(extra_sentence=" 아카이브 판본이다.")
+    with Anchor(config=_archive_config(tmp_path, base_url)) as anchor:
+        url = f"{base_url}/article"
+        anchor.fetch(url)
+        state.status_override = 404
+        rescued = anchor.fetch(url, max_age=0)
+        assert rescued.source == "archive"
+
+        # 같은 아카이브 본문을 다시 받는다 — 재사용 경로를 탄다.
+        again = anchor.fetch(url, max_age=0)
+        document = anchor._resolve_document(url)
+        current = anchor._repository.current_version(document.id)
+
+    assert again.source == "archive"
+    assert current is not None and current.source == "archive"
+    assert current.id == again.version_id, "재사용한 아카이브 판본을 가리키지 않았다"

@@ -836,9 +836,9 @@ class Anchor:
         # 본문이 같아도 아카이브 관측은 별개의 memento다 — 시각도 URI-M도
         # 다르다. 기존 live 행을 재사용하면 "아카이브에서 확인됨"이라는
         # 표시가 통째로 사라진다 (D-013). 출처까지 같을 때만 재사용한다.
-        version = self._repository.find_version_by_text_hash(
-            document.id, text_hash, source="archive"
-        )
+        # 찾기와 가리키기를 한 트랜잭션으로 묶는다 — 되돌림 재사용과 같은
+        # 모양의 틈이 여기에도 있었다 (D-177 → D-182).
+        version = self._repository.reuse_and_point(document.id, text_hash, "archive")
         if version is None:
             version = self._repository.insert_version(
                 document_id=document.id,
@@ -851,6 +851,7 @@ class Anchor:
                 http_status=200,
                 source="archive",
                 source_uri=hit.uri_m,
+                observe=True,
             )
         refreshed = self._repository.get_document(document.id)
         assert refreshed is not None
@@ -893,6 +894,7 @@ class Anchor:
             byte_size=len(response.content),
             normalized_text=normalized.text,
             http_status=response.status,
+            observe=True,
         )
 
     def _finish(

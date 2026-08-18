@@ -141,7 +141,7 @@ The ledger and the decision records serve different purposes: `THIRD-PARTY.md` a
 | 항목 · Item | 상태 · State |
 |---|---|
 | 기술사양서 · Spec | v1.7 (2026-08-18) |
-| 구현 · Implementation | **v1.4.0** (2026-08-18) — 판정 정확성 수정, 아카이브 폴백 이탈 경로, 관측 시간축 도입(스키마 v6) · matching accuracy fixed, archive fallback made two-way, observation timeline added (schema v6). 테스트 514개 · 514 tests. CI: 3 OS × Python 3.11–3.13, license gate, benchmark gate |
+| 구현 · Implementation | **v1.4.0** (2026-08-18) — 판정 정확성 수정, 아카이브 폴백 이탈 경로, 관측 시간축 도입(스키마 v6) · matching accuracy fixed, archive fallback made two-way, observation timeline added (schema v6). 테스트 530개 · 530 tests. CI: 3 OS × Python 3.11–3.13, license gate, benchmark gate |
 | 실사용 관찰 · Field observation | 30일 hit_rate 관찰 창 진행 중 · 30-day hit-rate window in progress (`anchor stats`) |
 | 라이선스 감사 · License audit | 카피레프트 강제 0건 · zero forced copyleft (선택형 `tld`는 MPL-1.1 선택 · disjunctive `tld` elected as MPL-1.1, THIRD-PARTY §4.4) |
 

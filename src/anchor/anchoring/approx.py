@@ -88,6 +88,12 @@ def myers_scan_all(text: str, pattern: str, k: int, budget) -> list[tuple[int, i
 
     이어진 자리는 **한 덩이로 묶어** 그 안의 최소만 남긴다. 한 자리의 일치가
     이웃 몇 칸에서도 k 이하로 나오는 것은 같은 발견이지 다른 후보가 아니다.
+
+    다만 덩이는 **패턴 길이마다 끊는다** (D-178). k가 패턴 길이에 가까워지면
+    평범한 산문의 거의 모든 자리가 k 이하가 되어 문서 전체가 덩이 하나가
+    되고, 그러면 후보가 다시 전역 최소 하나뿐이라 D-109가 그대로 되살아난다.
+    패턴 길이보다 긴 덩이는 하나의 정렬일 수 없다.
+
     반환: [(거리, 끝 인덱스), ...] — 거리 오름차순.
     예산 소진 시 TimeoutError.
     """
@@ -124,6 +130,10 @@ def myers_scan_all(text: str, pattern: str, k: int, budget) -> list[tuple[int, i
         mv = ph & xv
         if score <= k:
             if score < run_score:
+                run_score, run_end = score, position
+            elif position - run_end >= m:
+                # 덩이가 패턴보다 길어졌다 — 여기서 끊어 다음 자리를 놓치지 않는다
+                hits.append((run_score, run_end))
                 run_score, run_end = score, position
         elif run_end != -1:
             hits.append((run_score, run_end))
@@ -175,6 +185,22 @@ def best_substring_match(
 _CORE_LEN = 64
 
 
+def _core_candidates(
+    text: str, cores, quote_length: int, k: int, core_k: int, budget
+) -> list[tuple[int, int, int]]:
+    """코어마다 후보 창을 만든다. 반환: [(코어 거리, 창 시작, 창 끝), ...]"""
+    found: list[tuple[int, int, int]] = []
+    for core, core_offset in cores:
+        for core_distance, core_end in myers_scan_all(text, core, core_k, budget):
+            quote_start_estimate = core_end + 1 - len(core) - core_offset
+            window_start = max(0, quote_start_estimate - k)
+            # 오른쪽 여유는 2k가 필요하다. 참 매치의 시작은 추정치에서 ±k,
+            # 길이는 m±k까지 벌어지므로 m+k만으로는 꼬리가 잘린다 (D-043).
+            window_end = min(len(text), quote_start_estimate + quote_length + 2 * k)
+            found.append((core_distance, window_start, window_end))
+    return found
+
+
 def fuzzy_search_myers(
     text: str, exact: str, k: int, budget, corroborate=None
 ) -> ApproxMatch | None:
@@ -199,17 +225,11 @@ def fuzzy_search_myers(
     # 하나만 남기면, 인용문의 한쪽 끝이 문서 다른 곳(제목·리드·풀인용)에
     # 더 잘 정렬될 때 그 디코이 창만 검사하고 진짜 위치를 놓쳐 거짓
     # MISSING이 된다 (D-042·D-109).
-    candidates: list[tuple[int, int, int]] = []  # (코어 거리, 창 시작, 창 끝)
-    for core, core_offset in cores:
-        for core_distance, core_end in myers_scan_all(
-            text, core, min(k, len(core) - 1), budget
-        ):
-            quote_start_estimate = core_end + 1 - len(core) - core_offset
-            window_start = max(0, quote_start_estimate - k)
-            # 오른쪽 여유는 2k가 필요하다. 참 매치의 시작은 추정치에서 ±k,
-            # 길이는 m±k까지 벌어지므로 m+k만으로는 꼬리가 잘린다 (D-043).
-            window_end = min(len(text), quote_start_estimate + m + 2 * k)
-            candidates.append((core_distance, window_start, window_end))
+    # 코어 임계는 조치 이전 그대로 둔다. 좁히는 쪽도 시도해 봤으나 판별력이
+    # 없었다 — 덩이를 패턴 길이마다 끊는 것만으로 D-178이 사라진다. 임계를
+    # 좁히면 "빈손이면 한 번 더" 재스캔이 따라붙고, 그 한 번이 인용문이 실제로
+    # 없는 큰 문서에서 예산을 넘겨 **맞는 답(MISSING)을 UNRESOLVED로 바꿨다**.
+    candidates = _core_candidates(text, cores, m, k, min(k, _CORE_LEN - 1), budget)
     candidates.sort()
 
     best: ApproxMatch | None = None

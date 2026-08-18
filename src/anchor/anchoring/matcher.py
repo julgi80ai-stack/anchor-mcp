@@ -117,7 +117,7 @@ def match_anchor(
 
     # 4단계 — 편집거리 상한 근사 검색
     def corroborate(start: int, end: int) -> bool:
-        return _context_supports(text, start, end, prefix, suffix)
+        return _context_supports(text, start, end, prefix, suffix, k)
 
     try:
         if k <= _REGEX_MAX_K:
@@ -129,12 +129,18 @@ def match_anchor(
             approx = fuzzy_search_myers(text, exact, k, budget, corroborate=corroborate)
     except TimeoutError:
         return MatchResult(UNRESOLVED, truncated=truncated)
-    if approx is None or not approx.corroborated:
-        # 문맥이 뒷받침하지 않는 근사 일치는 "당신 인용문의 현재 모습"이
-        # 아니라 **닮은 남**이다. 삭제된 약관 조항에 다른 절의 템플릿 문장이
-        # 붙으면 뜻이 정반대인 문장을 개정문으로 읽게 된다 (D-115).
-        # 문서를 다 보지 못했다면 "사라졌다"고 단정할 수도 없다.
+    if approx is None:
+        # 편집거리 안에 아무것도 없다 — 인용문은 이 문서에 없다.
+        # 문서를 다 보지 못했다면 그것조차 단정할 수 없다.
         return MatchResult(UNRESOLVED if truncated else MISSING, truncated=truncated)
+    if not approx.corroborated:
+        # 근사 일치는 있는데 **그것이 이 인용문인지** 확인할 근거가 없다.
+        # 옛 자리에 다른 것이 들어앉은 채 닮은 문장이 다른 절에 있을 때,
+        # "옮겨지며 개정됐다"와 "삭제됐고 닮은 남이 있다"는 증거로 갈리지
+        # 않는다 (D-115, D-179). ALTERED로 내밀면 뜻이 정반대인 문장을
+        # 개정문으로 읽게 되고, MISSING으로 내밀면 살아 있는 인용을 죽었다고
+        # 한다. 둘 다 단정이다 — 모르는 것은 모른다고 말한다.
+        return MatchResult(UNRESOLVED, truncated=truncated)
     if truncated and approx.offset + len(approx.found_text) >= len(text):
         # 잘린 꼬리가 편집거리로 계산돼 **원문 무손상인데 ALTERED**가 된다.
         # "다 보지 못했으면 단정하지 않는다"는 ALTERED에도 적용된다 (D-114).
@@ -149,18 +155,27 @@ def match_anchor(
     )
 
 
-def _context_supports(text: str, start: int, end: int, prefix: str, suffix: str) -> bool:
-    """찾은 구간이 **인용문이 있던 자리**인가 (D-115).
+def _context_supports(
+    text: str, start: int, end: int, prefix: str, suffix: str, k: int
+) -> bool:
+    """찾은 구간이 **인용문이 있던 자리**인가 (D-115, D-179).
 
     닮았는지를 재는 것만으로는 갈리지 않는다. 약관·릴리스노트·FAQ의 문맥은
     템플릿이라, 다른 절의 형제 문단도 문맥이 두어 글자밖에 다르지 않다.
 
-    갈라 주는 신호는 다른 데 있다 — **문맥이 문서에 그대로 살아 있는데
-    인용문이 그 옆에 없다면 그것은 삭제다.** 이 경우 다른 곳의 근사 일치는
-    인용문의 현재 모습이 아니라 닮은 남이다.
+    갈라 주는 신호는 옛 자리에 **무엇이 남았는가**이다.
 
-    문맥까지 함께 개정된 경우에만(원래 자리를 가리킬 표지가 아무것도 남지
-    않은 경우) 근사 비교로 물러선다. 문맥이 아예 없는 앵커는 통과시킨다.
+    - 앞뒤 문맥이 지금 **서로 붙어 있다** → 인용문이 그 자리에서 빠져나갔다.
+      문단이 다른 절로 옮겨진 것이므로 다른 곳의 근사 일치는 그 인용문이다.
+    - 문맥은 살아 있는데 그 사이에 **다른 것이 들어앉았다** → 인용문은
+      대체됐다. 다른 곳의 근사 일치는 현재 모습이 아니라 닮은 남이다.
+
+    처음 조치(D-115)는 뒤엣것만 보고 앞엣것을 삭제로 오독해, 자리를 옮기며
+    개정된 인용문을 MISSING으로 단정했다 — 절 재배치는 릴리스노트·약관의
+    평범한 편집이라 흔한 거짓 MISSING이 됐다.
+
+    문맥까지 함께 개정돼 표지가 하나도 남지 않은 경우에만 근사 비교로
+    물러선다. 문맥이 아예 없는 앵커는 통과시킨다.
     """
     sides = [
         side for side in ((prefix, start, True), (suffix, end, False)) if side[0]
@@ -182,8 +197,13 @@ def _context_supports(text: str, start: int, end: int, prefix: str, suffix: str)
             edge = nearby + len(context) if is_prefix else nearby
             if abs(edge - boundary) <= slack:
                 return True
+    if prefix and suffix:
+        seam = _quote_slot_is_empty(text, prefix, suffix, k)
+        if seam is not None:
+            # 옛 자리의 앞뒤가 맞붙었다 = 빠져나갔다 / 사이에 다른 것이 있다 = 대체됐다
+            return seam
     if any(context in text for context, _, _ in sides):
-        # 표지는 살아 있는데 인용문이 그 옆에 없다 — 삭제다.
+        # 표지는 살아 있는데 인용문이 그 옆에 없고, 빠져나간 흔적도 아니다.
         return False
 
     # 표지가 하나도 남지 않았다 — 문맥의 안쪽 끝으로 근사 비교한다.
@@ -199,6 +219,26 @@ def _context_supports(text: str, start: int, end: int, prefix: str, suffix: str)
         for probe, window in probes
         if window
     )
+
+
+def _quote_slot_is_empty(text: str, prefix: str, suffix: str, k: int) -> bool | None:
+    """옛 자리에서 prefix 바로 뒤에 suffix가 오는가.
+
+    반환: True = 인용문이 빠져나갔다(이동), False = 다른 것이 들어앉았다(대체),
+    None = 옛 자리 자체를 못 찾았다(판단 근거 없음).
+    """
+    at = text.find(prefix)
+    while at != -1:
+        slot_start = at + len(prefix)
+        # 이음매의 여유는 편집거리 상한만큼. 그보다 크면 "빈 자리"가 아니다.
+        # **뒤로도** 물러서서 찾는다: prefix의 끝과 suffix의 시작이 같은
+        # 구분자(빈 줄·마침표+공백)를 물고 있으면, 인용문이 빠져나가 둘이
+        # 맞붙었을 때 그 구분자가 한 벌만 남는다.
+        slack = max(8, k)
+        if text.find(suffix, max(0, slot_start - slack), slot_start + slack + len(suffix)) != -1:
+            return True
+        at = text.find(prefix, at + 1)
+    return None if prefix not in text else False
 
 
 def _match_by_context(

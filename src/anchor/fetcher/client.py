@@ -166,6 +166,13 @@ class ConditionalFetcher:
                     location=response.headers.get("Location"),
                 )
                 return fetched
+        except httpx.ConnectTimeout as error:
+            # 연결이 아예 성립하지 않는 것은 **호스트 소멸의 흔한 모습**이다
+            # (방화벽 DROP·블랙홀 IP·주차된 도메인). 살아 있지만 느린 서버의
+            # 읽기 타임아웃과 같은 칸에 넣으면 아카이브 구제가 막힌다 (D-181).
+            raise FetchFailed(
+                f"Connection timed out — 연결 타임아웃: {url}", reason="network"
+            ) from error
         except httpx.TimeoutException as error:
             raise FetchFailed(f"Timeout — 타임아웃: {url}", reason="timeout") from error
         except httpx.TooManyRedirects as error:

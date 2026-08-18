@@ -13,6 +13,7 @@ from typing import Any, Sequence
 
 import zstandard
 
+from anchor.errors import DocumentNotFound
 from anchor.models import AnchorRecord, Document, Version, uuid7
 
 SCHEMA_VERSION = 6
@@ -442,6 +443,15 @@ class Repository:
         그대로여도(같은 본문을 다시 관측) 시각은 갱신한다 — 관측은 일어났다.
         """
         with self._connection:
+            if self._connection.execute(
+                "SELECT 1 FROM versions WHERE id = ?", (version_id,)
+            ).fetchone() is None:
+                # 가리킬 대상이 사라졌다. 맨 sqlite3.IntegrityError가 올라가면
+                # AnchorError가 아니라서 verify() 배치 전체가 사라진다 (D-182).
+                raise DocumentNotFound(
+                    f"Version vanished before it could be pointed to — "
+                    f"가리키기 전에 버전이 사라졌습니다: {version_id}"
+                )
             self._connection.execute(
                 """UPDATE versions SET last_observed_at = ?,
                        last_observed_seq = (SELECT COALESCE(MAX(last_observed_seq), 0) + 1
@@ -536,7 +546,15 @@ class Repository:
         http_status: int,
         source: str = "live",
         source_uri: str | None = None,
+        observe: bool = False,
     ) -> Version:
+        """`observe=True`면 **같은 트랜잭션에서** 현재 버전 포인터까지 옮긴다.
+
+        넣기와 가리키기가 갈라져 있으면 그 사이 다른 프로세스의 `anchor gc`가
+        그 행을 지울 수 있다 — 아직 아무도 참조하지 않으므로 지울 자격이 있고,
+        아카이브 버전은 `captured_at`이 과거 Memento 시각이라 회수 순위가 낮아
+        특히 위험하다. 그러면 뒤이은 `UPDATE`가 FK로 죽는다 (D-182).
+        """
         version_id = uuid7()
         blob = zstandard.ZstdCompressor(level=ZSTD_LEVEL).compress(
             normalized_text.encode("utf-8")
@@ -568,6 +586,11 @@ class Repository:
                     source_uri,
                 ),
             )
+            if observe:
+                self._connection.execute(
+                    "UPDATE documents SET current_version = ? WHERE id = ?",
+                    (version_id, document_id),
+                )
             row = self._connection.execute(
                 "SELECT * FROM versions WHERE id = ?", (version_id,)
             ).fetchone()

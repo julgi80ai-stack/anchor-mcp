@@ -514,3 +514,46 @@ def test_observation_sequence_continues_after_migration(tmp_path):
         assert repository.list_versions_by_observation(document_id)[0].id == oldest.id
     finally:
         repository.close()
+
+
+def test_migration_puts_the_current_body_newest(tmp_path):
+    """마이그레이션은 **포인터가 가리키는 행**을 관측 순서 맨 앞에 둬야 한다 (D-180).
+
+    `documents.current_version`은 이미 관측 순으로 옮겨져 있는데 순번을 캡처
+    시각으로만 매기면, 되돌림·아카이브를 겪은 문서에서 `latest`(포인터)와
+    `latest~0`(관측 순 0번)이 어긋난다 — `latest~1`이 latest와 같은 행을
+    가리켜 기본 diff가 비고 중간 판본에 도달할 수 없다. 고치려던 증상 그대로다.
+    아카이브 구제 문서는 원본이 죽어 재관측이 없으므로 **영구적**이다.
+    """
+    path = tmp_path / "pointer.db"
+    build_old_db(path, 5)
+    # 되돌림·아카이브를 흉내 낸다: 포인터를 캡처가 가장 오래된 판본으로 옮긴다.
+    connection = sqlite3.connect(path)
+    connection.row_factory = sqlite3.Row
+    try:
+        for document in connection.execute("SELECT id FROM documents").fetchall():
+            oldest = connection.execute(
+                "SELECT id FROM versions WHERE document_id = ? ORDER BY captured_at ASC LIMIT 1",
+                (document["id"],),
+            ).fetchone()
+            if oldest is not None:
+                connection.execute(
+                    "UPDATE documents SET current_version = ? WHERE id = ?",
+                    (oldest["id"], document["id"]),
+                )
+        connection.commit()
+    finally:
+        connection.close()
+
+    repository = Repository(path)
+    try:
+        for document in repository.list_documents():
+            if document.current_version is None:
+                continue
+            ordered = repository.list_versions_by_observation(document.id)
+            assert ordered[0].id == document.current_version, (
+                "포인터가 가리키는 본문이 관측 순서 맨 앞이 아니다"
+            )
+            assert len({v.last_observed_seq for v in ordered}) == len(ordered)
+    finally:
+        repository.close()

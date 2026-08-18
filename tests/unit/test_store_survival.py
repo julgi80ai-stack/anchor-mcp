@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from anchor.errors import AnchorError
 from anchor.fetcher.ratelimit import HostRateLimiter
 from anchor.models import utcnow_iso
 from anchor.store.repository import Repository
@@ -28,7 +29,11 @@ def _bulk(size: int) -> str:
 
 
 def _seed(
-    repository: Repository, url: str, versions: int, body: str | None = None
+    repository: Repository,
+    url: str,
+    versions: int,
+    body: str | None = None,
+    source: str = "live",
 ) -> tuple[str, list[str]]:
     now = utcnow_iso()
     document = repository.create_document(
@@ -45,6 +50,7 @@ def _seed(
             byte_size=100,
             normalized_text=body if body is not None else f"본문 {index} " * 200,
             http_status=200,
+            source=source,
         )
         ids.append(version.id)
     return document.id, ids
@@ -384,7 +390,8 @@ def test_reference_created_between_select_and_delete_is_respected(tmp_path):
         repository.close()
 
 
-def test_reuse_and_point_is_atomic(tmp_path):
+@pytest.mark.parametrize("source", ["live", "archive"])
+def test_reuse_and_point_is_atomic(tmp_path, source):
     """되돌림 재사용은 **찾기와 가리키기가 한 트랜잭션**이어야 한다 (D-177).
 
     갈라져 있으면 그 사이 다른 프로세스의 `anchor gc`가 그 행을 지울 수 있고,
@@ -395,7 +402,7 @@ def test_reuse_and_point_is_atomic(tmp_path):
     repository = Repository(path)
     other = Repository(path)
     try:
-        document_id, version_ids = _seed(repository, "https://e.test/a", 3)
+        document_id, version_ids = _seed(repository, "https://e.test/a", 3, source=source)
         repository.set_current_version(document_id, version_ids[-1])
         target = repository.get_version(version_ids[0])
         assert target is not None
@@ -426,7 +433,7 @@ def test_reuse_and_point_is_atomic(tmp_path):
 
         wrapper.execute = hook  # type: ignore[method-assign]
         try:
-            result = repository.reuse_and_point(document_id, target.text_hash, "live")
+            result = repository.reuse_and_point(document_id, target.text_hash, source)
         finally:
             wrapper.execute = original  # type: ignore[method-assign]
 
@@ -436,3 +443,24 @@ def test_reuse_and_point_is_atomic(tmp_path):
     finally:
         repository.close()
         other.close()
+
+
+def test_observing_a_vanished_version_raises_an_anchor_error(tmp_path):
+    """가리킬 대상이 사라졌을 때 맨 `sqlite3.IntegrityError`가 새면 안 된다 (D-182).
+
+    `AnchorError`가 아니면 `verify()`가 잡지 못해 **문서 하나 때문에 검증
+    보고서 전체가 사라진다**. 아카이브 버전은 `captured_at`이 과거 Memento
+    시각이라 gc 회수 순위가 낮아, 저장 직후 아무도 참조하지 않는 그 틈이
+    특히 벌어지기 쉽다.
+    """
+    path = tmp_path / "vanish.db"
+    repository = Repository(path)
+    try:
+        document_id, version_ids = _seed(repository, "https://e.test/a", 2)
+        victim = version_ids[0]
+        with repository._connection as connection:
+            connection.execute("DELETE FROM versions WHERE id = ?", (victim,))
+        with pytest.raises(AnchorError):
+            repository.observe_version(document_id, victim, "2026-08-18T00:00:00Z")
+    finally:
+        repository.close()

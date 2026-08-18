@@ -30,4 +30,18 @@ UPDATE versions SET last_observed_seq = (
            OR (earlier.captured_at = versions.captured_at AND earlier.id <= versions.id))
 );
 
+-- 캡처 순서만으로는 부족하다 (D-180). `documents.current_version`은 이미
+-- **관측 순**으로 옮겨져 있으므로, 되돌림·아카이브를 겪은 문서에서는 캡처
+-- 최대값과 포인터가 다른 행이다. 그대로 두면 `latest`(포인터)와 `latest~0`
+-- (관측 순 0번)이 어긋나 `latest~N`이 latest와 같은 행을 가리키고, 기본
+-- diff가 비며 중간 판본에 도달할 수 없다 — 고치려던 증상 그대로다.
+-- 아카이브 구제 문서는 원본이 죽어 재관측이 없으므로 이 어긋남이 영구적이다.
+--
+-- 포인터가 가리키는 행은 **지금 서빙되는 본문**이라는 확실한 사실이므로,
+-- 그 행을 관측 순서의 맨 앞(순번 최대)으로 올린다.
+UPDATE versions SET last_observed_seq = (
+    SELECT COALESCE(MAX(peer.last_observed_seq), 0) + 1 FROM versions AS peer
+    WHERE peer.document_id = versions.document_id
+) WHERE id IN (SELECT current_version FROM documents WHERE current_version IS NOT NULL);
+
 CREATE INDEX idx_versions_observed ON versions(document_id, last_observed_seq DESC);
