@@ -35,3 +35,60 @@ def test_extraction_failed_when_both_extractors_fail(monkeypatch):
 def test_primary_path_keeps_trafilatura_pipeline_version():
     doc = extract.to_normalized(HTML.encode("utf-8"), "text/html")
     assert doc.pipeline_version == extract.PIPELINE_VERSION
+
+
+# -- D-069: 중복 Content-Type 헤더 -------------------------------------------
+
+
+def test_duplicate_content_type_header_is_accepted():
+    """서버가 헤더를 두 번 보내면 httpx가 `, `로 이어 붙인다 — 정상 HTML이다."""
+    doc = extract.to_normalized(HTML.encode("utf-8"), "text/html, text/html")
+    assert "폴백 추출기가 이 본문을 찾아야 한다" in doc.text or doc.text
+
+
+def test_duplicate_content_type_with_charset_is_accepted():
+    doc = extract.to_normalized(
+        HTML.encode("utf-8"), "text/html; charset=utf-8, text/html; charset=utf-8"
+    )
+    assert doc.text
+
+
+# -- D-071: 정규화 후 빈 본문 -------------------------------------------------
+
+
+def test_extraction_failed_when_normalization_empties_the_body(monkeypatch):
+    """추출은 성공했는데 정규화가 비우는 경우 — 빈 판본을 저장하면 안 된다.
+
+    `char_count: 0` 버전이 `changed`로 저장되면 그 문서의 앵커가 전부 MISSING
+    ("인용 철회 또는 대체 검토")으로 뒤집힌다. 추출 실패가 인용 무효로 둔갑한다.
+    """
+    monkeypatch.setattr(trafilatura, "extract", lambda *a, **k: "<span></span><sup></sup>")
+    monkeypatch.setattr(extract, "_readability_fallback", lambda html: None)
+    with pytest.raises(ExtractionFailed):
+        extract.to_normalized(HTML.encode("utf-8"), "text/html")
+
+
+# -- D-072: 짧은 페이지에서 블록 구분이 무너진다 -----------------------------
+
+
+SHORT_PAGE = """<!DOCTYPE html><html><body><article>
+<h1>Service status</h1>
+<h2>Degraded performance</h2>
+<p>Between 09:12 and 10:47 UTC some requests to the reporting endpoint
+returned HTTP 503. The cause was an expired certificate on one node.</p>
+</article></body></html>"""
+
+
+def test_headings_do_not_glue_onto_the_following_paragraph(monkeypatch):
+    """제목이 뒤 문단에 낱말째 붙으면 화면 복사 인용이 성립하지 않는다."""
+    monkeypatch.setattr(
+        trafilatura,
+        "extract",
+        lambda *a, **k: (
+            "Service statusDegraded performanceBetween 09:12 and 10:47 UTC some "
+            "requests to the reporting endpoint returned HTTP 503."
+        ),
+    )
+    doc = extract.to_normalized(SHORT_PAGE.encode("utf-8"), "text/html")
+    assert "statusDegraded" not in doc.text
+    assert "performanceBetween" not in doc.text

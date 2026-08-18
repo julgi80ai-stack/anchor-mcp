@@ -45,7 +45,13 @@ def test_unicode_space_runs_collapse_like_ascii():
 
 
 def test_zero_width_characters_are_removed():
-    assert normalize_text("re​ference­ rot‎") == "reference rot"
+    """폭이 없고 **표시에도 관여하지 않는** 문자만 지운다 (D-068에서 범위 축소).
+
+    LRM/RLM은 문단 방향을, ZWJ/ZWNJ는 이모지 시퀀스와 페르시아어 정서법을
+    만든다 — 지우면 `get_version`이 내놓는 "인용 당시 텍스트"가 원문과 달라진다.
+    보존 쪽 검증은 `test_normalize_rules.py`에 있다.
+    """
+    assert normalize_text("re​ference­ rot") == "reference rot"
 
 
 def test_french_nbsp_punctuation_matches_typed_quote():

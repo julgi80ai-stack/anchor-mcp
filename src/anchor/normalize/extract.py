@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.metadata as _metadata
 import io
+import re
 from dataclasses import dataclass
 
 import markdownify
@@ -61,7 +62,9 @@ def decode_bytes(raw: bytes) -> str:
 
 
 def to_normalized(raw: bytes, content_type: str) -> NormalizedDoc:
-    media_type = content_type.split(";", 1)[0].strip().lower()
+    # 서버가 `Content-Type`을 두 번 보내면 httpx가 `text/html, text/html`로
+    # 이어 붙인다 — 미디어 타입은 첫 항목이다 (D-069).
+    media_type = content_type.split(",", 1)[0].split(";", 1)[0].strip().lower()
 
     if media_type in _TEXT_PLAIN_TYPES:
         text = decode_bytes(raw)
@@ -78,10 +81,23 @@ def to_normalized(raw: bytes, content_type: str) -> NormalizedDoc:
     html = decode_bytes(raw)
     extracted = trafilatura.extract(html, output_format="markdown")
     pipeline_version = PIPELINE_VERSION
-    if not extracted:
-        extracted = _readability_fallback(html)
-        pipeline_version = READABILITY_PIPELINE_VERSION
-    if not extracted:
+    text = normalize_text(extracted) if extracted else ""
+
+    # 폴백은 "결과가 없을 때"만이 아니라 **결과의 구조가 무너졌을 때**도 쓴다.
+    # 본문이 짧은 페이지에서 trafilatura가 블록 구분 없는 평문을 돌려주면
+    # 제목이 뒤 문단에 낱말째 붙어(`Service statusDegraded performance…`)
+    # 화면 복사 인용이 성립하지 않는다 (D-072).
+    if not text or _blocks_collapsed(text, html):
+        fallback = _readability_fallback(html)
+        fallback_text = normalize_text(fallback) if fallback else ""
+        if fallback_text and (not text or not _blocks_collapsed(fallback_text, html)):
+            text = fallback_text
+            pipeline_version = READABILITY_PIPELINE_VERSION
+
+    # 추출은 성공했는데 정규화가 비우는 경우가 있다. 빈 판본을 저장하면
+    # `char_count: 0` 버전이 `changed`로 기록되고 그 문서의 앵커가 전부
+    # MISSING으로 뒤집힌다 — 추출 실패가 인용 무효로 둔갑한다 (D-071).
+    if not text:
         raise ExtractionFailed("Extraction failed: neither trafilatura nor readability found body text — 본문 추출 실패 (두 추출기 모두 본문을 찾지 못함)")
 
     title: str | None = None
@@ -97,9 +113,17 @@ def to_normalized(raw: bytes, content_type: str) -> NormalizedDoc:
         except Exception:
             title = None
 
-    return NormalizedDoc(
-        text=normalize_text(extracted), title=title, pipeline_version=pipeline_version
-    )
+    return NormalizedDoc(text=text, title=title, pipeline_version=pipeline_version)
+
+
+_BLOCK_TAG_RE = re.compile(r"<(?:p|h[1-6]|li|blockquote|pre|tr|dd|dt)\b", re.IGNORECASE)
+
+
+def _blocks_collapsed(text: str, html: str) -> bool:
+    """추출 결과에 블록 구분이 없는데 원본에는 블록이 여럿인가 (D-072)."""
+    if "\n" in text:
+        return False
+    return len(_BLOCK_TAG_RE.findall(html)) >= 2
 
 
 def _readability_fallback(html: str) -> str | None:
