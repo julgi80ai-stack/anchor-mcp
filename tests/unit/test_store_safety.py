@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from anchor.errors import StorageError
 from anchor.store.repository import SCHEMA_VERSION, Repository
 
 from tests.subprocess_helper import run_python as run_in_subprocess
@@ -208,3 +209,29 @@ def test_empty_id_list_selects_nothing(tmp_path):
     assert repository.select_anchors(anchor_ids=[]) == []  # [] = 선택 없음
     assert repository.select_anchors(document_ids=[]) == []
     repository.close()
+
+
+# -- D-129 닫힌 저장소 -------------------------------------------------------
+
+
+def test_use_after_close_raises_domain_error(tmp_path):
+    """닫힌 저장소 접근은 도메인 예외다 — 읽기·쓰기·트랜잭션 세 갈래 모두.
+
+    생 `sqlite3.ProgrammingError`가 새면 라이브러리 사용자가 `AnchorError`
+    하나로 받을 수 없다(SPEC §8). 닫기 자체는 멱등이어야 한다.
+    """
+    repository = Repository(tmp_path / "closed.db")
+    repository.close()
+    repository.close()  # 멱등
+
+    with pytest.raises(StorageError):
+        repository.list_documents()
+    with pytest.raises(StorageError):
+        repository.set_robots("https://example.invalid", "", 200, "2026-08-17T00:00:00Z")
+    with pytest.raises(StorageError):
+        repository.create_document(
+            url="https://example.invalid/a", original_url="https://example.invalid/a",
+            title=None, now="2026-08-17T00:00:00Z",
+        )
+    with pytest.raises(StorageError):
+        repository.count_rows()

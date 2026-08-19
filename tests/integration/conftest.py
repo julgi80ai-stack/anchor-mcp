@@ -13,6 +13,10 @@ from anchor.config import Config
 from anchor.service import Anchor
 
 
+# 게이트가 열리지 않을 때 픽스처 서버가 영원히 붙잡히지 않게 하는 상한.
+_GATE_TIMEOUT_SECONDS = 30.0
+
+
 def article_html(*, nonce: str = "n0", extra_sentence: str = "") -> str:
     """trafilatura가 본문을 추출할 수 있는 수준의 기사 HTML.
 
@@ -73,6 +77,16 @@ class FixtureState:
         self.status_override_with_body: bool = False
         # 애그리게이터 응답을 이상한 페이로드로 바꿔치기 (파싱 견고성 검증용)
         self.archive_payload_override: str | None = None
+        # -- 결정론적 겹침 장치 (D-128/D-129) --------------------------------
+        # 동시성 계약은 sleep으로 재현하면 픽스처가 무효다(5단계 교훈). 요청이
+        # 핸들러 안에서 **서로 만나게** 하고, 만났는지를 사실로 남긴다.
+        self.arrival_barrier: threading.Barrier | None = None  # 문서 요청끼리 만나는 지점
+        self.barrier_broken: bool = False       # 만나지 못했다(= 상대가 오지 못했다)
+        self.arrived: dict[str, threading.Event] = {}  # 경로별 "도착했다" 신호
+        self.gates: dict[str, threading.Event] = {}    # 경로별 "이제 응답해도 된다"
+        self.inflight: int = 0                  # 지금 응답 중인 문서 요청 수
+        self.max_inflight: int = 0              # 그 최대치 — 겹침의 관측값
+        self.inflight_lock = threading.Lock()
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -119,6 +133,42 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.write(state.redirect_body)
             return
 
+        # 문서 응답 구간. 여기서만 겹침을 세고 만나게 한다 — robots·아카이브·
+        # 리다이렉트는 위에서 이미 반환됐다.
+        with state.inflight_lock:
+            state.inflight += 1
+            state.max_inflight = max(state.max_inflight, state.inflight)
+        try:
+            self._rendezvous(state)
+            self._serve_document(state)
+        finally:
+            with state.inflight_lock:
+                state.inflight -= 1
+
+    def _rendezvous(self, state: FixtureState) -> None:
+        """요청들이 핸들러 안에서 만나는 지점 (D-128).
+
+        지연만으로는 "두 요청이 실제로 겹쳤다"를 단언할 수 없다 — 느려서
+        겹치지 않은 것과 락에 막혀 겹치지 못한 것이 똑같이 보인다. 도착을
+        신호하고, 시험이 열어 줄 때까지 붙잡고, 서로 만나야 진행하게 하면
+        겹침이 기제로 관측된다. 상대가 오지 못하면 `barrier_broken`이 사실로
+        남는다 — 예외로 터뜨리지 않는 이유는 그 실패가 페치 재시도·폴백으로
+        번져 관측 대상을 흐리기 때문이다.
+        """
+        arrived = state.arrived.get(self.path)
+        if arrived is not None:
+            arrived.set()
+        barrier = state.arrival_barrier
+        if barrier is not None:
+            try:
+                barrier.wait()
+            except threading.BrokenBarrierError:
+                state.barrier_broken = True
+        gate = state.gates.get(self.path)
+        if gate is not None and not gate.wait(timeout=_GATE_TIMEOUT_SECONDS):
+            state.barrier_broken = True
+
+    def _serve_document(self, state: FixtureState) -> None:
         if state.response_delay:
             import time as _time
 

@@ -48,18 +48,22 @@ class _SerializedConnection:
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
         self._lock = threading.RLock()
+        self._closed = False
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> _Rows:
         with self._lock:
+            self._raise_if_closed()
             return _Rows(self._connection.execute(sql, params).fetchall())
 
     def executemany(self, sql: str, seq: Sequence[Sequence[Any]]) -> None:
         with self._lock:
+            self._raise_if_closed()
             self._connection.executemany(sql, seq)
 
     def __enter__(self) -> _SerializedConnection:
         self._lock.acquire()
         try:
+            self._raise_if_closed()
             if self._connection.in_transaction:
                 # 앞선 실패가 트랜잭션을 남겼다(롤백 자체가 실패한 경우).
                 # 정리하지 않으면 이후 모든 쓰기가 "cannot start a transaction
@@ -100,8 +104,30 @@ class _SerializedConnection:
         except sqlite3.Error:
             pass
 
-    def close(self) -> None:
+    def _raise_if_closed(self) -> None:
+        """닫힌 저장소 접근은 도메인 예외다 (D-129).
+
+        생 `sqlite3.ProgrammingError`가 새면 라이브러리 사용자가 `AnchorError`
+        하나로 받을 수 없고(SPEC §8), 진행 중이던 작업이 무엇에 걸려 죽었는지
+        말해 주지 못한다. 검사와 close가 **같은 락** 아래에 있으므로 "검사
+        직후에 닫히는" 틈은 없다.
+        """
+        if self._closed:
+            raise StorageError(
+                "store is closed — 저장소가 이미 닫혔습니다"
+            )
+
+    def ensure_open(self) -> None:
+        """이 커넥션을 거치지 않는 작업(별도 커넥션·파일 조회)의 사전 검사."""
         with self._lock:
+            self._raise_if_closed()
+
+    def close(self) -> None:
+        """멱등이다 — 두 번 닫아도 무해하다 (D-129)."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
             self._connection.close()
 
 # 증분 마이그레이션: {목표 버전: SQL 파일}. 신규 DB는 schema.sql 전체를 쓴다.
@@ -283,6 +309,9 @@ class Repository:
         격리 위반이다. 지금 못 걷어내면 그대로 잰다: 그 순간 파일에 있는
         것이 사실이다.
         """
+        # 별도 커넥션이라 닫힌 저장소에서도 열린다 — 여기서 막지 않으면
+        # `disk_bytes`만 close 이후에 조용히 성공한다 (D-129).
+        self._connection.ensure_open()
         try:
             connection = sqlite3.connect(
                 self._db_path, timeout=_CHECKPOINT_TIMEOUT_SECONDS, isolation_level=None
