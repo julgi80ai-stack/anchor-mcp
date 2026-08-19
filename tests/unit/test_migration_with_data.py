@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from anchor.errors import StorageError
 from anchor.store.repository import (
     MIGRATION_FILES,
     SCHEMA_VERSION,
@@ -450,7 +451,8 @@ def test_readonly_db_fails_fast_without_wal_retry(tmp_path):
         if os.access(path, os.W_OK):
             pytest.skip("이 환경에서는 읽기 전용이 강제되지 않는다 (root 등)")
         started = _time.monotonic()
-        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+        # D-138: 저장소 계층이 sqlite3 예외를 도메인 예외로 감싼다.
+        with pytest.raises(StorageError, match="readonly"):
             Repository(path)
         elapsed = _time.monotonic() - started
         assert elapsed < 1.0, f"경합이 아닌 실패에 {elapsed:.2f}초를 썼다"

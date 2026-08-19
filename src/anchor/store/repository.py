@@ -13,7 +13,7 @@ from typing import Any, Sequence
 
 import zstandard
 
-from anchor.errors import DocumentNotFound
+from anchor.errors import DocumentNotFound, StorageError
 from anchor.models import AnchorRecord, Document, Version, uuid7
 
 SCHEMA_VERSION = 6
@@ -204,27 +204,56 @@ def _split_statements(sql: str) -> list[str]:
 
 
 class Repository:
-    def __init__(self, db_path: Path | str) -> None:
+    def __init__(self, db_path: Path | str, *, compression_level: int = ZSTD_LEVEL) -> None:
+        # 저장소를 여는 모든 실패를 도메인 예외로 바꾼다 (D-138). `sqlite3`
+        # 예외가 그대로 올라오면 잘못된 `--db` 값 하나가 전 CLI 명령을
+        # 트레이스백으로 죽이고, D-033의 `except OSError`는 그것을 덮지 못한다.
+        # CLI가 아니라 여기서 감싸므로 라이브러리 직접 사용 경로(SPEC §8)도
+        # 같은 보장을 받는다. **파일을 고치거나 지우지는 않는다** — 손상된
+        # DB를 조용히 새로 만들면 사용자의 인용이 사라진다.
+        if not str(db_path).strip():
+            raise StorageError(
+                "database path must not be empty — DB 경로가 비어 있습니다"
+            )
         db_path = Path(db_path).expanduser()
-        db_path.parent.mkdir(parents=True, exist_ok=True)
+        if db_path.is_dir():
+            raise StorageError(
+                f"database path is a directory: {db_path} — "
+                "DB 경로가 디렉터리입니다 (파일 경로를 지정하세요)"
+            )
         self._db_path = db_path
-        # 기본 busy timeout(5초)은 v5의 표 재작성처럼 오래 걸리는 마이그레이션을
-        # 넘기지 못한다 — 큰 DB(실측 1.4GB에서 34초)를 동시에 열면 기다리던
-        # 프로세스가 `database is locked`로 죽는다. 업그레이드는 한 번뿐이고
-        # 그때는 기다리는 편이 옳다 (D-078).
-        raw = sqlite3.connect(
-            db_path,
-            check_same_thread=False,
-            isolation_level=None,
-            timeout=_BUSY_TIMEOUT_SECONDS,
-        )
+        self._compression_level = compression_level
+        try:
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            # 기본 busy timeout(5초)은 v5의 표 재작성처럼 오래 걸리는 마이그레이션을
+            # 넘기지 못한다 — 큰 DB(실측 1.4GB에서 34초)를 동시에 열면 기다리던
+            # 프로세스가 `database is locked`로 죽는다. 업그레이드는 한 번뿐이고
+            # 그때는 기다리는 편이 옳다 (D-078).
+            raw = sqlite3.connect(
+                db_path,
+                check_same_thread=False,
+                isolation_level=None,
+                timeout=_BUSY_TIMEOUT_SECONDS,
+            )
+        except (OSError, sqlite3.Error) as error:
+            raise StorageError(
+                f"cannot open database {db_path}: {error} — "
+                f"저장소를 열 수 없습니다: {db_path}"
+            ) from error
         raw.row_factory = sqlite3.Row
-        _enable_wal(raw)
-        raw.execute("PRAGMA foreign_keys = ON")
         # 압축기 인스턴스는 스레드 안전하지 않아 공유하면 segfault가 난다.
         # 호출마다 만든다 — 실측 비용 +0.016ms (D-020).
         self._connection = _SerializedConnection(raw)
-        self._migrate()
+        try:
+            _enable_wal(raw)
+            raw.execute("PRAGMA foreign_keys = ON")
+            self._migrate()
+        except sqlite3.Error as error:
+            raw.close()
+            raise StorageError(
+                f"cannot open database {db_path}: {error} — "
+                f"저장소를 열 수 없습니다: {db_path}"
+            ) from error
 
     def close(self) -> None:
         self._connection.close()
@@ -701,7 +730,7 @@ class Repository:
         특히 위험하다. 그러면 뒤이은 `UPDATE`가 FK로 죽는다 (D-182).
         """
         version_id = uuid7()
-        blob = zstandard.ZstdCompressor(level=ZSTD_LEVEL).compress(
+        blob = zstandard.ZstdCompressor(level=self._compression_level).compress(
             normalized_text.encode("utf-8")
         )
         with self._connection:

@@ -75,3 +75,13 @@ class FetchFailed(AnchorError):
         super().__init__(message)
         self.http_status = http_status
         self.reason = reason
+
+
+class StorageError(AnchorError):
+    """로컬 저장소를 열거나 쓸 수 없다 — 손상된 DB·디렉터리 경로·권한 (D-138).
+
+    `sqlite3.DatabaseError`가 그대로 올라오면 사용자의 오타 하나가 모든 CLI
+    명령을 트레이스백으로 죽인다. 트레이스백은 "도구가 깨졌다"는 뜻인데
+    잘못된 `--db` 값은 그런 뜻이 아니다. 저장소 계층에서 도메인화하므로
+    라이브러리 직접 사용 경로(SPEC §8)도 같은 보장을 받는다.
+    """

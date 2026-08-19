@@ -74,20 +74,34 @@ def match_anchor(
     max_edit_ratio: float = 0.15,
     max_edit_distance: int = 64,
     hint_radius: int = 500,
-    max_chars: int = 2_097_152,
+    max_bytes: int = 2_097_152,
 ) -> MatchResult:
     budget = Budget(budget_ms)
-    truncated = len(text) > max_chars
-    if truncated:
-        # 잘라낸 뒤 못 찾으면 "사라졌다"가 아니라 "다 보지 못했다"이다.
-        # 아래에서 MISSING/ALTERED 판정을 UNRESOLVED로 낮춘다 (D-046).
-        text = text[:max_chars]
+    # 설정 키 이름이 `anchor.max_document_bytes`이므로 **바이트로** 잰다
+    # (D-153). 문자 수로 재면 UTF-8 한글(3바이트/자)에서 문서화된 상한의
+    # 3배까지 통과한다. 매 호출 전체 인코딩은 비싸므로 빠른 경로를 둔다:
+    # UTF-8은 문자당 최대 4바이트라 `len(text) * 4 <= max_bytes`면 인코딩
+    # 없이 상한 안임이 확정된다.
+    truncated = False
+    if len(text) * 4 > max_bytes:
+        encoded = text.encode("utf-8")
+        if len(encoded) > max_bytes:
+            truncated = True
+            # 잘라낸 뒤 못 찾으면 "사라졌다"가 아니라 "다 보지 못했다"이다.
+            # 아래에서 MISSING/ALTERED 판정을 UNRESOLVED로 낮춘다 (D-046).
+            # 문자 경계를 깨지 않게 마지막 불완전 시퀀스는 버린다.
+            text = encoded[:max_bytes].decode("utf-8", "ignore")
     # 편집거리 상한도 문자 체계를 반영한다 (D-049). 같은 성격의 개정(단어
     # 하나 교체)이 일본어·중국어에서는 훨씬 적은 글자로 표현되므로, 글자
     # 수에 고정 비율을 곱하면 ALTERED가 MISSING으로 떨어진다. 반영은
     # **연속**이어야 한다 — 계단을 두면 계단 바로 아래가 항상 틀린다 (D-113).
     effective_ratio = max_edit_ratio * wordless_edit_factor(exact)
-    k = max(1, min(int(len(exact) * effective_ratio), max_edit_distance))
+    # k는 인용문 길이보다 작아야 한다 (D-143). k >= len(exact)이면 "전부 지우고
+    # 다른 것을 넣기"가 허용 범위 안에 들어와 **아무 문장이나** 근사 일치가
+    # 되고, 무관한 문단이 "당신 인용문의 현재 모습"으로 제시된다. 설정
+    # 상한(max_edit_ratio <= 1, 문자 체계 계수 최대 2.5)만으로는 이 경계가
+    # 지켜지지 않는다.
+    k = max(1, min(int(len(exact) * effective_ratio), max_edit_distance, len(exact) - 1))
 
     # 1단계 — 힌트 주변 완전 일치
     window_start = max(0, position_hint - hint_radius)

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 from pathlib import Path
 from typing import Optional
 
@@ -13,6 +14,12 @@ import typer
 from anchor import __version__
 from anchor.errors import AnchorError
 from anchor.service import Anchor
+
+# 모든 명령이 같은 오류 표면을 진다 (D-138·D-147). 명령마다 다른 예외를 잡으면
+# `gc --keep 0`은 트레이스백, `timemap`은 문장이 되는 식으로 갈린다 — 트레이스백은
+# "도구가 깨졌다"는 뜻인데 사용자의 오타는 그런 뜻이 아니다. `StorageError`는
+# 저장소 계층에서 도메인화되므로(D-138) `AnchorError`로 함께 잡힌다.
+_USER_ERRORS = (AnchorError, ValueError, OSError)
 
 app = typer.Typer(
     name="anchor",
@@ -54,7 +61,7 @@ def fetch(
                 force_refresh=force_refresh,
                 include_content=show_content or json_out,
             )
-    except AnchorError as error:
+    except _USER_ERRORS as error:
         typer.secho(f"실패: {error}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
@@ -91,7 +98,7 @@ def cite(
     try:
         with Anchor(db_path=db) as anchor:
             result = anchor.cite(document, quote, note=note)
-    except AnchorError as error:
+    except _USER_ERRORS as error:
         typer.secho(f"실패: {error}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
@@ -126,6 +133,12 @@ def _parse_older_than(value: str) -> float:
             f"Cannot parse duration {value!r}; use 7d, 12h, 30m, 3600, or P7D — "
             f"기간을 해석할 수 없습니다: {value!r}"
         ) from error
+    if not math.isfinite(seconds):
+        # `nan`·`inf`·`1e400`은 float()를 통과하고 `timedelta`에서 죽는다 (D-149).
+        raise AnchorError(
+            f"Duration must be a finite number, got {value!r} — "
+            f"기간은 유한한 값이어야 합니다: {value!r}"
+        )
     if seconds < 0:
         raise AnchorError(
             f"Duration must not be negative, got {value!r} — 기간은 음수일 수 없습니다"
@@ -148,10 +161,14 @@ def verify(
         with Anchor(db_path=db) as anchor:
             report = anchor.verify(
                 anchor_ids=anchor_ids or None,
-                older_than=_parse_older_than(older_than) if older_than else None,
+                # `--older-than ""`(셸 변수가 빈 경우)를 "필터 없음"으로 읽으면
+                # 전체 앵커가 재검증된다 — 지정하지 않은 것과 빈 값은 다르다 (D-154).
+                older_than=(
+                    _parse_older_than(older_than) if older_than is not None else None
+                ),
                 time_budget_ms=budget_ms,
             )
-    except (AnchorError, ValueError) as error:
+    except _USER_ERRORS as error:
         typer.secho(f"실패: {error}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
@@ -189,7 +206,7 @@ def timemap(
     try:
         with Anchor(db_path=db) as anchor:
             result = anchor.get_timemap(document, fmt=format)
-    except (AnchorError, ValueError) as error:
+    except _USER_ERRORS as error:
         typer.secho(f"실패: {error}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
     if format == "json":
@@ -216,7 +233,7 @@ def export(
     try:
         with Anchor(db_path=db) as anchor:
             items = anchor.export_robust_links(anchor_ids or None, fmt=format)
-    except (AnchorError, ValueError) as error:
+    except _USER_ERRORS as error:
         typer.secho(f"실패: {error}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
     if not items:
@@ -235,10 +252,7 @@ def stats(
     try:
         with Anchor(db_path=db) as anchor:
             payload = anchor.cache_stats()
-    except AnchorError as error:
-        typer.secho(f"실패: {error}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
-    except OSError as error:
+    except _USER_ERRORS as error:
         typer.secho(f"실패: {error}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
     if json_out:
@@ -270,10 +284,7 @@ def gc(
     try:
         with Anchor(db_path=db) as anchor:
             result = anchor.collect_garbage(keep=keep)
-    except AnchorError as error:
-        typer.secho(f"실패: {error}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
-    except OSError as error:
+    except _USER_ERRORS as error:
         typer.secho(f"실패: {error}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
     typer.echo(
@@ -290,12 +301,26 @@ def serve(
     db: Optional[Path] = typer.Option(None, "--db", help="SQLite 경로"),
 ) -> None:  # pragma: no cover — 이벤트 루프를 점유하는 장기 실행 진입점
     """MCP 서버를 시작한다 (도구 9종). MCP 클라이언트 등록은 `anchor-mcp` 참조."""
-    from anchor.config import load_config
+    from anchor.config import SERVER_TRANSPORTS, load_config
     from anchor.server import build_server, serve_forever
 
-    config = load_config()
-    resolved = transport or config.server_transport
-    server, service = build_server(db_path=db, config=config)
+    if transport is not None and transport not in SERVER_TRANSPORTS:
+        # 설정 파일은 `_validate`가, `anchor-mcp`는 argparse choices가 거부하는데
+        # 여기만 뚫려 있었다 — 오타가 오류 없이 stdio로 실행됐다 (D-150).
+        typer.secho(
+            f"실패: --transport must be one of {SERVER_TRANSPORTS}, got {transport!r} — "
+            f"전송 방식은 {' | '.join(SERVER_TRANSPORTS)} 중 하나여야 합니다",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    try:
+        config = load_config()
+        resolved = transport or config.server_transport
+        server, service = build_server(db_path=db, config=config)
+    except _USER_ERRORS as error:
+        typer.secho(f"실패: {error}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
     serve_forever(server, service, resolved)
 
 
@@ -307,10 +332,7 @@ def list_command(
     try:
         with Anchor(db_path=db) as anchor:
             documents = anchor.list_documents()
-    except AnchorError as error:
-        typer.secho(f"실패: {error}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
-    except OSError as error:
+    except _USER_ERRORS as error:
         typer.secho(f"실패: {error}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
     if not documents:

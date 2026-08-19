@@ -18,7 +18,7 @@
 | Governing specs | RFC 7089, RFC 9110 (conditional requests), W3C Web Annotation Data Model, MCP 2026-07-28 |
 | Design rationale | `docs/decisions/0001` (prior art and positioning), `docs/decisions/0002` (licensing and reuse) |
 
-> **v1.9 → v1.10 change summary**: Reflects stage 6 (accounting, configuration, CLI — clusters 9–11) of the remediation. Two accounting invariants were established — one user call = one `fetch_log` row whose outcome is the final result, and every byte actually downloaded is counted even when the call ends in failure (§7.7). `bytes_saved_estimate` was corrected to measure against the currently served body, `disk_bytes` was defined as actual occupancy after WAL reclamation, and an `archive` bucket was added so the breakdown sums to the total again (§7.7, §13). The contention gate's verdict was replaced: instead of the UNRESOLVED increment over the foreground baseline it now gates **credit actually granted** (§10). See §15 for the full list.
+> **v1.9 → v1.10 change summary**: Reflects stage 6 (accounting, configuration, CLI — clusters 9–11) of the remediation. Two accounting invariants were established — one user call = one `fetch_log` row whose outcome is the final result, and every byte actually downloaded is counted even when the call ends in failure (§7.7). `bytes_saved_estimate` was corrected to measure against the currently served body, `disk_bytes` was defined as actual occupancy after WAL reclamation, and an `archive` bucket was added so the breakdown sums to the total again (§7.7, §13). The contention gate's verdict was replaced: instead of the UNRESOLVED increment over the foreground baseline it now gates **credit actually granted** (§10). Configuration opens all 26 documented keys through all three paths (TOML, environment, library) with an authoritative validation table, and unknown keys are warned about and ignored (§9). `max_document_bytes` is measured in UTF-8 bytes as its name says, and k is clamped below the quote length (§6.2). Every CLI command carries a traceback-free error surface, and store-open failures are domain-typed as `StorageError` (§8). See §15 for the full list.
 >
 > **v1.8 → v1.9 change summary**: Reflects stage 5 of the remediation (Tasks and the server, cluster 8). A Task **ttl policy** was established (a call that omits ttl gets a server default of 30 minutes; zero and negative values are rejected; oversized requests are clamped to 24 hours with the actual value reported; the ttl key is never omitted from any response — §7.0); the retention period is counted from creation as the protocol defines, but is updated at termination to the actual retention so a long-running task's result does not vanish the moment it finishes (§7.0); server shutdown now **actually guarantees worker termination** before the store is closed (§7.0); and cancellation reacts at anchor granularity (§7.0). The cache-hit gate was strengthened to hold **while background matching is running**, with a loaded scenario added to the benchmark (§10). `list_documents`' status and `verify_citations`' time_budget_ms are validated once for all three call paths (§7.6, §7.3). See §16 for the full list.
 >
@@ -560,7 +560,12 @@ For a new version, the following are attempted in order. As soon as a stage succ
 # two-character replacement becomes MISSING.
 density = share_of_han_and_kana          # 0.0-1.0 (whitespace excluded, Hangul excluded)
 ratio = 0.15 * (1.0 + 1.5 * density)     # density 0 -> x1.0, density 1 -> x2.5
-k = max(1, min(int(len(exact) * ratio), 64))
+k = max(1, min(int(len(exact) * ratio), 64, len(exact) - 1))
+# k must stay below the quote length (v1.10, D-143): with k >= len(exact),
+# "delete everything and insert something else" falls inside the allowance and
+# any sentence at all becomes an approximate match. The configuration cap
+# (max_edit_ratio <= 1) alone does not hold this boundary — the writing-system
+# factor (up to 2.5) is multiplied on top.
 ```
 
 Implementation priority:
@@ -597,6 +602,8 @@ The check period is **converted to DP cells** (v1.7). With a per-row period, one
 | `quality = SHORT` | 100 ms |
 | Document length ceiling | 2 MB (beyond that, only the first 2 MB is searched, with a `TRUNCATED` flag) |
 
+> **Unit of measure (v1.10)**: `anchor.max_document_bytes` is measured in **UTF-8 bytes**, as the name says. Measured in characters, Hangul (3 bytes per character) passes at up to 3× the documented cap. On overflow the truncation lands on a character boundary, and §6.3's rule of withholding MISSING/ALTERED verdicts for truncated documents is unchanged.
+>
 > **Effective limit (made explicit in v1.7)**: the 2 MB above caps the **stored and searched range**, not what stage 4 can sweep within the budget. The Myers core scan is pure Python at roughly 2.0M chars/s, so for quotes over 64 characters (two cores × a full scan) the effective limit under the default 200 ms budget is **about 190K characters**. On larger documents, when stage 3 fails, stage 4 cannot reach a verdict and returns `UNRESOLVED`. That is not a defect but a consequence of the contract — we chose to say we do not know, and a larger budget widens the reach accordingly. If UNRESOLVED is frequent on large documents, raising `time_budget_ms` is the intended answer.
 
 **Saying you do not know what you do not know is better than giving a wrong answer quickly.** In batch verification, one anchor must not be allowed to stop the whole run.
@@ -885,6 +892,8 @@ anchor gc --keep 20
 anchor serve --transport stdio               # MCP server (v1.3; same as anchor-mcp)
 ```
 
+**Error surface** (v1.10): a failure to open the store (corrupt DB, directory path, permissions, empty path) is wrapped at the store layer into the domain exception `anchor.errors.StorageError` (a subclass of `AnchorError`) — direct library use receives the same guarantee. Every CLI command carries the same error surface: `AnchorError`, `ValueError`, and `OSError` become one `실패: …` line and exit code 1, with no traceback — a traceback means "the tool is broken", and a user's typo does not mean that. `anchor serve --transport` accepts only `stdio|http` (all three entry points share one list), and `--older-than ""` is an error, not "no filter" — omitting an option and passing it empty are different things. The server entry points (`anchor-mcp`, `anchor serve`) report configuration and storage errors as a single stderr line and exit nonzero — spitting a traceback onto stdio makes an MCP client read it as a protocol error.
+
 The entry point for registration with MCP clients is the console script `anchor-mcp` (v1.3).
 
 ---
@@ -901,9 +910,11 @@ The entry point for registration with MCP clients is the console script `anchor-
 | `max_content_mb = 0.5` | Accept fractional values. Truncating to an integer makes the ceiling 0 bytes and every fetch fails |
 | `requests_per_second = 0` | Zero is not "unlimited"; it is a division by zero. Accept only positive values |
 
-Environment variables override the documented configuration keys across the board (`ANCHOR_DB_PATH`, `ANCHOR_TIMEOUT_SECONDS`, `ANCHOR_RATE_LIMIT_RPS`, etc.). Implementing only two of them while writing "always take precedence" is a mismatch between specification and implementation.
+All 26 documented keys are settable through **all three paths** — the TOML file, environment variables, and direct library use (`Config(...)`) — and receive the same validation (v1.10). Implementing only two of them while writing "always take precedence" is a mismatch between specification and implementation. The table below is the authority on keys, environment variables, and allowed ranges.
 
 Values are validated **only against the final merged state** (v1.8). Validating the intermediate state after the file layer is applied means that, in a deployment where an environment variable is meant to override a bad file value, the server refuses to start at all — "always take precedence" collapses at the validation point. The validation itself runs at `Config` construction (including §5.4's UA rule), so direct library use receives the same guarantee.
+
+**Unknown keys and unknown sections are warned about on stderr and ignored** (v1.10). Rejecting them would keep a configuration file that uses future keys from loading at all on an older version — breaking forward compatibility — while ignoring them silently lets a single typo (`timeuot_seconds`) fall back to the default without anyone knowing. A scalar or array where a section belongs (`fetch = 3`) and a non-UTF-8 file are a `ConfigError`. When `archive_fallback.enabled = true` with an empty `aggregator`, the fact that the public Wayback CDX will be used is announced on stderr — no quiet external dependency (§5.2).
 
 ```toml
 [storage]
@@ -918,6 +929,8 @@ timeout_seconds  = 30
 max_redirects    = 5
 max_content_mb   = 8
 default_max_age  = 86400
+retry_backoff_base = 1.0       # base of the retry exponential backoff (exposed in v1.10)
+robots_ttl_seconds = 86400     # robots.txt cache lifetime — RFC 9309 §2.4 ceiling (exposed in v1.10)
 
 [fetch.rate_limit]
 requests_per_second = 1.0
@@ -933,7 +946,9 @@ timeout_seconds = 20
 
 [anchor]
 context_chars       = 48
-max_edit_ratio      = 0.15     # k = len(exact) * this value, max 64
+max_edit_ratio      = 0.15     # k = len(exact) * this value, max max_edit_distance
+max_edit_distance   = 64       # absolute cap on k (exposed in v1.10)
+hint_radius         = 500      # stage-1 hint search radius (exposed in v1.10)
 min_quote_chars     = 12       # below this, creation is refused
 short_quote_chars   = 32       # below this, a SHORT warning
 time_budget_ms      = 200
@@ -942,6 +957,37 @@ max_document_bytes  = 2097152
 [server]
 transport = "stdio"   # stdio | http
 ```
+
+**Keys, environment variables, allowed ranges** (v1.10 — this table is the authority; "the documented keys" means these 26):
+
+| Key | Environment variable | Allowed range |
+|---|---|---|
+| `storage.db_path` | `ANCHOR_DB_PATH` | non-empty file path (`""` and `.` refused) |
+| `storage.keep_versions` | `ANCHOR_KEEP_VERSIONS` | 1 – 2⁶³−1 (SQLite integer range) |
+| `storage.compression` | `ANCHOR_COMPRESSION` | `zstd:N`, N in 1–22 (`none` and other codecs unsupported — one storage format) |
+| `fetch.user_agent` | `ANCHOR_USER_AGENT` | RFC 9110 field-value: visible ASCII (+ inner SP/HTAB); leading/trailing whitespace, control characters, newlines, non-ASCII refused |
+| `fetch.respect_robots` | `ANCHOR_RESPECT_ROBOTS` | bool |
+| `fetch.timeout_seconds` | `ANCHOR_TIMEOUT_SECONDS` | finite > 0 |
+| `fetch.max_redirects` | `ANCHOR_MAX_REDIRECTS` | 0 – 20 |
+| `fetch.max_content_mb` | `ANCHOR_MAX_CONTENT_MB` | finite, over 0 up to 1,048,576 MB (1 TiB) |
+| `fetch.default_max_age` | `ANCHOR_DEFAULT_MAX_AGE` | ≥ 0 |
+| `fetch.retry_backoff_base` | `ANCHOR_RETRY_BACKOFF_BASE` | finite, (0, 60] — at 0 a failed host is hit again immediately (§5.4) |
+| `fetch.robots_ttl_seconds` | `ANCHOR_ROBOTS_TTL_SECONDS` | 0 – 86400 (RFC 9309 §2.4 — never cached past 24 hours) |
+| `fetch.rate_limit.requests_per_second` | `ANCHOR_RATE_LIMIT_RPS` | finite > 0 |
+| `fetch.rate_limit.burst` | `ANCHOR_RATE_LIMIT_BURST` | ≥ 1 |
+| `fetch.archive_fallback.enabled` | `ANCHOR_ARCHIVE_FALLBACK_ENABLED` | bool |
+| `fetch.archive_fallback.aggregator` | `ANCHOR_ARCHIVE_AGGREGATOR` | URL or empty (public Wayback CDX — warned when enabled with it empty) |
+| `fetch.archive_fallback.archive_list` | `ANCHOR_ARCHIVE_LIST` | string |
+| `fetch.archive_fallback.timeout_seconds` | `ANCHOR_ARCHIVE_TIMEOUT_SECONDS` | finite > 0 |
+| `anchor.context_chars` | `ANCHOR_CONTEXT_CHARS` | ≥ 8 (the minimum width of a stage-3 context marker — at 0, stage 3 dies wholesale) |
+| `anchor.max_edit_ratio` | `ANCHOR_MAX_EDIT_RATIO` | (0, 1] — above 1, k exceeds the quote length and unrelated sentences become approximate matches |
+| `anchor.max_edit_distance` | `ANCHOR_MAX_EDIT_DISTANCE` | ≥ 1 |
+| `anchor.min_quote_chars` | `ANCHOR_MIN_QUOTE_CHARS` | ≥ 1, at most `short_quote_chars` |
+| `anchor.short_quote_chars` | `ANCHOR_SHORT_QUOTE_CHARS` | ≥ 1 |
+| `anchor.time_budget_ms` | `ANCHOR_TIME_BUDGET_MS` | > 0 |
+| `anchor.hint_radius` | `ANCHOR_HINT_RADIUS` | ≥ 0 |
+| `anchor.max_document_bytes` | `ANCHOR_MAX_DOCUMENT_BYTES` | ≥ 1024 (UTF-8 bytes — §6.2; a cap that cannot even hold a quote plus its context, 432 bytes worst case, makes every anchor permanently UNRESOLVED) |
+| `server.transport` | `ANCHOR_SERVER_TRANSPORT` | `stdio` \| `http` |
 
 ---
 
@@ -1162,6 +1208,12 @@ Reflects stage 6 (accounting, configuration, CLI — clusters 9–11) of the rem
 | 5 | 7.7 | New `disk_bytes` definition: actual occupancy (main+wal+shm), with a WAL checkpoint attempted right before measuring (reported as-is when in concurrent use) | The WAL never shrinks after a checkpoint, so a long-running process reported 13.5× the real load, and VACUUM rewrites the DB into the WAL so disk_bytes *grew* right after gc (D-132) |
 | 6 | 7.7 | Added the `archive` bucket to the displayed breakdown | outcome='archive' entered the denominator but no displayed bucket, so the breakdown did not sum to the request count (D-136) |
 | 7 | 13 | The completion criterion "0 bytes downloaded" is narrowed to **0 body bytes** (measured on cache_hit and direct 304) | Re-confirmation through a redirect alias honestly counts the 3xx hop's interstitial body, so it is nonzero — a corollary of accounting invariant 2 (fallout of D-134) |
+| 8 | **9** | **All 26** documented keys settable through all three paths (TOML, environment, `Config(...)`), with an authoritative key/env/range table. `storage.compression` (`zstd:N`) implemented; the four previously unsettable fields (`retry_backoff_base`, `robots_ttl_seconds`, `max_edit_distance`, `hint_radius`) exposed | Seven environment variables were missing; `compression` existed only in the example without even a Config field (compression itself always ran at hardcoded level 6 — only the knob was fake); four fields could be changed through no path at all. §9 itself had written "implementing only two while writing 'always take precedence' is a mismatch" (D-137) |
+| 9 | 9 | Unknown keys and sections are **warned about on stderr and ignored** (forward compatibility); `enabled=true` with an empty `aggregator` warns that the public Wayback CDX will be used | A typo (`timeuot_seconds`) silently fell back to the default, and a quiet external dependency existed (D-152, D-151) — policy approved by the user on 2026-08-19 |
+| 10 | 9, 5.4 | The UA is validated at load time as an **RFC 9110 field-value** (visible ASCII; leading/trailing whitespace, control characters, newlines, non-ASCII refused) | A UA containing a newline made httpx's `LocalProtocolError` get swallowed as "robots unavailable", reporting **every URL as refused by the site owner** (misattributing a local typo — with archive fallback on, every fetch quietly became an archive bypass); non-ASCII died mid-first-fetch with a traceback (D-139, D-145) |
+| 11 | 9 | Validation extended: section types, non-UTF-8 files, finiteness (`inf`/`nan`), ceilings (`max_content_mb` 1 TiB, `max_redirects` 20, `keep_versions` 2⁶³−1), relations (`min_quote_chars ≤ short_quote_chars`), empty `db_path`, `max_edit_ratio (0,1]`, `context_chars ≥ 8`, `max_document_bytes ≥ 1024` | `fetch = 3` raised a bare `AttributeError`, non-UTF-8 a bare `UnicodeDecodeError`, `inf` a bare `OverflowError` killing every CLI and the server; `1e300` MB, a ratio of `5.0`, a context of 0, and a retention of 2⁶³ all passed silently and surfaced as first-fetch deaths, unrelated sentences presented as ALTERED, wholesale stage-3 loss, and gc tracebacks (D-140, D-141, D-142, D-143, D-144, D-146, D-148, D-151) |
+| 12 | **6.2** | `max_document_bytes` is measured in **UTF-8 bytes** as its name says (truncation on a character boundary; §6.3's withholding rule unchanged), and **k is clamped below the quote length** | Character-count comparison let Hangul pass at up to 3× the documented cap (D-153), and with k ≥ len a deleted CJK quote was presented with an empty string as its "current form" (`ALTERED, found_text=''`) — the configuration cap alone cannot hold the boundary once the writing-system factor of 2.5 is multiplied on (D-143) |
+| 13 | **8** | Every CLI command carries the same error surface (`AnchorError`, `ValueError`, `OSError` → one line + exit 1); store-open failures are the new public exception **`StorageError`**; `serve --transport` validates against the list all three entry points share; `--older-than ""` is refused; `older_than` finiteness is also validated at the service-layer common gate | Corrupt DB, directory, or empty path × 8 commands = all 40 combinations tracebacks (D-138); only `gc --keep 0` diverged into a traceback (D-147); `nan`/`inf` durations died in `timedelta` (D-149); a serve typo quietly started stdio (D-150); an empty `--older-than` became a full re-verification (D-154) |
 
 ## 16. v1.8 → v1.9 Change History
 

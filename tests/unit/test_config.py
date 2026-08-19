@@ -75,7 +75,7 @@ def test_full_toml_round_trip(tmp_path):
     assert config.min_quote_chars == 10
     assert config.short_quote_chars == 20
     assert config.time_budget_ms == 100
-    assert config.max_match_chars == 1_000_000
+    assert config.max_document_bytes == 1_000_000
     assert config.server_transport == "http"
 
 

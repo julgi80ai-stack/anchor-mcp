@@ -204,7 +204,7 @@ def test_truncated_document_does_not_claim_missing():
     selector = build_selector(text, "여기 인용문이 문서 뒤쪽에 있습니다 정말로.")
     result = match_anchor(
         text, exact=selector.exact, prefix=selector.prefix, suffix=selector.suffix,
-        position_hint=selector.position_hint, budget_ms=500, max_chars=100,
+        position_hint=selector.position_hint, budget_ms=500, max_bytes=100,
     )
     assert result.truncated is True
     assert result.state != "MISSING"

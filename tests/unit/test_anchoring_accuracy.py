@@ -210,11 +210,12 @@ def test_quote_cut_by_the_document_limit_is_not_reported_as_altered():
     본문이 실제로 그렇게 바뀐 줄 안다.
     """
     quote = "이 문장은 문서 상한 경계에 정확히 걸쳐 있으며 뒤쪽 절반이 잘려나간다"
-    limit = 4096
+    # 상한은 **바이트**다 (D-153) — 한글은 3바이트/자라 경계를 바이트로 잡는다.
+    head = "가" * 1000
     # 잘린 양이 k 이하일 때가 결함 구간이다 — 그보다 크면 애초에 못 찾는다.
-    head = "가" * (limit - len(quote) + 4)
+    limit = len(head.encode("utf-8")) + len(quote.encode("utf-8")) - 3 * 4
     text = head + quote + "그리고 문서는 계속 이어진다." * 50
-    result = _match(text, quote, max_chars=limit)
+    result = _match(text, quote, max_bytes=limit)
     assert result.truncated
     assert result.state == UNRESOLVED, f"잘린 조각을 현재 모습으로 제시했다 ({result.state})"
 
@@ -224,7 +225,7 @@ def test_truncation_does_not_erase_a_real_finding():
     quote = "위원회는 기초연구 지원을 전년 대비 12퍼센트 증액하기로 의결했다"
     revised = quote.replace("12퍼센트", "15퍼센트")
     text = revised + "\n" + "나" * 8000
-    result = _match(text, quote, max_chars=4096)
+    result = _match(text, quote, max_bytes=4096)
     assert result.truncated
     assert result.state == ALTERED
 

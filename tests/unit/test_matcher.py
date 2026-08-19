@@ -147,7 +147,7 @@ def test_unresolved_when_budget_exhausted(quote):
 
 def test_truncation_flag_on_oversized_document():
     quote = QUOTES[0]
-    result = run_match(BASE_TEXT, quote, max_chars=100)  # 인용문이 잘려나간 앞부분 밖
+    result = run_match(BASE_TEXT, quote, max_bytes=100)  # 인용문이 잘려나간 앞부분 밖
     assert result.truncated is True
 
 

@@ -7,6 +7,7 @@ v0.1 완료 기준: 같은 URL 두 번 호출 시 두 번째가 네트워크 0�
 from __future__ import annotations
 
 import functools
+import math
 import threading
 import time
 from collections.abc import Callable
@@ -136,7 +137,12 @@ class Anchor:
 
     def __init__(self, db_path: Path | str | None = None, config: Config | None = None) -> None:
         self._config = config or load_config()
-        self._repository = Repository(db_path or self._config.db_path)
+        self._repository = Repository(
+            db_path or self._config.db_path,
+            # 압축 레벨은 설정 키다 (D-137). zstd 프레임은 자기서술적이라
+            # 레벨을 바꿔도 이미 저장된 버전은 그대로 읽힌다.
+            compression_level=self._config.zstd_level,
+        )
         # 리다이렉트를 자동으로 따라가지 않는다 — 목적지마다 robots를 다시
         # 판정해야 하므로 페처가 홉을 직접 관리한다 (D-001).
         self._client = httpx.Client(
@@ -465,6 +471,16 @@ class Anchor:
             )
         if isinstance(older_than, str):
             older_than = parse_iso_duration(older_than)
+        if older_than is not None and not (
+            math.isfinite(older_than) and older_than >= 0
+        ):
+            # `nan`·`inf`·음수는 `iso_ago`의 `timedelta`에서 ValueError/
+            # OverflowError로 죽는다. CLI만 막으면(D-149) MCP 도구와 라이브러리
+            # 직접 호출이 그대로 남는다 — 공통 길목인 여기서도 거부한다.
+            raise ValueError(
+                f"older_than must be a finite, non-negative number of seconds — "
+                f"older_than은 유한한 0 이상의 초여야 합니다: {older_than!r}"
+            )
         cutoff = iso_ago(older_than) if older_than is not None else None
         anchors = self._repository.select_anchors(
             anchor_ids=anchor_ids, document_ids=document_ids, not_verified_since=cutoff
@@ -578,7 +594,7 @@ class Anchor:
                     max_edit_ratio=self._config.max_edit_ratio,
                     max_edit_distance=self._config.max_edit_distance,
                     hint_radius=self._config.hint_radius,
-                    max_chars=self._config.max_match_chars,
+                    max_bytes=self._config.max_document_bytes,
                 )
                 elapsed_ms = int((time.monotonic() - match_started) * 1000)
                 self._repository.insert_verification(

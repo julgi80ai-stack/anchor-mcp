@@ -35,7 +35,8 @@ from mcp_types import (
 
 from anchor import __version__
 from anchor.anchoring import approx
-from anchor.config import Config, load_config
+from anchor.config import SERVER_TRANSPORTS, Config, load_config
+from anchor.errors import AnchorError
 from anchor.models import parse_iso, utcnow_iso, uuid7
 from anchor.service import Anchor
 
@@ -648,15 +649,23 @@ def main() -> None:
     parser.add_argument("--db", type=Path, default=None, help="SQLite 경로 (기본 ~/.anchor/store.db)")
     parser.add_argument(
         "--transport",
-        choices=["stdio", "http"],
+        # 세 진입점이 **같은 사전**을 본다 (D-150).
+        choices=list(SERVER_TRANSPORTS),
         default=None,
         help="전송 방식 (기본: 설정 파일의 [server].transport, 없으면 stdio)",
     )
     args = parser.parse_args()
 
-    config = load_config()
-    transport = args.transport or config.server_transport
-    server, service = build_server(db_path=args.db, config=config)
+    try:
+        config = load_config()
+        transport = args.transport or config.server_transport
+        server, service = build_server(db_path=args.db, config=config)
+    except AnchorError as error:
+        # 설정 오류·저장소 오류로 서버가 못 뜨는 것은 정상적인 실패다.
+        # 트레이스백을 stdio로 토해내면 MCP 클라이언트가 프로토콜 오류로
+        # 읽는다 — 사실을 한 줄로 말하고 비정상 종료한다 (D-138·D-141).
+        print(f"anchor-mcp 실패: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
     serve_forever(server, service, transport)
 
 

@@ -14,7 +14,7 @@
 | 준거 스펙 | RFC 7089, RFC 9110 (조건부 요청), W3C Web Annotation Data Model, MCP 2026-07-28 |
 | 설계 근거 | `docs/decisions/0001` (선행기술·포지셔닝), `docs/decisions/0002` (라이선스·재사용) |
 
-> **v1.9 → v1.10 변경 요약**: 2차 감사 결함 중 **6단계(회계·설정·CLI, 군집 9~11)** 의 조치를 반영한다. 회계에 두 불변식을 세웠다 — 사용자 호출 1회 = `fetch_log` 1행(outcome은 최종 결과), 실패로 끝나도 실제로 내려받은 바이트는 전부 계상(§7.7). `bytes_saved_estimate`를 현재 서빙 본문 기준으로 정정하고, `disk_bytes`를 WAL 회수 후 실점유로 정의하고, `archive` 버킷을 내역에 추가해 내역 합 = 총계를 회복했다(§7.7, §13). 경합 게이트의 판정을 전경 기준선 대비 UNRESOLVED 증분에서 **크레딧 실지급**으로 교체했다(§10). 전체 목록은 §15 참조.
+> **v1.9 → v1.10 변경 요약**: 2차 감사 결함 중 **6단계(회계·설정·CLI, 군집 9~11)** 의 조치를 반영한다. 회계에 두 불변식을 세웠다 — 사용자 호출 1회 = `fetch_log` 1행(outcome은 최종 결과), 실패로 끝나도 실제로 내려받은 바이트는 전부 계상(§7.7). `bytes_saved_estimate`를 현재 서빙 본문 기준으로 정정하고, `disk_bytes`를 WAL 회수 후 실점유로 정의하고, `archive` 버킷을 내역에 추가해 내역 합 = 총계를 회복했다(§7.7, §13). 경합 게이트의 판정을 전경 기준선 대비 UNRESOLVED 증분에서 **크레딧 실지급**으로 교체했다(§10). 설정은 문서화된 26개 키 전부를 세 경로(TOML·환경변수·라이브러리)로 열고 검증 표를 정본화했으며, 미지 키는 경고 후 무시한다(§9). `max_document_bytes`는 이름대로 UTF-8 바이트로 재고 k는 인용문 길이 미만으로 클램프한다(§6.2). CLI는 전 명령이 트레이스백 없는 오류 표면을 지고, 저장소 개방 실패는 `StorageError`로 도메인화됐다(§8). 전체 목록은 §15 참조.
 >
 > **v1.8 → v1.9 변경 요약**: 2차 감사 결함 중 **5단계(Tasks·서버, 군집 8)** 의 조치를 반영했다. Task ttl 정책을 세우고(미지정은 기본 30분, 0·음수 거부, 24시간 클램프, 응답에 ttl 항상 명시 — §7.0), 보존 기간을 생성 시점 기준으로 정정하되 종결 시 실제 보존 기간으로 갱신하고(§7.0), 서버 종료가 **워커 종료를 실제로 보장**하게 하고(§7.0), 취소가 앵커 단위로 반응하게 했다(§7.0). 캐시 히트 게이트를 **백그라운드 매칭 부하 중에도** 성립하는 것으로 강화하고 벤치마크에 부하 시나리오를 신설했다(§10). `list_documents`의 status와 `verify_citations`의 time_budget_ms를 세 경로 공통으로 검증한다(§7.6, §7.3). 전체 목록은 §16 참조.
 >
@@ -545,7 +545,11 @@ class Anchor:
 # 0.462), 그 순간 k가 2.5배 작아져 두 글자 교체가 MISSING이 된다.
 밀도 = 한자·가나 비율            # 0.0 ~ 1.0 (공백 제외, 한글 제외)
 ratio = 0.15 * (1.0 + 1.5 * 밀도)   # 밀도 0 → ×1.0, 밀도 1 → ×2.5
-k = max(1, min(int(len(exact) * ratio), 64))
+k = max(1, min(int(len(exact) * ratio), 64, len(exact) - 1))
+# k는 인용문 길이보다 작아야 한다 (v1.10, D-143): k >= len(exact)이면 "전부
+# 지우고 다른 것 넣기"가 허용 범위에 들어와 아무 문장이나 근사 일치가 된다.
+# 설정 상한(max_edit_ratio <= 1)만으로는 문자 체계 계수(최대 2.5)가 곱해져
+# 이 경계가 지켜지지 않는다.
 ```
 
 구현 우선순위:
@@ -584,6 +588,8 @@ k = max(1, min(int(len(exact) * ratio), 64))
 | `quality = SHORT` | 100 ms |
 | 문서 길이 상한 | 2 MB (초과 시 앞 2MB만 탐색, `TRUNCATED` 플래그) |
 
+> **측정 단위 (v1.10)**: `anchor.max_document_bytes`는 이름 그대로 **UTF-8 바이트**로 잰다. 문자 수로 재면 한글(3바이트/자)에서 문서화된 상한의 3배까지 통과한다. 상한 초과 시 절단은 문자 경계에서 이뤄지고, 절단된 문서의 MISSING/ALTERED 단정 보류 규칙(§6.3)은 불변이다.
+>
 > **실효 한계 (v1.7 명시)**: 위 2MB는 **저장·탐색 범위의 상한**이지 4단계가 예산 안에 훑을 수 있는 크기가 아니다. Myers 코어 스캔은 순수 파이썬 O(n)이고 실측 처리량이 약 2.0M자/초라, 64자 초과 인용문(코어 2개 × 전문 스캔)은 200ms 예산에서 **약 19만 자**가 실효 한계다. 그보다 큰 문서에서 3단계가 실패하면 4단계는 판정을 내지 못하고 `UNRESOLVED`가 된다. 이것은 결함이 아니라 계약의 귀결이다 — 모르는 것을 모른다고 말하는 쪽을 택한 결과이며, 예산을 늘리면 그만큼 넓어진다. 큰 문서에서 UNRESOLVED가 잦다면 `time_budget_ms`를 올리는 것이 정해진 답이다.
 
 **모르는 것을 모른다고 말하는 것이 틀린 답을 빠르게 주는 것보다 낫다.** 배치 검증에서 앵커 하나가 전체를 멈추게 해서는 안 된다.
@@ -872,6 +878,8 @@ anchor gc --keep 20
 anchor serve --transport stdio               # MCP 서버 (v1.3; anchor-mcp와 동일)
 ```
 
+**오류 표면** (v1.10): 저장소를 열 수 없는 실패(손상 DB·디렉터리 경로·권한·빈 경로)는 저장소 계층에서 도메인 예외 `anchor.errors.StorageError`(`AnchorError` 하위)로 감싼다 — 라이브러리 직접 사용도 같은 보장을 받는다. CLI는 전 명령이 같은 오류 표면을 진다: `AnchorError`·`ValueError`·`OSError`는 `실패: …` 한 줄과 종료 코드 1이다(트레이스백 없음 — 트레이스백은 "도구가 깨졌다"는 뜻인데 사용자의 오타는 그런 뜻이 아니다). `anchor serve --transport`는 `stdio|http`만 받고(세 진입점이 같은 목록을 공유한다), `--older-than ""`는 "필터 없음"이 아니라 오류다 — 지정하지 않은 것과 빈 값은 다르다. 서버 진입점(`anchor-mcp`·`anchor serve`)은 설정·저장소 오류를 stderr 한 줄로 알리고 비정상 종료한다 — 트레이스백을 stdio로 토하면 MCP 클라이언트가 프로토콜 오류로 읽는다.
+
 MCP 클라이언트 등록용 진입점은 콘솔 스크립트 `anchor-mcp`다 (v1.3).
 
 ---
@@ -888,9 +896,11 @@ MCP 클라이언트 등록용 진입점은 콘솔 스크립트 `anchor-mcp`다 (
 | `max_content_mb = 0.5` | 소수를 받는다. 정수로 절삭하면 상한이 0바이트가 되어 모든 페치가 실패한다 |
 | `requests_per_second = 0` | 0은 "무제한"이 아니라 0으로 나누기다. 양수만 받는다 |
 
-환경변수는 문서화된 설정 키 전반을 덮어쓴다(`ANCHOR_DB_PATH`, `ANCHOR_TIMEOUT_SECONDS`, `ANCHOR_RATE_LIMIT_RPS` 등). 두 개만 구현하고 "항상 우선한다"고 적는 것은 사양과 구현의 불일치다.
+문서화된 26개 키는 **전부** 세 경로 — TOML 파일, 환경변수, 라이브러리 직접(`Config(...)`) — 로 설정되고 같은 검증을 받는다 (v1.10). 두 개만 구현하고 "항상 우선한다"고 적는 것은 사양과 구현의 불일치다. 키·환경변수·허용 범위는 아래 표가 정본이다.
 
 값 검증은 **겹침이 끝난 최종 상태**에 대해서만 한다 (v1.8). 파일 값을 적용한 중간 상태에서 검증하면, 파일의 잘못된 값을 환경변수가 덮도록 배포한 구성에서 서버가 아예 뜨지 않는다 — "항상 우선"이 검증 시점 하나로 무너진다. 검증 자체는 `Config` 생성 시점에 이뤄지므로(§5.4의 UA 규칙 포함) 라이브러리 직접 사용도 같은 보장을 받는다.
+
+**미지 키·미지 섹션은 stderr 경고 후 무시한다** (v1.10). 오류로 거부하면 앞으로 생길 키를 쓰는 설정 파일이 구버전에서 아예 뜨지 않아 전방 호환이 깨지고, 조용히 무시하면 오타 하나(`timeuot_seconds`)가 기본값을 쓰게 만들고 그 사실을 아무도 모른다. 섹션 자리에 스칼라·배열이 오는 것(`fetch = 3`)과 비UTF-8 파일은 `ConfigError`다. `archive_fallback.enabled = true`인데 `aggregator`가 비어 있으면 공개 Wayback CDX를 쓴다는 사실을 stderr로 알린다 — 조용한 외부 의존을 두지 않는다(§5.2).
 
 ```toml
 [storage]
@@ -905,6 +915,8 @@ timeout_seconds  = 30
 max_redirects    = 5
 max_content_mb   = 8
 default_max_age  = 86400
+retry_backoff_base = 1.0       # 재시도 지수 백오프의 밑 (v1.10 노출)
+robots_ttl_seconds = 86400     # robots.txt 캐시 수명 — RFC 9309 §2.4 상한 (v1.10 노출)
 
 [fetch.rate_limit]
 requests_per_second = 1.0
@@ -920,7 +932,9 @@ timeout_seconds = 20
 
 [anchor]
 context_chars       = 48
-max_edit_ratio      = 0.15     # k = len(exact) * 이 값, 최대 64
+max_edit_ratio      = 0.15     # k = len(exact) * 이 값, 최대 max_edit_distance
+max_edit_distance   = 64       # k의 절대 상한 (v1.10 노출)
+hint_radius         = 500      # 1단계 힌트 탐색 반경 (v1.10 노출)
 min_quote_chars     = 12       # 미만은 생성 거부
 short_quote_chars   = 32       # 미만은 SHORT 경고
 time_budget_ms      = 200
@@ -929,6 +943,37 @@ max_document_bytes  = 2097152
 [server]
 transport = "stdio"   # stdio | http
 ```
+
+**키·환경변수·허용 범위** (v1.10 — 이 표가 정본이며, "문서화된 키"란 이 표의 26개다):
+
+| 키 | 환경변수 | 허용 범위 |
+|---|---|---|
+| `storage.db_path` | `ANCHOR_DB_PATH` | 비어 있지 않은 파일 경로 (`""`·`.` 거부) |
+| `storage.keep_versions` | `ANCHOR_KEEP_VERSIONS` | 1 ~ 2⁶³−1 (SQLite 정수 범위) |
+| `storage.compression` | `ANCHOR_COMPRESSION` | `zstd:N`, N은 1~22 (`none`·타 코덱 미지원 — 저장 포맷은 하나다) |
+| `fetch.user_agent` | `ANCHOR_USER_AGENT` | RFC 9110 field-value: 가시 ASCII(+안쪽 SP/HTAB), 선두·말미 공백·제어문자·개행·비ASCII 거부 |
+| `fetch.respect_robots` | `ANCHOR_RESPECT_ROBOTS` | bool |
+| `fetch.timeout_seconds` | `ANCHOR_TIMEOUT_SECONDS` | 유한수 > 0 |
+| `fetch.max_redirects` | `ANCHOR_MAX_REDIRECTS` | 0 ~ 20 |
+| `fetch.max_content_mb` | `ANCHOR_MAX_CONTENT_MB` | 유한수, 0 초과 ~ 1,048,576 MB(1 TiB) |
+| `fetch.default_max_age` | `ANCHOR_DEFAULT_MAX_AGE` | ≥ 0 |
+| `fetch.retry_backoff_base` | `ANCHOR_RETRY_BACKOFF_BASE` | 유한수, (0, 60] — 0이면 실패한 호스트를 즉시 다시 때린다(§5.4) |
+| `fetch.robots_ttl_seconds` | `ANCHOR_ROBOTS_TTL_SECONDS` | 0 ~ 86400 (RFC 9309 §2.4 — 24시간 넘겨 캐시하지 않는다) |
+| `fetch.rate_limit.requests_per_second` | `ANCHOR_RATE_LIMIT_RPS` | 유한수 > 0 |
+| `fetch.rate_limit.burst` | `ANCHOR_RATE_LIMIT_BURST` | ≥ 1 |
+| `fetch.archive_fallback.enabled` | `ANCHOR_ARCHIVE_FALLBACK_ENABLED` | bool |
+| `fetch.archive_fallback.aggregator` | `ANCHOR_ARCHIVE_AGGREGATOR` | URL 또는 빈 값(공개 Wayback CDX — 켠 채 비면 경고) |
+| `fetch.archive_fallback.archive_list` | `ANCHOR_ARCHIVE_LIST` | 문자열 |
+| `fetch.archive_fallback.timeout_seconds` | `ANCHOR_ARCHIVE_TIMEOUT_SECONDS` | 유한수 > 0 |
+| `anchor.context_chars` | `ANCHOR_CONTEXT_CHARS` | ≥ 8 (매처 3단계 문맥 표지의 최소 폭 — 0이면 3단계가 통째로 죽는다) |
+| `anchor.max_edit_ratio` | `ANCHOR_MAX_EDIT_RATIO` | (0, 1] — 1 초과면 k가 인용문 길이를 넘어 무관한 문장이 근사 일치가 된다 |
+| `anchor.max_edit_distance` | `ANCHOR_MAX_EDIT_DISTANCE` | ≥ 1 |
+| `anchor.min_quote_chars` | `ANCHOR_MIN_QUOTE_CHARS` | ≥ 1, `short_quote_chars` 이하 |
+| `anchor.short_quote_chars` | `ANCHOR_SHORT_QUOTE_CHARS` | ≥ 1 |
+| `anchor.time_budget_ms` | `ANCHOR_TIME_BUDGET_MS` | > 0 |
+| `anchor.hint_radius` | `ANCHOR_HINT_RADIUS` | ≥ 0 |
+| `anchor.max_document_bytes` | `ANCHOR_MAX_DOCUMENT_BYTES` | ≥ 1024 (UTF-8 바이트 — §6.2. 인용문+문맥 최악 432바이트도 못 담는 상한은 모든 앵커를 영구 UNRESOLVED로 만든다) |
+| `server.transport` | `ANCHOR_SERVER_TRANSPORT` | `stdio` \| `http` |
 
 ---
 
@@ -1148,6 +1193,12 @@ Anchor는 다음 성과 위에 서 있다. README와 문서에 명시한다.
 | 5 | 7.7 | `disk_bytes` 정의 신설: 실점유 바이트(본체+wal+shm), 측정 직전 WAL 회수 시도(동시 사용 중이면 그 순간 그대로) | WAL은 체크포인트 뒤에도 줄지 않아 장기 실행 프로세스에서 13.5배 과대, VACUUM이 DB를 WAL로 다시 써 gc 직후 disk_bytes가 오히려 증가했다 (D-132) |
 | 6 | 7.7 | `archive` 버킷을 표시 내역에 추가 | outcome='archive'가 분모에는 들어가나 어느 표시 버킷에도 없어 내역 합 ≠ 총 요청 수 (D-136) |
 | 7 | 13 | 완료 기준 "다운로드 바이트 0"을 **본문 0**(cache_hit·직접 304 기준)으로 한정 | 리다이렉트 별칭 경유 재확인은 3xx 홉의 안내 본문이 정직하게 계상돼 0이 아니다 — 회계 불변식 2의 따름 정리 (D-134의 여파) |
+| 8 | **9** | 문서화된 26개 키 **전부** 세 경로(TOML·환경변수·`Config(...)`) 설정 + 키·환경변수·허용 범위 표를 정본화. `storage.compression`(`zstd:N`) 구현, 설정 불가였던 4개 필드(`retry_backoff_base`·`robots_ttl_seconds`·`max_edit_distance`·`hint_radius`) 노출 | 환경변수 7개 누락, `compression`은 Config 필드조차 없이 예시에만 존재(압축 자체는 레벨 6 하드코딩으로 상시 동작 — 키만 가짜), 4개 필드는 어느 경로로도 못 바꿨다. §9 자신이 "두 개만 구현하고 항상 우선한다고 적는 것은 불일치"라 적어 두고 있었다 (D-137) |
+| 9 | 9 | 미지 키·미지 섹션은 **stderr 경고 후 무시**(전방 호환), `enabled=true`+빈 `aggregator`는 공개 Wayback CDX 사용을 경고 | 오타(`timeuot_seconds`)가 무경고로 기본값을 쓰게 만들었고, 조용한 외부 의존이 생겼다 (D-152, D-151) — 정책은 2026-08-19 사용자 승인 |
+| 10 | 9, 5.4 | UA는 로드 시점에 **RFC 9110 field-value**(가시 ASCII, 선두·말미 공백·제어문자·개행·비ASCII 거부)로 검증 | 개행 든 UA는 httpx `LocalProtocolError`가 "robots 판정 불능"으로 삼켜져 **모든 URL이 사이트 소유자의 거부로 보고**됐고(로컬 오타의 오귀속 — 아카이브 폴백이 켜져 있으면 전 페치가 조용히 아카이브 우회), 비ASCII는 첫 페치 도중 트레이스백이었다 (D-139, D-145) |
+| 11 | 9 | 값 검증 확장: 섹션 타입·비UTF-8 파일·유한성(`inf`/`nan`)·상한(`max_content_mb` 1 TiB, `max_redirects` 20, `keep_versions` 2⁶³−1)·관계(`min_quote_chars ≤ short_quote_chars`)·`db_path` 빈 값·`max_edit_ratio (0,1]`·`context_chars ≥ 8`·`max_document_bytes ≥ 1024` | `fetch = 3`이 생 `AttributeError`, 비UTF-8이 생 `UnicodeDecodeError`, `inf`가 생 `OverflowError`로 전 CLI·서버를 죽였고, `1e300` MB·`5.0` 비율·0 문맥·2⁶³ 보존이 조용히 통과해 각각 첫 페치·무관 문장의 ALTERED 제시·3단계 전멸·gc 트레이스백으로 나타났다 (D-140, D-141, D-142, D-143, D-144, D-146, D-148, D-151) |
+| 12 | **6.2** | `max_document_bytes`는 이름대로 **UTF-8 바이트**로 측정(절단은 문자 경계, §6.3 보류 규칙 불변), **k는 인용문 길이 미만으로 클램프** | 문자 수 비교라 한글에서 문서화된 상한의 3배까지 통과했고(D-153), k ≥ len이면 삭제된 CJK 인용문에 빈 문자열이 "현재 모습"(`ALTERED, found_text=''`)으로 제시됐다 — 설정 상한만으론 문자 체계 계수 2.5가 곱해져 경계가 안 지켜진다 (D-143) |
+| 13 | **8** | CLI 전 명령이 같은 오류 표면(`AnchorError`·`ValueError`·`OSError` → 한 줄 + exit 1), 저장소 개방 실패는 신규 공개 예외 **`StorageError`**, `serve --transport`는 세 진입점 공유 목록으로 검증, `--older-than ""` 거부, `older_than` 유한성은 서비스 공통 길목에서도 검증 | 손상 DB·디렉터리·빈 경로 × 8명령 = 40조합 전부 트레이스백(D-138), `gc --keep 0`만 트레이스백으로 갈렸고(D-147), `nan`·`inf` 기간이 `timedelta`에서 죽고(D-149), serve 오타가 조용히 stdio로 떴고(D-150), 빈 `--older-than`이 전체 재검증이 됐다(D-154) |
 
 ## 16. v1.8 → v1.9 변경 이력
 
