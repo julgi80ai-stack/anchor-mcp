@@ -12,8 +12,10 @@ import time
 
 import pytest
 
+import anchor.fetcher.ratelimit as ratelimit
 from anchor.fetcher.client import MAX_RETRY_AFTER_SECONDS, _parse_retry_after
 from anchor.fetcher.ratelimit import HostRateLimiter
+from tests import fake_clock
 
 
 # -- D-004 / D-005 Retry-After ----------------------------------------------
@@ -96,9 +98,20 @@ def test_concurrent_acquire_respects_rate():
     assert elapsed >= 0.5, f"레이트 제한이 무력화됐다 ({elapsed:.2f}s)"
 
 
-def test_sequential_rate_is_unchanged():
+def test_sequential_rate_is_unchanged(monkeypatch):
+    """버스트 뒤의 간격은 정확히 1/rate다 — 주입한 시계로 못박는다 (D-224).
+
+    예전에는 벽시계 구간(`0.25 <= elapsed < 0.6`)으로 쟀다. 상한은 "느리면
+    실패"이고 그건 계약이 아니다 — macOS CI 러너에서 코드 변경 없이 0.624s·
+    0.740s로 빨개졌다(3.11·3.12). 반대로 상한을 넉넉히 풀면 잡아야 할 회귀
+    (버스트 무시 → 0.5s, 대기량 오산 → 0.4~0.6s)가 그 안에 숨는다. 시계를
+    주입하면 잠든 **값**을 직접 단언할 수 있어 상한이 필요 없어지고 판별력은
+    올라간다. 실제로 시간이 흐르는지는 위의 실시간 시험이 지킨다.
+    """
+    clock = fake_clock.install(monkeypatch, ratelimit)
     limiter = HostRateLimiter(rate=10.0, burst=2)
-    started = time.monotonic()
     for _ in range(5):
         limiter.acquire("example.invalid")
-    assert 0.25 <= time.monotonic() - started < 0.6
+    # 버스트 2개는 즉시, 나머지 3개는 각각 정확히 1/rate = 0.1초를 기다린다.
+    assert clock.slept == [pytest.approx(0.1)] * 3, clock.slept
+    fake_clock.assert_close(clock.elapsed, 0.3, what="5회 acquire의 총 대기")

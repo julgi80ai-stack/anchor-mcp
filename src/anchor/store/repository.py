@@ -248,7 +248,22 @@ class Repository:
                 "database path must not be empty — DB 경로가 비어 있습니다"
             )
         db_path = Path(db_path).expanduser()
-        if db_path.is_dir():
+        try:
+            path_is_a_directory = db_path.is_dir()
+        except OSError as error:
+            # D-225: 이 물음 자체가 실패할 수 있다. Python 3.12의 `Path.is_dir()`은
+            # ENOENT·ENOTDIR·EBADF·ELOOP만 삼키고 그 밖의 `OSError`는 그대로
+            # 올린다 — 이름이 너무 긴 `--db`(POSIX ENAMETOOLONG / Windows
+            # MAX_PATH 초과)가 그 예다. 이 줄이 아래 try 밖에 있어서, D-138이
+            # 저장소 계층에 두기로 한 보장을 라이브러리 직접 호출자(SPEC §8)가
+            # 받지 못하고 생 트레이스백을 봤다. CLI에서는 D-033의
+            # `except OSError` 그물에 걸려 문장으로 나가므로 CLI 시험만으로는
+            # 드러나지 않는다 — 두 입구에 같은 계약을 걸어야 보인다.
+            raise StorageError(
+                f"cannot open database {db_path}: {error} — "
+                f"저장소를 열 수 없습니다: {db_path}"
+            ) from error
+        if path_is_a_directory:
             raise StorageError(
                 f"database path is a directory: {db_path} — "
                 "DB 경로가 디렉터리입니다 (파일 경로를 지정하세요)"

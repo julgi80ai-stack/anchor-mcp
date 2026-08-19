@@ -12,10 +12,10 @@
 
 from __future__ import annotations
 
-import time
-
+import anchor.anchoring.budget as budget_module
 from anchor.anchoring import approx, matcher
 from anchor.anchoring.budget import _CREDIT_CAP_FRACTION, Budget
+from tests import fake_clock
 
 
 def _count_yields(monkeypatch) -> dict:
@@ -78,9 +78,15 @@ def test_yield_time_is_not_charged_to_the_anchor_budget(monkeypatch):
     """D-196: 배경 워커가 양보로 잠든 시간이 앵커 예산에서 청구되면 같은
     앵커가 동기 경로에서는 MISSING, task 경로에서는 UNRESOLVED가 된다 —
     §7.3이 task를 기본 경로로 정하므로 낮은 한계가 기본이 된다. 양보는
-    잠든 만큼 예산을 뒤로 민다(판정은 호출 경로와 무관해야 한다)."""
-    real_sleep = time.sleep
-    monkeypatch.setattr("time.sleep", lambda s: real_sleep(0.02))  # 양보가 20ms를 잠들었다고 치자
+    잠든 만큼 예산을 뒤로 민다(판정은 호출 경로와 무관해야 한다).
+
+    D-224: 예산과 양보가 **같은** 가상 시계를 본다. 예전에는 진짜로 20ms를
+    자고 허용오차 5ms로 쟀는데, 그 5ms는 잠듦이 아니라 잠든 전후의 재스케줄
+    지연을 덮는 값이라 부하 걸린 러너에서 부족했다(macOS 3.11 실측 5.5ms
+    초과 → 빨강). 상환은 시간이 아니라 **뺄셈**이므로 뺄셈으로 잰다 —
+    허용오차가 0이 되어 "조금씩 새는" 회귀까지 잡는다.
+    """
+    clock = fake_clock.install(monkeypatch, approx, budget_module, sleep_floor=0.020)
     approx._yield_state.last = 0.0
     approx.set_thread_yields(True)
     try:
@@ -89,9 +95,8 @@ def test_yield_time_is_not_charged_to_the_anchor_budget(monkeypatch):
             before = budget.remaining_seconds()
             approx._yield_gil(budget)
             after = budget.remaining_seconds()
-        assert after > before - 0.005, (
-            f"양보로 잠든 20ms가 예산에서 빠졌다 (남은 예산 {before*1000:.1f}ms → {after*1000:.1f}ms)"
-        )
+        assert clock.slept == [0], f"배경 워커가 양보로 잠들지 않았다 ({clock.slept})"
+        fake_clock.assert_close(after, before, what="양보 전후의 남은 예산")
     finally:
         approx.set_thread_yields(False)
 
@@ -115,7 +120,7 @@ def test_no_sleep_when_no_foreground_call_is_active(monkeypatch):
         approx.set_thread_yields(False)
 
 
-def test_budget_credit_is_capped():
+def test_budget_credit_is_capped(monkeypatch):
     """D-203: 크레딧 무상한은 "앵커 하나의 예산"을 탄력적으로 만든다 —
     경합 실측 앵커당 최대 971ms(예산의 4.9배), 서비스 계층 p99 345·478ms로
     §10 "최악 사례 p99 < 250ms" 위반. D-196이 없앤 판정의 경로 의존이
@@ -135,22 +140,18 @@ def test_budget_credit_is_capped():
 
     budget_ms = 100.0
     cap = budget_ms / 1000.0 * _CREDIT_CAP_FRACTION
+    fake_clock.install(monkeypatch, budget_module)  # D-224: 지터 여유를 없앤다
     budget = Budget(budget_ms)
     r0 = budget.remaining_seconds()
     budget.credit(cap * 10)  # 상한의 열 배를 요청해도 상한까지만 인정된다
     r1 = budget.remaining_seconds()
-    granted = r1 - r0
-    # 남은 시간은 벽시계로 재므로 두 측정 사이에 흐른 만큼 줄어든다. 그
-    # 지터(아래 여유)를 빼면 인정량은 정확히 상한이어야 한다.
-    jitter = 0.005
-    assert cap - jitter < granted <= cap, (
-        f"상한 {cap * 1000:.1f}ms만 인정돼야 한다 (실제 연장 {granted * 1000:.1f}ms)"
-    )
+    # 예전에는 벽시계로 재느라 5ms의 지터 여유를 뒀다. 그 여유는 상한이
+    # 5% 어긋나도 초록이고(100ms 예산의 5ms), 부하 걸린 러너에서는 반대로
+    # 회귀 없이 빨개진다 — 시계를 멈추면 양쪽 다 사라진다.
+    fake_clock.assert_close(r1 - r0, cap, what="인정된 크레딧")
     budget.credit(cap * 10)  # 상한 소진 후에는 더 밀리지 않는다
     r2 = budget.remaining_seconds()
-    assert (r2 - r1) <= 0, (
-        f"상한 소진 후에도 예산이 밀렸다 (+{(r2 - r1) * 1000:.1f}ms)"
-    )
+    fake_clock.assert_close(r2 - r1, 0.0, what="상한 소진 후의 추가 연장")
 
 
 def test_all_public_service_methods_are_foreground_marked(tmp_path):

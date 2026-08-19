@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+import anchor.store.repository as repository_module
 from anchor.errors import StorageError
 from anchor.store.repository import (
     MIGRATION_FILES,
@@ -24,6 +25,7 @@ from anchor.store.repository import (
     Repository,
     _split_statements,
 )
+from tests import fake_clock
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 V1_SCHEMA = FIXTURES / "schema_v1.sql"
@@ -437,7 +439,20 @@ def test_readonly_db_fails_fast_without_wal_retry(tmp_path):
     CLI는 명령마다 저장소를 열므로 그 대기를 매번 문다.
     """
     import os
-    import time as _time
+    import sys
+
+    if sys.platform == "win32":
+        # Windows에는 이 조건이 없다 (D-223). CPython `os.chmod` 문서: Windows에서는
+        # 파일의 읽기 전용 플래그만 설정할 수 있고 나머지 비트는 무시된다 —
+        # 디렉터리 권한은 아예 만들어지지 않는다. CI 실측(windows-latest 3.11·
+        # 3.12·3.13)에서 chmod 뒤에도 `Repository(path)`는 예외 없이 열렸고,
+        # `os.access(path, os.W_OK)` 가드는 통과해 버려 시험을 막지도 못했다.
+        #
+        # 계약 자체(경합이 아닌 실패는 재시도하지 않는다)는 아래
+        # `test_non_contention_failure_is_not_retried`가 플랫폼 없이 고정한다.
+        # 여기서 재는 것은 그 위의 사실 하나 — **실제 읽기 전용 DB가 정말로
+        # "경합 아님"으로 분류되는가** — 이고, 그것은 POSIX에서만 만들 수 있다.
+        pytest.skip("Windows에는 POSIX 권한 비트가 없다 — 계약은 스텁 시험이 지킨다")
 
     path = tmp_path / "readonly.db"
     Repository(path).close()
@@ -448,17 +463,82 @@ def test_readonly_db_fails_fast_without_wal_retry(tmp_path):
     os.chmod(path, 0o444)
     os.chmod(tmp_path, 0o555)
     try:
-        if os.access(path, os.W_OK):
-            pytest.skip("이 환경에서는 읽기 전용이 강제되지 않는다 (root 등)")
-        started = _time.monotonic()
+        # 신분이 아니라 사실을 묻는다 (D-222). `os.access`는 chmod를 반영하지
+        # 못하는 플랫폼이 있고 root의 우회도 반영하지 못한다 — 실제로 열어 본다.
+        try:
+            with open(path, "r+b"):
+                pass
+        except OSError:
+            pass
+        else:
+            pytest.skip("이 사용자에게는 읽기 전용이 강제되지 않는다 (root 등)")
         # D-138: 저장소 계층이 sqlite3 예외를 도메인 예외로 감싼다.
+        # 시간은 재지 않는다 (D-223) — 재시도 횟수라는 계약을 벽시계 상한으로
+        # 재면 부하 걸린 러너에서 코드 회귀 없이 빨개진다. 재시도 여부는 아래
+        # 스텁 시험이 잠든 횟수로 직접 센다.
         with pytest.raises(StorageError, match="readonly"):
             Repository(path)
-        elapsed = _time.monotonic() - started
-        assert elapsed < 1.0, f"경합이 아닌 실패에 {elapsed:.2f}초를 썼다"
     finally:
         os.chmod(tmp_path, 0o755)
         os.chmod(path, 0o644)
+
+
+def test_non_contention_failure_is_not_retried(monkeypatch):
+    """D-155의 경계를 **플랫폼 없이** 못박는다 (D-223).
+
+    `_enable_wal`은 잠금 경합만 재시도해야 한다. 다른 이유(읽기 전용 DB 등)로
+    실패하는데도 재시도하면 진짜 원인을 몇 초 늦게 보여줄 뿐이고, CLI는 명령마다
+    저장소를 여니 그 대기를 매번 문다. 예전에는 이 계약을 실제 읽기 전용 파일 +
+    `elapsed < 1.0`으로 쟀는데, 그 조합은 POSIX에서만 만들 수 있고(Windows 3건
+    실패) 상한은 부하에 흔들린다. 재시도는 시간이 아니라 **횟수**이므로 횟수로
+    센다 — 가상 시계라 벽시계와 무관하고, 판별력은 오히려 올라간다.
+    """
+    clock = fake_clock.install(monkeypatch, repository_module)
+
+    class _Stub:
+        def __init__(self, error: Exception) -> None:
+            self.error = error
+            self.calls = 0
+
+        def execute(self, sql: str):
+            self.calls += 1
+            raise self.error
+
+    readonly = _Stub(sqlite3.OperationalError("attempt to write a readonly database"))
+    with pytest.raises(sqlite3.OperationalError, match="readonly"):
+        repository_module._enable_wal(readonly)
+    assert readonly.calls == 1, f"경합이 아닌 실패를 {readonly.calls}회 시도했다"
+    assert clock.slept == [], f"경합이 아닌 실패에 {clock.slept}초를 잤다"
+
+
+def test_lock_contention_is_still_retried(monkeypatch):
+    """판별력 (D-223): 위 시험만 있으면 "아무것도 재시도하지 않는" 회귀가 초록이다.
+
+    경합은 재시도해야 한다 — 저널 모드 전환은 짧은 배타 잠금을 요구하고, 같은
+    DB를 동시에 처음 여는 클라이언트 한쪽이 `database is locked`로 죽는다
+    (D-078/D-155의 원래 증상).
+    """
+    clock = fake_clock.install(monkeypatch, repository_module)
+
+    class _Locked:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def execute(self, sql: str):
+            self.calls += 1
+            raise sqlite3.OperationalError("database is locked")
+
+    locked = _Locked()
+    repository_module._enable_wal(locked)  # 경합은 삼킨다 — 모드는 헤더에 영속된다
+    assert locked.calls == repository_module._WAL_ATTEMPTS
+    assert len(clock.slept) == repository_module._WAL_ATTEMPTS, (
+        f"경합인데 {len(clock.slept)}회만 기다렸다"
+    )
+    # 백오프는 선형으로 늘어난다 — 상수 대기로 퇴화하면 여기서 빨개진다.
+    assert clock.slept == [
+        repository_module._WAL_RETRY_SECONDS * (attempt + 1)
+        for attempt in range(repository_module._WAL_ATTEMPTS)
+    ]
 
 
 # -- D-083: 관측 시간축을 뒤늦게 도입할 때 -----------------------------------

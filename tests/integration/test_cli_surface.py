@@ -3,7 +3,8 @@
 
 축을 먼저 연다:
 
-④ **CLI 인자** — 빈 문자열·오타·손상 DB·디렉터리 경로·쓰기 불가 경로.
+④ **CLI 인자** — 빈 문자열·오타·손상 DB·디렉터리 경로·쓰기 불가 경로·
+   이름이 너무 긴 경로(플랫폼 축, D-222).
 ⑤ **오류 표면** — 사용자에게 문장으로 나가는가(exit 1 + 메시지), 아니면
    생 트레이스백인가. 트레이스백은 "도구가 깨졌다"는 뜻이고, 사용자의 오타는
    그런 뜻이 아니다.
@@ -14,7 +15,6 @@ CLI만이 아니라 **라이브러리 직접 경로**도 같은 보장을 받아
 
 from __future__ import annotations
 
-import os
 import random
 
 import pytest
@@ -27,7 +27,9 @@ from anchor.store.repository import Repository
 runner = CliRunner()
 
 # `--db`가 받을 수 있는 잘못된 값들. 정상값을 섞어 두어 판별력을 확인한다.
-BROKEN_DB_KINDS = ("corrupt", "directory", "unwritable-parent", "empty", "parent-is-a-file")
+BROKEN_DB_KINDS = (
+    "corrupt", "directory", "unwritable-parent", "empty", "parent-is-a-file", "name-too-long",
+)
 
 
 @pytest.fixture
@@ -46,13 +48,48 @@ def broken_db(request, tmp_path):
         parent.mkdir()
         parent.chmod(0o500)
         request.addfinalizer(lambda: parent.chmod(0o700))
-        return str(parent / "store.db")
+        # 쓰기 금지가 **실제로 강제됐는지 시도해서** 확인한다 (D-222).
+        #
+        # 예전에는 `os.geteuid() == 0`으로 root만 걸렀다. 그 함수는 POSIX
+        # 전용이라 Windows에는 없고(`AttributeError`), 이 파일의 두 시험이
+        # 통째로 45건 깨졌다 — 정작 root가 아닌 조건에서도 깨졌으니 가드가
+        # 아니라 지뢰였다. 게다가 CPython `os.chmod` 문서가 적듯 Windows의
+        # chmod는 파일의 읽기 전용 플래그 외의 비트를 **무시**하므로, 이
+        # 디렉터리는 거기서 여전히 쓸 수 있다.
+        #
+        # 신분(누구인가)이 아니라 사실(쓸 수 있는가)을 물으면 root·Windows·
+        # 일반 사용자가 한 기제로 답한다. 나머지 4종은 어느 플랫폼에서도
+        # 만들 수 있으므로 D-138 계약은 Windows에서도 계속 검증된다.
+        probe = parent / "probe.tmp"
+        try:
+            probe.touch()
+        except OSError:
+            return str(parent / "store.db")
+        probe.unlink()
+        pytest.skip(
+            "이 플랫폼·사용자에게는 쓰기 금지가 강제되지 않는다 "
+            "(Windows의 chmod는 권한 비트를 무시하고, root는 그것을 우회한다)"
+        )
     if kind == "empty":
         return ""
     if kind == "parent-is-a-file":
         blocker = tmp_path / "blocker"
         blocker.write_text("not a directory", encoding="utf-8")
         return str(blocker / "store.db")
+    if kind == "name-too-long":
+        # **경로를 묻는 일 자체가 실패하는** 경우 (D-222 → 제품 결함 D-225).
+        # 다른 5종은 이 갈래에 닿지 않는다: 빈 경로·디렉터리는 뒤의 가드가,
+        # 손상 DB는 연결 뒤의 마이그레이션이, 부모가 파일인 경우는 `mkdir`의
+        # `OSError`가 잡는다. 여기서는 `Path.is_dir()`의 `stat`이 먼저 죽는다 —
+        # Python 3.12의 `is_dir()`은 ENOENT·ENOTDIR·EBADF·ELOOP만 삼키고
+        # ENAMETOOLONG은 올린다.
+        #
+        # 이 축이 없어서 결함이 살아 있었다. 쓰기 불가(`unwritable-parent`)는
+        # POSIX에서만 만들 수 있어 Windows에는 "저장소를 여는 도중이 아니라
+        # 열기 **전에** 죽는" 경우가 한 종도 없었다. 이름 길이 상한은 두
+        # 플랫폼 모두에 있다 — POSIX `NAME_MAX` 255바이트, Windows는 경로
+        # 성분당 255자(전체 `MAX_PATH` 260자). 300자 성분은 양쪽 다 넘는다.
+        return str(tmp_path / ("n" * 300 + ".db"))
     raise AssertionError(kind)
 
 
@@ -77,9 +114,7 @@ COMMANDS = [
 @pytest.mark.parametrize("broken_db", BROKEN_DB_KINDS, indirect=True)
 @pytest.mark.parametrize("argv", COMMANDS, ids=lambda a: a[0] + ("-" + a[1].strip("-") if len(a) > 1 and a[1].startswith("--") else ""))
 def test_broken_db_path_is_reported_not_raised(argv, broken_db, tmp_path):
-    """D-138 — 손상·디렉터리·쓰기 불가·빈 경로에서 트레이스백이 나오면 안 된다."""
-    if os.geteuid() == 0 and "readonly" in broken_db:
-        pytest.skip("root는 읽기 전용 디렉터리에도 쓸 수 있다")
+    """D-138 — 손상·디렉터리·쓰기 불가·빈·너무 긴 경로에서 트레이스백이 나오면 안 된다."""
     result = runner.invoke(app, argv + ["--db", broken_db])
     assert _no_traceback(result), result.exception
     assert result.exit_code == 1
@@ -89,8 +124,6 @@ def test_broken_db_path_is_reported_not_raised(argv, broken_db, tmp_path):
 @pytest.mark.parametrize("broken_db", BROKEN_DB_KINDS, indirect=True)
 def test_repository_wraps_storage_failures_for_library_callers(broken_db):
     """라이브러리 직접 경로도 같은 보장을 받는다 — CLI에서만 잡으면 반쪽이다."""
-    if os.geteuid() == 0 and "readonly" in broken_db:
-        pytest.skip("root는 읽기 전용 디렉터리에도 쓸 수 있다")
     with pytest.raises(StorageError) as caught:
         Repository(broken_db)
     assert isinstance(caught.value, AnchorError)
