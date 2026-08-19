@@ -239,12 +239,27 @@ def bench_matcher_under_contention(foreground_unresolved: int) -> None:
     """
     import threading
 
+    from anchor.anchoring import budget as budget_mod
     from anchor.anchoring.approx import foreground_section, set_thread_yields
 
     big_text = "채움 문장이 끝없이 이어지는 대폭 개편 문서다. " * 20000
     small_text = "전경 재검증을 모사하는 짧은 본문 문장이 이어진다. " * 400
     stop = threading.Event()
     foreground_rounds = [0]
+    # 크레딧 **실지급**을 계측한다 (D-210). 크레딧 소실 회귀는 UNRESOLVED
+    # 증분으로 잡을 수 없다: 유휴 기계에서는 건강한 코드도 연속 전경에
+    # 굶어 100/100이 정직한 값이고(증분 게이트는 통과 불가), 소실되면
+    # 데드라인이 안 늘어나 p99는 오히려 내려간다(p99 게이트도 침묵).
+    # 갚았는가는 갚은 양으로 잰다.
+    credit_granted = [0.0]
+    original_credit = budget_mod.Budget.credit
+
+    def counting_credit(self, seconds: float) -> None:
+        before = self._credit_left
+        original_credit(self, seconds)
+        credit_granted[0] += before - self._credit_left
+
+    budget_mod.Budget.credit = counting_credit
     previous_interval = sys.getswitchinterval()
     sys.setswitchinterval(0.001)  # 서빙 배치와 동일 (serve_forever)
     try:
@@ -293,6 +308,7 @@ def bench_matcher_under_contention(foreground_unresolved: int) -> None:
             worker.join()
     finally:
         sys.setswitchinterval(previous_interval)
+        budget_mod.Budget.credit = original_credit
     gate(
         "최악 사례(경합 중) 전경 유효성",
         foreground_rounds[0] >= 100 and not died_early,
@@ -305,14 +321,19 @@ def bench_matcher_under_contention(foreground_unresolved: int) -> None:
         p99 < 250.0,
         f"p99={p99:.1f}ms — 크레딧 무상한이면 예산이 경합에 비례해 늘어난다 (D-203)",
     )
-    # 절대 문턱은 주변 부하(다른 프로세스)에 오탐한다 — 같은 실행의 전경
-    # 기준선 대비 **증분**으로 판정한다: 주변 부하는 두 측정에 똑같이 걸려
-    # 상쇄되고, 크레딧 기제의 차이만 남는다.
+    # UNRESOLVED 증분 게이트(≤40)는 걷어냈다 (D-210): 재는 것(경합의 판정
+    # 비용)과 잡으려는 회귀(크레딧 소실)가 어긋나 있었다. 연속 전경 아래의
+    # 굶주림은 §10이 명문화한 정직한 보고라 유휴 기계에서 건강한 코드가
+    # 100/100을 찍고(전경 기준선 0 — 게이트 통과 불가), 부하 기계에서는
+    # 기준선까지 포화해 델타가 0이 된다(무엇도 잡지 못하는 통과). 5단계
+    # 종결의 PASS는 후자였다. 소실 회귀는 **갚은 양**으로 직접 잰다 —
+    # 기제가 살아 있으면 양수, 소실되면 정확히 0. 기계 무관.
     gate(
-        "최악 사례(경합 중) UNRESOLVED 증분 ≤ 40/100",
-        unresolved - foreground_unresolved <= 40,
-        f"경합 {unresolved}/100 vs 전경 {foreground_unresolved}/100 — 크레딧이 "
-        "사라지면 잠듦이 전부 예산에서 빠져 증분이 치솟는다",
+        "최악 사례(경합 중) 크레딧 실지급",
+        credit_granted[0] * 1000 >= 1.0,
+        f"실지급 {credit_granted[0] * 1000:.1f}ms — 소실이면 정확히 0이 된다. "
+        f"(정보) 경합 UNRESOLVED {unresolved}/100 vs 전경 {foreground_unresolved}/100"
+        " — 연속 전경 아래의 굶주림은 정직한 보고다 (SPEC §10)",
     )
 
 

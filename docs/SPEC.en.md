@@ -1,6 +1,6 @@
 # Anchor — A Provenance-Tracking Fetch Cache (EN)
 
-**Technical Specification v1.9 (as of completion)**
+**Technical Specification v1.10 (as of completion)**
 
 > **Translation note**: This is an English translation of `SPEC.md`. The Korean
 > version is normative — if the two ever disagree, the Korean text governs.
@@ -18,23 +18,25 @@
 | Governing specs | RFC 7089, RFC 9110 (conditional requests), W3C Web Annotation Data Model, MCP 2026-07-28 |
 | Design rationale | `docs/decisions/0001` (prior art and positioning), `docs/decisions/0002` (licensing and reuse) |
 
-> **v1.8 → v1.9 change summary**: Reflects stage 5 of the remediation (Tasks and the server, cluster 8). A Task **ttl policy** was established (a call that omits ttl gets a server default of 30 minutes; zero and negative values are rejected; oversized requests are clamped to 24 hours with the actual value reported; the ttl key is never omitted from any response — §7.0); the retention period is counted from creation as the protocol defines, but is updated at termination to the actual retention so a long-running task's result does not vanish the moment it finishes (§7.0); server shutdown now **actually guarantees worker termination** before the store is closed (§7.0); and cancellation reacts at anchor granularity (§7.0). The cache-hit gate was strengthened to hold **while background matching is running**, with a loaded scenario added to the benchmark (§10). `list_documents`' status and `verify_citations`' time_budget_ms are validated once for all three call paths (§7.6, §7.3). See §15 for the full list.
+> **v1.9 → v1.10 change summary**: Reflects stage 6 (accounting, configuration, CLI — clusters 9–11) of the remediation. As its first item, the contention gate's verdict was replaced: instead of the UNRESOLVED increment over the foreground baseline it now gates **credit actually granted** (§10) — the increment gate could never pass on an idle machine, discriminated nothing on a loaded one, and a lost credit slipped past every existing gate. See §15 for the full list.
 >
-> **v1.7 → v1.8 change summary**: Reflects stage 4 of the remediation (the honest-client contract, cluster 2) plus the audit of that stage's own remediation code. robots.txt redirects are now followed, a leading BOM is ignored, and the size cap, timeout, and declared charset apply to robots.txt as well (§5.2, §5.4); a blank User-Agent is rejected at configuration time and validation moved to `Config` construction over the final merged state (§5.4, §9); the URI-M an aggregator points at also gets a robots verdict (§5.2). **So that redirects cannot corrupt a document's identity**, permanent and temporary redirects are distinguished, rules were established for alias retirement, document merging (earliest-capture keeper, observation renumbering, accounting transfer), registered-document moves, and idempotent creation (§5.1); validators ride only on the canonical hop, compared in normalized form, and `https → http` downgrades and unfollowable `Location` values are refused (§5.4, §5.2). URL normalization gained RFC 3986 equivalence and input validation with a domain exception (§5.1). See §16 for the full list.
+> **v1.8 → v1.9 change summary**: Reflects stage 5 of the remediation (Tasks and the server, cluster 8). A Task **ttl policy** was established (a call that omits ttl gets a server default of 30 minutes; zero and negative values are rejected; oversized requests are clamped to 24 hours with the actual value reported; the ttl key is never omitted from any response — §7.0); the retention period is counted from creation as the protocol defines, but is updated at termination to the actual retention so a long-running task's result does not vanish the moment it finishes (§7.0); server shutdown now **actually guarantees worker termination** before the store is closed (§7.0); and cancellation reacts at anchor granularity (§7.0). The cache-hit gate was strengthened to hold **while background matching is running**, with a loaded scenario added to the benchmark (§10). `list_documents`' status and `verify_citations`' time_budget_ms are validated once for all three call paths (§7.6, §7.3). See §16 for the full list.
 >
-> **v1.6 → v1.7 change summary**: Reflects stage 3 of the remediation (judgment accuracy, cluster 5). The approximate search now takes **every position within distance k** as a candidate per core (§6.2); when stage 3 hits its candidate cap it defers to stage 4 instead of committing (§6.2); stage 4 results pass a **context-corroboration gate** so a sibling paragraph from another section is never presented as "the current form of your quote" (§6.2); the writing-system factor on the edit-distance cap became a continuous function (§6.2); the budget check period is measured in DP cells (§6.2); and truncation now holds `ALTERED` back too (§6.3). The effective document-length limit of stage 4 was made explicit (§6.2, §10). **The schema was raised to v6 to introduce the observation timeline** (§4.1) and `latest~N` was defined on that axis (§7.4). See §17 for the full list.
+> **v1.7 → v1.8 change summary**: Reflects stage 4 of the remediation (the honest-client contract, cluster 2) plus the audit of that stage's own remediation code. robots.txt redirects are now followed, a leading BOM is ignored, and the size cap, timeout, and declared charset apply to robots.txt as well (§5.2, §5.4); a blank User-Agent is rejected at configuration time and validation moved to `Config` construction over the final merged state (§5.4, §9); the URI-M an aggregator points at also gets a robots verdict (§5.2). **So that redirects cannot corrupt a document's identity**, permanent and temporary redirects are distinguished, rules were established for alias retirement, document merging (earliest-capture keeper, observation renumbering, accounting transfer), registered-document moves, and idempotent creation (§5.1); validators ride only on the canonical hop, compared in normalized form, and `https → http` downgrades and unfollowable `Location` values are refused (§5.4, §5.2). URL normalization gained RFC 3986 equivalence and input validation with a domain exception (§5.1). See §17 for the full list.
 >
-> **v1.5 → v1.6 change summary**: Reflects stage 1 (normalization) of the remediation for the 101 defects demonstrated in the second parallel audit. **The normalization rules were redesigned and NORM_VERSION was raised to 3** (§5.3) — lines and blocks are recognized first, and rules that delete anything apply only inside prose lines. Quote lookup was made tolerant of block separators (§6.1), the golden corpus is now required to actually exercise the normalization rules (§12), and migrating an older database *that contains rows* was made an explicit test target (§12). See §18 for the full list.
+> **v1.6 → v1.7 change summary**: Reflects stage 3 of the remediation (judgment accuracy, cluster 5). The approximate search now takes **every position within distance k** as a candidate per core (§6.2); when stage 3 hits its candidate cap it defers to stage 4 instead of committing (§6.2); stage 4 results pass a **context-corroboration gate** so a sibling paragraph from another section is never presented as "the current form of your quote" (§6.2); the writing-system factor on the edit-distance cap became a continuous function (§6.2); the budget check period is measured in DP cells (§6.2); and truncation now holds `ALTERED` back too (§6.3). The effective document-length limit of stage 4 was made explicit (§6.2, §10). **The schema was raised to v6 to introduce the observation timeline** (§4.1) and `latest~N` was defined on that axis (§7.4). See §18 for the full list.
 >
-> **v1.4 → v1.5 change summary**: Reflects the remediation of 52 defects demonstrated in a parallel audit. The schema was raised to v5 to introduce a "current live version" pointer, redirect aliases, and per-source version uniqueness (§4.1); the normalization rules were revised so that quotes copied off the screen actually resolve (§5.3, NORM_VERSION 2); robots is now evaluated at every redirect hop and a robots 5xx became a denial (§5.2); anchor thresholds and the edit-distance ratio now account for the writing system (§6.1, §6.2); the budget is enforced inside the matching stages (§6.2); and the global lock was narrowed to per-URL scope (§10). See §19 for the full list.
+> **v1.5 → v1.6 change summary**: Reflects stage 1 (normalization) of the remediation for the 101 defects demonstrated in the second parallel audit. **The normalization rules were redesigned and NORM_VERSION was raised to 3** (§5.3) — lines and blocks are recognized first, and rules that delete anything apply only inside prose lines. Quote lookup was made tolerant of block separators (§6.1), the golden corpus is now required to actually exercise the normalization rules (§12), and migrating an older database *that contains rows* was made an explicit test target (§12). See §19 for the full list.
 >
-> **v1.3 → v1.4 change summary**: Cleanup at the v1.0 release point. Configuration loading was settled on the standard library and `pydantic-settings` was removed from the dependencies (§9, §11); the conditions for optionally running the anchor benchmark were made explicit (§12); and the development-dependency policy was delegated to the ledger (§11.2). See §20 for the full list.
+> **v1.4 → v1.5 change summary**: Reflects the remediation of 52 defects demonstrated in a parallel audit. The schema was raised to v5 to introduce a "current live version" pointer, redirect aliases, and per-source version uniqueness (§4.1); the normalization rules were revised so that quotes copied off the screen actually resolve (§5.3, NORM_VERSION 2); robots is now evaluated at every redirect hop and a robots 5xx became a denial (§5.2); anchor thresholds and the edit-distance ratio now account for the writing system (§6.1, §6.2); the budget is enforced inside the matching stages (§6.2); and the global lock was narrowed to per-URL scope (§10). See §20 for the full list.
 >
-> **v1.2 → v1.3 change summary**: Reflects what was settled during the v0.1–v0.4 implementation. The `versions.pipeline_version` column and the `renormalized` and `unchanged` outcomes were formalized (§4.1, §5.2, §5.3, §7.1); the tracking-parameter removal list in URL normalization was narrowed (§5.1); robots cache persistence and the request order were clarified (§4.1, §5.2); `mcp-server-fetch`-compatible chunked reading was added (§7.1); and the SDK constraint on the Tasks wire format was recorded (§7.0). See §21 for the full list.
+> **v1.3 → v1.4 change summary**: Cleanup at the v1.0 release point. Configuration loading was settled on the standard library and `pydantic-settings` was removed from the dependencies (§9, §11); the conditions for optionally running the anchor benchmark were made explicit (§12); and the development-dependency policy was delegated to the ledger (§11.2). See §21 for the full list.
 >
-> **v1.1 → v1.2 change summary**: Reflects the results of the license audit. The `trafilatura>=1.8.0` lower bound was made mandatory (§11); MemGator operating guidance was made explicit (§5.2, §9); the provenance policy for test fixtures was split into three grades (§12); and a license gate was added to CI (§12). See §22 for the full list.
+> **v1.2 → v1.3 change summary**: Reflects what was settled during the v0.1–v0.4 implementation. The `versions.pipeline_version` column and the `renormalized` and `unchanged` outcomes were formalized (§4.1, §5.2, §5.3, §7.1); the tracking-parameter removal list in URL normalization was narrowed (§5.1); robots cache persistence and the request order were clarified (§4.1, §5.2); `mcp-server-fetch`-compatible chunked reading was added (§7.1); and the SDK constraint on the Tasks wire format was recorded (§7.0). See §22 for the full list.
 >
-> **v1.0 → v1.1 change summary**: Reflects the results of the prior-art survey by introducing Memento compatibility (§2, §5.2, §7.8), replacing the anchor matching algorithm with a performance-safe approach (§6.2), expanding the verification states to seven (§6.3), and adopting the Tasks extension of the latest MCP spec (§7.0). See §23 for the full list.
+> **v1.1 → v1.2 change summary**: Reflects the results of the license audit. The `trafilatura>=1.8.0` lower bound was made mandatory (§11); MemGator operating guidance was made explicit (§5.2, §9); the provenance policy for test fixtures was split into three grades (§12); and a license gate was added to CI (§12). See §23 for the full list.
+>
+> **v1.0 → v1.1 change summary**: Reflects the results of the prior-art survey by introducing Memento compatibility (§2, §5.2, §7.8), replacing the anchor matching algorithm with a performance-safe approach (§6.2), expanding the verification states to seven (§6.3), and adopting the Tasks extension of the latest MCP spec (§7.0). See §24 for the full list.
 
 ---
 
@@ -946,7 +948,7 @@ The reason the worst-case metric (row 4) was added in v1.1 is in §6.2. You have
 
 **The reach of the `UNRESOLVED` ratio (v1.7)**: the target in row 5 holds within §6.2's effective document-length limit (~190K chars at the default 200 ms budget). On larger documents, when stage 3 fails, stage 4 cannot reach a verdict — a larger budget widens the reach. Why the gate does not catch this is also recorded: the worst-case scenario's quote is short and takes the regex path only, and the normal corpus compares unrevised text against itself, ending at stage 1.
 
-**Cache hits under load (v1.9)**: the target in row 1 must hold while a background task's matching loop is running — that is precisely the situation the Tasks extension exists for. The matching loop is pure Python and holds its whole GIL slice, while the cache-hit path must acquire the GIL dozens of times, so the waiting accumulates per acquisition (measured at 6–14× over the gate). The background worker's matching loop yields the GIL at its budget checkpoints, and the actual sleeping is bounded three times over: it sleeps **only while a foreground call is actually in flight** (a yield with nobody starving is pure loss — the true cost of sleeping, cold-cache rewarming, cannot be refunded); **the slept time is not charged to the anchor budget** (charging it makes the same anchor's verdict differ between the sync path and the task path — the effective document-length limit of §6.2 must not depend on the call path); and that refund is **capped at 15% of the budget** — an uncapped refund makes "one anchor's budget" elastic in proportion to contention and breaks this table's p99 bound (measured up to 971 ms per anchor). Sleeping past the cap eats the budget, and borderline verdicts are held back as `UNRESOLVED` — an honest report of measured contention, recoverable by re-verification. The benchmark measures three conditions: idle; cache hits under matching load (verifying the load itself survived — rounds overlapping the sample window — since a dead churn thread would measure idle and print PASS); and **background matching under foreground contention** (verifying foreground validity, and gating the contention p99 plus the `UNRESOLVED` increment over the same run's foreground baseline — a measurement that merely switches polite mode on without opening a foreground section is byte-identical to the foreground run: a tautology).
+**Cache hits under load (v1.9)**: the target in row 1 must hold while a background task's matching loop is running — that is precisely the situation the Tasks extension exists for. The matching loop is pure Python and holds its whole GIL slice, while the cache-hit path must acquire the GIL dozens of times, so the waiting accumulates per acquisition (measured at 6–14× over the gate). The background worker's matching loop yields the GIL at its budget checkpoints, and the actual sleeping is bounded three times over: it sleeps **only while a foreground call is actually in flight** (a yield with nobody starving is pure loss — the true cost of sleeping, cold-cache rewarming, cannot be refunded); **the slept time is not charged to the anchor budget** (charging it makes the same anchor's verdict differ between the sync path and the task path — the effective document-length limit of §6.2 must not depend on the call path); and that refund is **capped at 15% of the budget** — an uncapped refund makes "one anchor's budget" elastic in proportion to contention and breaks this table's p99 bound (measured up to 971 ms per anchor). Sleeping past the cap eats the budget, and borderline verdicts are held back as `UNRESOLVED` — an honest report of measured contention, recoverable by re-verification. The benchmark measures three conditions: idle; cache hits under matching load (verifying the load itself survived — rounds overlapping the sample window — since a dead churn thread would measure idle and print PASS); and **background matching under foreground contention** (verifying foreground validity, and gating the contention p99 plus **credit actually granted** — how much of the slept time was actually repaid, exactly 0 if the refund is lost. A measurement that merely switches polite mode on without opening a foreground section is byte-identical to the foreground run: a tautology. The contention's verdict cost — the `UNRESOLVED` increment — is reported as information, not gated (v1.10): starvation under a continuous foreground is the honest reporting mandated above, so healthy code saturates it on an idle machine, while on a loaded machine the foreground baseline saturates too and the increment collapses to 0. A lost credit does not extend the deadline, so it *lowers* p99 — that regression is caught only by the granted amount).
 
 **Concurrency isolation (v1.5)**: Wrapping every tool in a global lock is safe, but it stops all the other tools while a background batch verification runs — directly at odds with the purpose of the Tasks extension. Serialization is confined to the minimum necessary scope: the store serializes internally, and the service locks only the "look up → decide → create" section for the same URL, at per-URL granularity. **The reason the serialization responsibility sits in the library layer rather than the server** is that someone using the library directly must get the same guarantee.
 
@@ -1132,7 +1134,15 @@ This is not a formality. There are people in this field who have held on to this
 
 ---
 
-## 15. v1.8 → v1.9 Change History
+## 15. v1.9 → v1.10 Change History
+
+Reflects stage 6 (accounting, configuration, CLI — clusters 9–11) of the remediation for the defects demonstrated in the second parallel audit, plus what was found along the way. Most items in this section are places where **the numbers the tool reports about itself** had drifted from the truth.
+
+| # | Section | Change | Underlying defect |
+|---|---|---|---|
+| 1 | **10** | The contention gate's verdict was replaced with **credit actually granted** (how much of the slept time was actually repaid) — the UNRESOLVED-increment gate is gone. Background starvation under a continuous foreground (UNRESOLVED saturation) is not a defect but the honest reporting §10 itself mandates | The increment gate measured one thing and hunted another: on an idle machine healthy code scores 100/100 (foreground baseline 0), so the gate could never pass; on a loaded machine the baseline saturates too, so the delta collapses to 0 and the gate passes while catching nothing — the stage-5 close PASS was the latter. A lost credit does not extend the deadline, so it *lowers* p99 and slips past the p99 gate as well (measured on a neutered copy: p99 202 ms PASS, 0 granted). Whether the debt was repaid is measured by the amount repaid (D-210) |
+
+## 16. v1.8 → v1.9 Change History
 
 Reflects stage 5 (Tasks and the server, cluster 8) of the remediation for the defects demonstrated in the second parallel audit. Every item in this section is a place where **what the protocol promises and what the server actually does** had drifted apart — the default call broke, shutdown lost data, or cancellation did not cancel.
 
@@ -1151,7 +1161,7 @@ Reflects stage 5 (Tasks and the server, cluster 8) of the remediation for the de
 | 11 | **10** | The credit (refund of slept time) is **capped at 15% of the budget** | An uncapped refund makes "one anchor's budget" elastic in proportion to contention: measured up to 971 ms per anchor (4.9×), service-layer p99 345/478 ms — violating the 250 ms p99 bound. The trade — verdict path-independence (D-196) bought by giving up bounded time — was written down nowhere (D-203) |
 | 12 | 10 | New **foreground-contention bench** for the matching gates: foreground validity, contention p99, and the UNRESOLVED increment over the foreground baseline | The "polite-mode gates" never opened a foreground section, making them byte-identical to the foreground run (0 sleeps across 52,800 checkpoints) — a tautology. The failure mode of D-120 ("measuring in a batch that is not the real one") recurred inside the gate itself (D-202) |
 
-## 16. v1.7 → v1.8 Change History
+## 17. v1.7 → v1.8 Change History
 
 Reflects the robots and redirect-identity portion of **stage 4 (the honest-client contract, cluster 2)** of the second parallel audit's remediation, plus the audit of that stage's own remediation code. Every item in this section is a place where **the declaration and the reality had drifted apart** — because a document said we never bypass anything, nobody checked, and so nobody noticed for a long time that ordinary configurations made the rules vanish wholesale.
 
@@ -1179,7 +1189,7 @@ Reflects the robots and redirect-identity portion of **stage 4 (the honest-clien
 | 20 | 5.2 | An unfollowable Location (`mailto:` etc.) is that document's `FetchFailed` | `httpx.InvalidURL` is not a subclass of HTTPError, so it escaped the hierarchy and killed the whole re-verification batch (D-106) |
 | 21 | **9** | Configuration is validated **only in its final state** — one construction after layering | Mid-state validation broke "environment variables always win": with a bad file value that env was deployed to override, the server refused to start (D-188) |
 
-## 17. v1.6 → v1.7 Change History
+## 18. v1.6 → v1.7 Change History
 
 Reflects **stage 3 (judgment accuracy, cluster 5)** of the remediation for the defects demonstrated in the second parallel audit (10 Opus auditors, 2026-08-18). Every item in this section belongs to the "silently wrong judgment" family — a false MISSING declares a living quote dead, and a false ALTERED presents a lookalike from another section as "the current form of your quote". The user has no way to check either.
 
@@ -1205,7 +1215,7 @@ Reflects **stage 3 (judgment accuracy, cluster 5)** of the remediation for the d
 
 Many of this section's fixes complete what an earlier fix did **only by half** (1 follows D-042, 2 and 4 follow D-044, 7 follows D-045, 6 follows D-049). The §12 lesson — one passing reproduction script is not completion — repeated itself verbatim.
 
-## 18. v1.5 → v1.6 Change History
+## 19. v1.5 → v1.6 Change History
 
 Reflects **stage 1 (normalization, cluster 1)** of the remediation for the 101 defects demonstrated in the second parallel audit (10 Opus auditors, 2026-08-18). These came out of code written during the first round of remediation, so each entry also records what was broken while fixing something else.
 
@@ -1228,7 +1238,7 @@ Reflects **stage 1 (normalization, cluster 1)** of the remediation for the 101 d
 
 ---
 
-## 19. v1.4 → v1.5 Change History
+## 20. v1.4 → v1.5 Change History
 
 Reflects the remediation of **52 defects demonstrated with reproduction scripts** in a parallel audit (10 Opus instances, 2026-08-17). They emerged in a state where all 198 existing tests passed, so each item is also a blind spot in the specification.
 
@@ -1262,7 +1272,7 @@ Reflects the remediation of **52 defects demonstrated with reproduction scripts*
 
 ---
 
-## 20. v1.3 → v1.4 Change History
+## 21. v1.3 → v1.4 Change History
 
 Cleanup at the v1.0 release (2026-08-17).
 
@@ -1275,7 +1285,7 @@ Cleanup at the v1.0 release (2026-08-17).
 
 ---
 
-## 21. v1.2 → v1.3 Change History
+## 22. v1.2 → v1.3 Change History
 
 Reflects what was settled during the v0.1–v0.4 implementation (2026-08-17). These were found with the implementation running ahead of the specification, so the grounds for each item are in the code and the tests.
 
@@ -1295,7 +1305,7 @@ Reflects what was settled during the v0.1–v0.4 implementation (2026-08-17). Th
 
 ---
 
-## 22. v1.1 → v1.2 Change History
+## 23. v1.1 → v1.2 Change History
 
 Reflects the results of the license audit (2026-08-16). All 16 unverified items were checked and reduced to zero, and in the process one substantive conflict was found.
 
@@ -1325,7 +1335,7 @@ See `THIRD-PARTY.md` for details.
 
 ---
 
-## 23. v1.0 → v1.1 Change History
+## 24. v1.0 → v1.1 Change History
 
 | # | Section | Change | Rationale |
 |---|---|---|---|
