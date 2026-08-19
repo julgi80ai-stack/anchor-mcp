@@ -60,28 +60,43 @@ class ArchiveFallback:
         # (SPEC §5.2)가 말뿐이 된다. 우리가 가져오는 것에는 전부 판정을 건다.
         self._robots = robots
 
-    def _get(self, url: str, **kwargs) -> httpx.Response:
+    def _get(self, url: str, on_bytes=None, **kwargs) -> httpx.Response:
         if self._ratelimit is not None:
             self._ratelimit.acquire(httpx.URL(url).host or "")
-        return self._client.get(url, headers=self._headers, timeout=self._timeout, **kwargs)
+        response = self._client.get(
+            url, headers=self._headers, timeout=self._timeout, **kwargs
+        )
+        # 조회가 무산돼도 이 바이트는 이미 나갔다 (D-135). 성공 반환 경로의
+        # `ArchiveHit.bytes_down`에만 실으면 "memento 없음"으로 끝난 조회의
+        # 트래픽이 회계 어디에도 남지 않는다.
+        if on_bytes is not None:
+            on_bytes(len(response.content))
+        return response
 
-    def lookup(self, url: str) -> ArchiveHit | None:
+    def lookup(self, url: str, *, on_bytes=None) -> ArchiveHit | None:
         """URI-R로 가장 최근 URI-M을 찾아 본문까지 가져온다. 실패는 None —
-        폴백의 실패가 원래의 실패 보고(gone/forbidden)를 가려서는 안 된다."""
+        폴백의 실패가 원래의 실패 보고(gone/forbidden)를 가려서는 안 된다.
+
+        `on_bytes`는 받는 즉시 호출되므로, 어떻게 끝나든 실제로 쓴 바이트가
+        호출자의 회계에 남는다 (D-135)."""
         if not self.enabled:
             return None
         try:
             if self._aggregator:
-                found = self._query_memgator(url)
+                found = self._query_memgator(url, on_bytes)
             else:
-                found = self._query_cdx(url)
+                found = self._query_cdx(url, on_bytes)
             if found is None:
                 return None
             uri_m, memento_datetime, lookup_bytes = found
-            if self._robots is not None and not self._robots.check(uri_m).allowed:
-                return None
+            if self._robots is not None:
+                verdict = self._robots.check(uri_m)
+                if on_bytes is not None:
+                    on_bytes(verdict.bytes_down)
+                if not verdict.allowed:
+                    return None
 
-            response = self._get(uri_m)
+            response = self._get(uri_m, on_bytes)
             if response.status_code != 200 or not response.content:
                 return None
             return ArchiveHit(
@@ -100,9 +115,9 @@ class ArchiveFallback:
 
     # -- 백엔드 ------------------------------------------------------------
 
-    def _query_memgator(self, url: str) -> tuple[str, str, int] | None:
+    def _query_memgator(self, url: str, on_bytes=None) -> tuple[str, str, int] | None:
         """MemGator Time Travel 호환 API: GET <aggregator>/api/json/<URI-R>."""
-        response = self._get(f"{self._aggregator}/api/json/{url}")
+        response = self._get(f"{self._aggregator}/api/json/{url}", on_bytes)
         if response.status_code != 200:
             return None
         try:
@@ -114,10 +129,11 @@ class ArchiveFallback:
         except (ValueError, KeyError, TypeError):
             return None
 
-    def _query_cdx(self, url: str) -> tuple[str, str, int] | None:
+    def _query_cdx(self, url: str, on_bytes=None) -> tuple[str, str, int] | None:
         """Wayback CDX API에서 가장 최근 200 스냅샷 하나를 고른다."""
         response = self._get(
             f"{WAYBACK_BASE}/cdx/search/cdx",
+            on_bytes,
             params={
                 "url": url,
                 "output": "json",

@@ -252,7 +252,8 @@ def stats(
     typer.echo(
         f"최근 30일: 요청 {window['requests']}"
         f" (cache_hit {window['cache_hits']}, not_modified {window['not_modified']},"
-        f" unchanged {window['unchanged']}, changed {window['changed']}, error {window['errors']})"
+        f" unchanged {window['unchanged']}, changed {window['changed']},"
+        f" archive {window['archive']}, error {window['errors']})"
     )
     typer.echo(
         f"다운로드 {window['bytes_down']:,} bytes · 절감 추정 {window['bytes_saved_estimate']:,} bytes"

@@ -72,9 +72,14 @@ class ConditionalFetcher:
         last_modified: str | None = None,
         validators_for: str | None = None,
         before_hop: Callable[[str], int] | None = None,
+        on_bytes: Callable[[int], None] | None = None,
     ) -> FetchResponse:
         """조건부 GET. `before_hop`은 매 홉 직전에 호출되어 robots 판정과
-        레이트 제한을 수행하고, 그 과정에서 내려받은 바이트를 돌려준다."""
+        레이트 제한을 수행하고, 그 과정에서 내려받은 바이트를 돌려준다.
+
+        `on_bytes`는 바이트를 **받는 즉시** 호출자에게 알린다 (D-134).
+        여기 지역변수에만 쌓으면 리다이렉트 도중의 robots 거부처럼 예외로
+        끝나는 경로에서 이미 나간 트래픽이 회계에서 통째로 사라진다."""
         base_headers = {"User-Agent": self._user_agent, "Accept": ACCEPT_HEADER}
         # 검증자는 **우리가 그것을 받은 리소스에만** 유효하다 (D-100).
         #
@@ -113,6 +118,12 @@ class ConditionalFetcher:
                 merged.update(conditional)
             return merged
 
+        def account(count: int) -> int:
+            """받은 바이트를 즉시 호출자에게도 흘린다 (D-134)."""
+            if on_bytes is not None and count:
+                on_bytes(count)
+            return count
+
         started = time.monotonic()
         overhead_bytes = 0
         attempted_bytes = 0
@@ -121,11 +132,11 @@ class ConditionalFetcher:
 
         for hop in range(self._max_redirects + 1):
             if before_hop is not None:
-                overhead_bytes += before_hop(current)
+                overhead_bytes += account(before_hop(current))
 
             headers = headers_for(current)
-            response = self._request(current, headers)
-            attempted_bytes += response.bytes_down
+            response = self._request(current, headers, account)
+            attempted_bytes += account(response.bytes_down)
             for attempt in range(MAX_RETRIES):
                 if response.status not in RETRYABLE_STATUSES:
                     break
@@ -133,8 +144,8 @@ class ConditionalFetcher:
                 if delay is None:  # 서버가 지정한 대기가 상한을 넘는다
                     break
                 time.sleep(delay)
-                response = self._request(current, headers)
-                attempted_bytes += response.bytes_down
+                response = self._request(current, headers, account)
+                attempted_bytes += account(response.bytes_down)
 
             if response.status not in REDIRECT_STATUSES:
                 elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -202,7 +213,12 @@ class ConditionalFetcher:
             return None
         return max(requested, backoff)
 
-    def _request(self, url: str, headers: dict[str, str]) -> FetchResponse:
+    def _request(
+        self,
+        url: str,
+        headers: dict[str, str],
+        account: Callable[[int], int] | None = None,
+    ) -> FetchResponse:
         try:
             with self._client.stream("GET", url, headers=headers) as response:
                 declared = response.headers.get("Content-Length")
@@ -218,6 +234,8 @@ class ConditionalFetcher:
                 for chunk in response.iter_bytes():
                     total += len(chunk)
                     if total > self._max_content_bytes:
+                        if account is not None:
+                            account(total)  # 이미 받은 것은 받은 것이다 (D-134)
                         raise ContentTooLarge(
                             f"Body exceeds the {self._max_content_bytes}-byte limit — "
                             "본문 크기 상한 초과"

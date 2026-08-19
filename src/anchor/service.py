@@ -51,6 +51,26 @@ _DOCUMENT_STATUSES = ("live", "gone", "forbidden", "paywalled")
 # `fetch_log.document_id`가 NOT NULL이라 빈 값을 넣을 수 없다 (D-014).
 _UNREGISTERED = "-"
 
+
+class _Traffic:
+    """한 번의 사용자 호출이 실제로 쓴 네트워크 (D-130·D-134·D-135).
+
+    성공 반환 경로에서만 회계를 만들면, 실패로 끝난 호출의 바이트는 페처와
+    폴백의 지역변수에 있다가 예외와 함께 사라진다. 받는 즉시 여기에 쌓아
+    두고, 어떻게 끝나든 이 값으로 **한 행**을 남긴다.
+    """
+
+    __slots__ = ("bytes_down", "document_id", "http_status")
+
+    def __init__(self) -> None:
+        self.bytes_down = 0
+        self.document_id: str | None = None
+        self.http_status: int | None = None
+
+    def add(self, count: int) -> None:
+        self.bytes_down += count
+
+
 # 아카이브 폴백으로 이어지는 원본 실패 (SPEC §5.2 5→6단계).
 _ARCHIVE_FALLBACK_STATUSES = frozenset({402, 403, 404, 410, 429})
 
@@ -197,7 +217,40 @@ class Anchor:
         include_content: bool,
         started: float,
     ) -> FetchResult:
+        """사용자 호출 1회 = `fetch_log` 1행, outcome은 **최종 결과** (D-130·D-133).
+
+        성공 경로에만 회계가 있으면 예외로 끝난 실패가 요청 분모에서 통째로
+        빠져 hit_rate가 부풀고(실측 2.67배) 그 호출의 트래픽도 함께 사라진다 —
+        지표가 실패의 **종류**에 좌우된다. 중간 실패를 그 자리에서 기록하면
+        아카이브로 구제된 호출이 error 1행 + archive 1행이 된다. 그래서
+        기록은 여기 한 곳에서만 한다.
+        """
+        traffic = _Traffic()
+        try:
+            return self._fetch_counted(
+                norm_url, max_age, force_refresh, include_content, started, traffic
+            )
+        except AnchorError:
+            self._log(
+                traffic.document_id or _UNREGISTERED,
+                "error",
+                traffic.http_status,
+                traffic.bytes_down,
+                started,
+            )
+            raise
+
+    def _fetch_counted(
+        self,
+        norm_url: str,
+        max_age: int,
+        force_refresh: bool,
+        include_content: bool,
+        started: float,
+        traffic: _Traffic,
+    ) -> FetchResult:
         document = self._repository.get_document_by_any_url(norm_url)
+        traffic.document_id = document.id if document else None
 
         # 캐시 조회 — 순수 로컬 경로. 네트워크 요청이 없으므로 robots 판정보다
         # 앞선다 (robots는 "요청해도 되는가"의 규칙이다).
@@ -218,7 +271,11 @@ class Anchor:
             if not hop_verdict.allowed:
                 if document:
                     self._repository.set_robots_allowed(document.id, False)
-                    self._log(document.id, "error", None, hop_verdict.bytes_down, started)
+                # 여기서 기록하지 않는다 — 아카이브로 구제되면 이 호출은
+                # 결국 성공이고, 중간 실패를 남기면 한 호출이 두 행이 된다
+                # (D-133). 다만 이 판정에 쓴 바이트는 페처에게 돌려줄 기회가
+                # 없으므로(예외로 나간다) 여기서 직접 계상한다 (D-134).
+                traffic.add(hop_verdict.bytes_down)
                 raise RobotsDisallowed(
                     "Fetch disallowed by robots.txt — robots.txt가 페치를 거부: "
                     f"{hop_url}",
@@ -236,6 +293,9 @@ class Anchor:
                 # 별칭으로 재확인해도 검증자는 정본 홉에서만 실린다 (D-100).
                 validators_for=document.url if document else None,
                 before_hop=before_hop,
+                # 받는 즉시 계상한다 — 실패로 끝나면 페처의 지역변수에 쌓인
+                # 바이트가 예외와 함께 사라진다 (D-134).
+                on_bytes=traffic.add,
             )
         except (RobotsDisallowed, FetchFailed) as error:
             # 원본에 닿지 못했다. 사이트 소유자가 **명시적으로** 거부한 경우가
@@ -246,12 +306,12 @@ class Anchor:
             if not _may_consult_archive(error):
                 raise
             recovered = self._recover_from_archive(
-                norm_url, document, started, include_content
+                norm_url, document, started, include_content, traffic
             )
             if recovered is not None:
                 return recovered
             raise
-        bytes_down = response.bytes_down
+        traffic.http_status = response.status
 
         if response.status == 304:
             assert document is not None, "304는 저장된 검증자가 있어야만 온다"
@@ -268,12 +328,12 @@ class Anchor:
             document = self._repository.get_document_by_any_url(norm_url)
             assert document is not None
             return self._finish(
-                document, latest, "not_modified", 304, bytes_down, started, include_content
+                document, latest, "not_modified", 304, traffic.bytes_down, started, include_content
             )
 
         if response.status == 200:
             return self._ingest_200(
-                norm_url, document, response, bytes_down, started, include_content
+                norm_url, document, response, traffic.bytes_down, started, include_content
             )
 
         # 실패 경로 — 상태를 그대로 기록하고 그대로 보고한다 (SPEC §5.4).
@@ -283,29 +343,23 @@ class Anchor:
 
         # 6단계: GONE 확정 전 아카이브 폴백 (SPEC §5.2). 기본 비활성.
         if response.status in _ARCHIVE_FALLBACK_STATUSES and self._archive.enabled:
-            hit = self._archive.lookup(norm_url)
+            # 조회가 무산돼도 받은 바이트는 sink로 이미 들어왔다 (D-135).
+            hit = self._archive.lookup(norm_url, on_bytes=traffic.add)
             if hit is not None:
                 result = self._ingest_archive(
                     norm_url,
                     document,
                     hit,
                     status_label,
-                    bytes_down + hit.bytes_down,
+                    traffic.bytes_down,
                     started,
                     include_content,
                 )
                 if result is not None:
                     return result
-                bytes_down += hit.bytes_down  # 폴백은 무산됐지만 받은 건 받았다
 
-        # 문서가 아직 없어도 실패는 회계에 남긴다 (D-014).
-        self._log(
-            document.id if document else _UNREGISTERED,
-            "error",
-            response.status,
-            bytes_down,
-            started,
-        )
+        # 문서가 아직 없어도 실패는 회계에 남긴다 (D-014) — 기록은
+        # `_fetch_locked`의 한 곳에서 한다 (D-130·D-133).
         raise FetchFailed(
             f"HTTP {response.status}: {norm_url}", http_status=response.status
         )
@@ -663,6 +717,9 @@ class Anchor:
                 "changed": window.get("changed", 0)
                 + window.get("created", 0)
                 + window.get("renormalized", 0),
+                # 아카이브 구제도 표시되는 버킷 하나에 속해야 한다 — 빠지면
+                # 내역의 합이 총 요청 수와 맞지 않는다 (D-136, SPEC §7.7).
+                "archive": window.get("archive", 0),
                 "errors": window.get("error", 0),
                 "bytes_down": window["bytes_down"],
                 "bytes_saved_estimate": self._repository.bytes_saved_estimate_since(since),
@@ -913,16 +970,17 @@ class Anchor:
         document: Document | None,
         started: float,
         include_content: bool,
+        traffic: _Traffic,
     ) -> FetchResult | None:
         """원본에 닿지 못했을 때 아카이브에서 되살린다. 실패하면 None."""
         if not self._archive.enabled:
             return None
-        hit = self._archive.lookup(norm_url)
+        hit = self._archive.lookup(norm_url, on_bytes=traffic.add)
         if hit is None:
             return None
         status_label = document.status if document else "gone"
         return self._ingest_archive(
-            norm_url, document, hit, status_label, hit.bytes_down, started, include_content
+            norm_url, document, hit, status_label, traffic.bytes_down, started, include_content
         )
 
     def _ingest_archive(
@@ -1045,6 +1103,10 @@ class Anchor:
         # "직전에 서빙되던 판본"을 이 시간축으로만 알 수 있다 (D-083).
         if outcome != "cache_hit":
             self._repository.observe_version(document.id, version.id, utcnow_iso())
+        # 본문을 **기록 전에** 꺼낸다. gc가 방금 그 버전을 지우는 창에서
+        # 여기가 `DocumentNotFound`를 던지면, 성공 1행을 남긴 채 실패 경로의
+        # 회계가 한 행 더 붙는다 — "호출 1회 = 1행"이 깨진다 (D-130·D-133).
+        content = self._repository.get_version_text(version.id) if include_content else None
         elapsed_ms = self._log(document.id, outcome, http_status, bytes_down, started)
         return FetchResult(
             document_id=document.id,
@@ -1057,7 +1119,7 @@ class Anchor:
             char_count=version.char_count,
             source=version.source,
             network=Network(bytes_down=bytes_down, elapsed_ms=elapsed_ms),
-            content=self._repository.get_version_text(version.id) if include_content else None,
+            content=content,
         )
 
     def _log(

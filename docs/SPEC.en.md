@@ -18,7 +18,7 @@
 | Governing specs | RFC 7089, RFC 9110 (conditional requests), W3C Web Annotation Data Model, MCP 2026-07-28 |
 | Design rationale | `docs/decisions/0001` (prior art and positioning), `docs/decisions/0002` (licensing and reuse) |
 
-> **v1.9 → v1.10 change summary**: Reflects stage 6 (accounting, configuration, CLI — clusters 9–11) of the remediation. As its first item, the contention gate's verdict was replaced: instead of the UNRESOLVED increment over the foreground baseline it now gates **credit actually granted** (§10) — the increment gate could never pass on an idle machine, discriminated nothing on a loaded one, and a lost credit slipped past every existing gate. See §15 for the full list.
+> **v1.9 → v1.10 change summary**: Reflects stage 6 (accounting, configuration, CLI — clusters 9–11) of the remediation. Two accounting invariants were established — one user call = one `fetch_log` row whose outcome is the final result, and every byte actually downloaded is counted even when the call ends in failure (§7.7). `bytes_saved_estimate` was corrected to measure against the currently served body, `disk_bytes` was defined as actual occupancy after WAL reclamation, and an `archive` bucket was added so the breakdown sums to the total again (§7.7, §13). The contention gate's verdict was replaced: instead of the UNRESOLVED increment over the foreground baseline it now gates **credit actually granted** (§10). See §15 for the full list.
 >
 > **v1.8 → v1.9 change summary**: Reflects stage 5 of the remediation (Tasks and the server, cluster 8). A Task **ttl policy** was established (a call that omits ttl gets a server default of 30 minutes; zero and negative values are rejected; oversized requests are clamped to 24 hours with the actual value reported; the ttl key is never omitted from any response — §7.0); the retention period is counted from creation as the protocol defines, but is updated at termination to the actual retention so a long-running task's result does not vanish the moment it finishes (§7.0); server shutdown now **actually guarantees worker termination** before the store is closed (§7.0); and cancellation reacts at anchor granularity (§7.0). The cache-hit gate was strengthened to hold **while background matching is running**, with a loaded scenario added to the benchmark (§10). `list_documents`' status and `verify_citations`' time_budget_ms are validated once for all three call paths (§7.6, §7.3). See §16 for the full list.
 >
@@ -779,12 +779,27 @@ The criterion for `has_pending_verification` is **which version was verified**, 
     "requests": 1840,
     "cache_hits": 1102,
     "not_modified": 498,
-    "changed": 240,
+    "unchanged": 96,
+    "changed": 130,
+    "archive": 4,
+    "errors": 10,
+    "bytes_down": 4821023,
     "bytes_saved_estimate": 71303168,
     "hit_rate": 0.87
   }
 }
 ```
+
+**Accounting invariants** (v1.10) — if these two break, every number below them is a lie:
+
+1. **One user call = one `fetch_log` row, and its outcome is the final result.** A failure that ends in an exception (timeout, network error, redirect limit, size cap, extraction failure, robots refusal) is still one `error` row — if failures drop out of the denominator, `hit_rate` depends on the *kind* of failure (measured 2.67× inflation). A call rescued from an archive is one `archive` row, not an `error` row plus an `archive` row.
+2. **`bytes_down` is all the traffic the call actually downloaded — even when it ends in failure.** Not just the body: redirect-hop interstitial bodies, robots.txt, and futile archive lookups all count. Bytes that vanish with an exception undermine the credibility of every savings claim.
+
+It follows that **the breakdown (cache_hits + not_modified + unchanged + changed + archive + errors) sums to requests**, and `hit_rate = (cache_hits + not_modified) / requests`.
+
+Since the exact size at event time is not retained, `bytes_saved_estimate` approximates with the byte_size of **the body the origin is serving now** (`documents.current_version`) (v1.10) — measuring by the version with the latest capture time evaluates every saving against a version that is no longer being served for reverted and archive-rescued documents, and that inflation factor has no bound (measured 1220×). A document whose pointer is not yet set falls back to the last *observed* version.
+
+`disk_bytes` is what the store actually occupies on disk (main file + `-wal` + `-shm`). A WAL checkpoint is attempted right before measuring; if the store is in concurrent use, the file sizes of that moment are reported as they are (v1.10) — the WAL never shrinks after a checkpoint, so summing without reclaiming makes the same store look several times larger in a long-running process.
 
 `bytes_saved_estimate` is the metric by which the user directly confirms the savings. This number has to prove the tool's reason for existing on its own.
 
@@ -935,7 +950,7 @@ transport = "stdio"   # stdio | http
 | Item | Target | Measurement method |
 |---|---|---|
 | Cache hit response | p95 < 15 ms (content ≤ 1 MB, **including under background matching load**) | Benchmark suite (idle + under load, v1.9) |
-| Conditional request savings | 0 bytes downloaded for unchanged documents | `fetch_log` aggregation |
+| Conditional request savings | 0 **body** bytes downloaded for unchanged documents — measured on `cache_hit` and direct 304. Re-confirming through a redirect alias may be nonzero because the 3xx hop's interstitial body is honestly counted (v1.10) | `fetch_log` aggregation |
 | Anchor re-verification throughput | 500 anchors / 60 s (excluding network) | Benchmark |
 | **Anchor matching worst case** | **p99 < 250 ms per anchor, no stalls** | Heavily reworked document scenario |
 | **`UNRESOLVED` rate** | **under 1% on a normal corpus** | Golden benchmark |
@@ -1141,6 +1156,12 @@ Reflects stage 6 (accounting, configuration, CLI — clusters 9–11) of the rem
 | # | Section | Change | Underlying defect |
 |---|---|---|---|
 | 1 | **10** | The contention gate's verdict was replaced with **credit actually granted** (how much of the slept time was actually repaid) — the UNRESOLVED-increment gate is gone. Background starvation under a continuous foreground (UNRESOLVED saturation) is not a defect but the honest reporting §10 itself mandates | The increment gate measured one thing and hunted another: on an idle machine healthy code scores 100/100 (foreground baseline 0), so the gate could never pass; on a loaded machine the baseline saturates too, so the delta collapses to 0 and the gate passes while catching nothing — the stage-5 close PASS was the latter. A lost credit does not extend the deadline, so it *lowers* p99 and slips past the p99 gate as well (measured on a neutered copy: p99 202 ms PASS, 0 granted). Whether the debt was repaid is measured by the amount repaid (D-210) |
+| 2 | **7.7** | New accounting invariant: **one user call = one `fetch_log` row** (outcome is the final result), and the displayed breakdown sums to requests. A failure that ends in an exception is still one `error` row; an archive rescue is one `archive` row | Failures ending in exceptions (timeout, network, redirect limit, size cap, extraction failure, robots refusal) left no row at all, so hit_rate depended on the kind of failure (measured 2.67× inflation — poisoning the very instrument of the v0.4 observation window), and a call rescued after an unavailable robots verdict left error+archive rows, inflating the denominator and the error count at once (D-130, D-133) |
+| 3 | 7.7 | `bytes_down` counts **all traffic the call actually downloaded** even when it ends in failure (redirect-hop interstitial bodies, robots.txt, futile archive lookups included) | When robots refused mid-redirect, the body bytes of the hops already followed were lost wholesale with the exception, and the bytes of an archive lookup that ended in "no memento" were recorded nowhere (D-134, D-135) |
+| 4 | 7.7 | `bytes_saved_estimate` measures against **the body the origin is serving now** (`documents.current_version`); falls back to the last observed version when the pointer is absent | Measuring by the max-captured_at version evaluated every saving against a version no longer served for reverted and archive-rescued documents — with no bound on the inflation (measured 1220×). The "current body" pointer §4.1 introduced was used everywhere except accounting (D-131) |
+| 5 | 7.7 | New `disk_bytes` definition: actual occupancy (main+wal+shm), with a WAL checkpoint attempted right before measuring (reported as-is when in concurrent use) | The WAL never shrinks after a checkpoint, so a long-running process reported 13.5× the real load, and VACUUM rewrites the DB into the WAL so disk_bytes *grew* right after gc (D-132) |
+| 6 | 7.7 | Added the `archive` bucket to the displayed breakdown | outcome='archive' entered the denominator but no displayed bucket, so the breakdown did not sum to the request count (D-136) |
+| 7 | 13 | The completion criterion "0 bytes downloaded" is narrowed to **0 body bytes** (measured on cache_hit and direct 304) | Re-confirmation through a redirect alias honestly counts the 3xx hop's interstitial body, so it is nonzero — a corollary of accounting invariant 2 (fallout of D-134) |
 
 ## 16. v1.8 → v1.9 Change History
 

@@ -130,6 +130,9 @@ _WAL_ATTEMPTS = 10
 _WAL_RETRY_SECONDS = 0.05
 # 잠금 대기 상한. 큰 DB의 최초 마이그레이션을 견딜 만큼 넉넉해야 한다.
 _BUSY_TIMEOUT_SECONDS = 60.0
+# 회계 조회에 딸린 WAL 회수의 대기 상한 (D-132). 읽는 쪽이 있으면 포기한다 —
+# 디스크 사용량 보고 하나가 다른 도구를 멈춰 세울 이유가 없다.
+_CHECKPOINT_TIMEOUT_SECONDS = 0.25
 # 이보다 적게 남은 빈 페이지는 회수 비용이 이득보다 크다.
 _VACUUM_MIN_FREE_PAGES = 16
 # 한 번에 지우는 개수. SQLite의 바인딩 변수 상한보다 넉넉히 아래로 둔다.
@@ -227,12 +230,42 @@ class Repository:
         self._connection.close()
 
     def disk_bytes(self) -> int:
+        """저장소가 실제로 차지하는 바이트 (D-132).
+
+        -wal은 체크포인트 뒤에도 **줄지 않는다**. 커넥션을 계속 여는 장기
+        실행 프로세스(`anchor serve`)에서 그대로 더하면 같은 저장소가 새
+        프로세스에서와 몇 배 다르게 보고되고(실측 13.5배), gc의 VACUUM이
+        DB를 WAL로 다시 쓰는 바람에 회수 직후 오히려 늘어난다.
+        """
+        self.checkpoint_wal()
         total = 0
         for suffix in ("", "-wal", "-shm"):
             candidate = Path(str(self._db_path) + suffix)
             if candidate.exists():
                 total += candidate.stat().st_size
         return total
+
+    def checkpoint_wal(self) -> None:
+        """WAL을 본체로 옮기고 파일을 잘라낸다 (D-132).
+
+        **별도 커넥션**에서 짧은 대기로 시도한다. TRUNCATE 체크포인트는 읽는
+        쪽이 끝날 때까지 busy 핸들러에서 기다리므로, 공유 커넥션(대기 60초)에
+        걸면 회계 조회 하나가 저장소 락을 그만큼 붙잡는다 — SPEC §10 동시성
+        격리 위반이다. 지금 못 걷어내면 그대로 잰다: 그 순간 파일에 있는
+        것이 사실이다.
+        """
+        try:
+            connection = sqlite3.connect(
+                self._db_path, timeout=_CHECKPOINT_TIMEOUT_SECONDS, isolation_level=None
+            )
+        except sqlite3.OperationalError:
+            return
+        try:
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.OperationalError:
+            pass  # 동시 사용 중 — 다음 기회에
+        finally:
+            connection.close()
 
     def _apply_sql_atomically(
         self, sql: str, target_version: int, *, expected_version: int
@@ -819,6 +852,9 @@ class Repository:
         )
         try:
             connection.execute("VACUUM")
+            # VACUUM은 DB 전체를 **WAL에** 다시 쓴다. 회수하지 않으면 gc
+            # 직후 `disk_bytes`가 오히려 늘어난다 (D-132).
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except sqlite3.OperationalError:
             pass  # 다른 프로세스가 쓰는 중이면 다음 기회에
         finally:
@@ -851,19 +887,26 @@ class Repository:
     def bytes_saved_estimate_since(self, since_iso: str) -> int:
         """cache_hit·not_modified가 아니었다면 내려받았을 바이트의 추정치.
 
-        각 이벤트 시점의 정확한 크기는 남아 있지 않으므로 해당 문서의
-        최신 버전 byte_size로 근사한다.
+        각 이벤트 시점의 정확한 크기는 남아 있지 않으므로, **원문이 지금
+        서빙하는 본문**(`documents.current_version`)의 byte_size로 근사한다
+        (D-131). 캡처 시각 최대 버전으로 재면 되돌림·아카이브 문서에서
+        지금 서빙되지 않는 판본의 크기로 모든 cache_hit을 평가하게 되고,
+        그 과대 배수에는 상한이 없다 (실측 1220배). 포인터가 아직 없으면
+        마지막으로 **관측된** 판본으로 물러선다 — 관측의 시간축이 그
+        문서에 대해 우리가 아는 가장 최근의 사실이다 (D-083).
         """
         (total,) = self._connection.execute(
-            """SELECT COALESCE(SUM(latest.byte_size), 0)
+            """SELECT COALESCE(SUM(COALESCE(served.byte_size, observed.byte_size, 0)), 0)
                FROM fetch_log f
-               JOIN (
+               JOIN documents d ON d.id = f.document_id
+               LEFT JOIN versions served ON served.id = d.current_version
+               LEFT JOIN (
                  SELECT document_id, byte_size,
                         ROW_NUMBER() OVER (
-                          PARTITION BY document_id ORDER BY captured_at DESC, id DESC
+                          PARTITION BY document_id ORDER BY last_observed_seq DESC, id DESC
                         ) AS rn
                  FROM versions
-               ) latest ON latest.document_id = f.document_id AND latest.rn = 1
+               ) observed ON observed.document_id = f.document_id AND observed.rn = 1
                WHERE f.requested_at >= ? AND f.outcome IN ('cache_hit', 'not_modified')""",
             (since_iso,),
         ).fetchone()

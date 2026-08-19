@@ -65,6 +65,10 @@ class FixtureState:
         # 본문이 섞였다"를 관측할 수 없다 — 섞여도 똑같이 보이기 때문이다.
         self.bodies: dict[str, str] = {}
         self.etags: dict[str, str] = {}
+        # 리다이렉트 응답의 본문. 실제 서버의 3xx는 대개 짧은 안내 문서를
+        # 함께 준다 — 0바이트로 두면 "따라온 홉의 본문 바이트"라는 축이
+        # 픽스처에 존재하지 않는다 (D-134가 살아남은 자리).
+        self.redirect_body: bytes = b"<html><body>Moved.</body></html>"
         # 실패 응답에도 본문을 실을지 (크기 상한 검증용)
         self.status_override_with_body: bool = False
         # 애그리게이터 응답을 이상한 페이로드로 바꿔치기 (파싱 견고성 검증용)
@@ -109,8 +113,10 @@ class _Handler(BaseHTTPRequestHandler):
                 state.redirect_statuses.get(self.path, state.redirect_status)
             )
             self.send_header("Location", state.redirects[self.path])
-            self.send_header("Content-Length", "0")
+            self.send_header("Content-Length", str(len(state.redirect_body)))
             self.end_headers()
+            if state.redirect_body:
+                self.wfile.write(state.redirect_body)
             return
 
         if state.response_delay:
@@ -216,16 +222,33 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 @pytest.fixture()
-def fixture_server():
-    state = FixtureState()
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-    server.state = state  # type: ignore[attr-defined]
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    base_url = f"http://127.0.0.1:{server.server_address[1]}"
-    yield base_url, state
-    server.shutdown()
-    server.server_close()
+def fixture_server_factory():
+    """픽스처 서버를 여러 개 띄운다.
+
+    원본과 아카이브가 **다른 호스트**여야만 성립하는 계약이 있다 — 원본
+    호스트의 robots가 판정 불능(5xx)인데 아카이브에서 구제되는 경로가
+    그렇다 (D-133). 한 서버로는 그 축이 존재하지 않는다.
+    """
+    servers: list[ThreadingHTTPServer] = []
+
+    def start() -> tuple[str, FixtureState]:
+        state = FixtureState()
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        server.state = state  # type: ignore[attr-defined]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        servers.append(server)
+        return f"http://127.0.0.1:{server.server_address[1]}", state
+
+    yield start
+    for server in servers:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.fixture()
+def fixture_server(fixture_server_factory):
+    return fixture_server_factory()
 
 
 @pytest.fixture()

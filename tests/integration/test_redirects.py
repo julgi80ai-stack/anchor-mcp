@@ -52,7 +52,9 @@ def test_conditional_request_uses_stored_validators_after_redirect(fixture_serve
     anchor.fetch(f"{base_url}/old")
     result = anchor.fetch(f"{base_url}/old", max_age=0)
     assert result.outcome == "not_modified", "조건부 요청이 무력화됐다"
-    assert result.network.bytes_down == 0
+    # 본문은 한 바이트도 받지 않았지만, 리다이렉트 홉의 안내 문서는 실제로
+    # 받았다 — 회계는 실제로 나간 트래픽을 말한다 (D-134).
+    assert result.network.bytes_down == len(state.redirect_body)
 
 
 def test_original_url_resolves_for_cite_and_timemap(fixture_server, anchor):
