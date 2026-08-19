@@ -329,3 +329,52 @@ async def test_mcp_responses_carry_the_coverage_facts(fixture_server, mcp_server
         report = await client.call_tool("verify_citations", {})
         assert report.structured_content["summary"]["INTACT"] == 1
         assert report.structured_content["low_coverage"] == 1
+
+
+async def test_fetch_document_discloses_a_redirect_without_judging_it(
+    fixture_server, mcp_server
+):
+    """리다이렉트는 사실이고, soft-404 판정은 우리 일이 아니다 (D-247).
+
+    영구 리다이렉트 직후 그 문서의 앵커가 전부 MISSING이면 그것이 soft-404의
+    모양이다 — 두 신호 중 하나를 우리가 말하지 않으면 에이전트는 이을 수 없다.
+    """
+    base_url, state = fixture_server
+    state.redirects = {"/moved": f"{base_url}/article"}
+    state.redirect_status = 301
+    async with Client(mcp_server) as client:
+        moved = await client.call_tool("fetch_document", {"url": f"{base_url}/moved"})
+        assert moved.structured_content["redirect"] == {
+            "to": f"{base_url}/article",
+            "permanent": True,
+        }
+        direct = await client.call_tool(
+            "fetch_document", {"url": f"{base_url}/article", "max_age": 0}
+        )
+        assert "redirect" not in direct.structured_content
+
+
+async def test_export_robust_links_names_the_url_the_caller_cited(
+    fixture_server, mcp_server
+):
+    """MCP 경로에서도 내보내기가 정본 URL이 아니라 **인용한 URL**을 찍는다 (D-244)."""
+    base_url, state = fixture_server
+    state.redirects = {"/moved": f"{base_url}/article"}
+    state.redirect_status = 301
+    async with Client(mcp_server) as client:
+        fetched = await client.call_tool("fetch_document", {"url": f"{base_url}/moved"})
+        cited = await client.call_tool(
+            "cite", {"document_id": fetched.structured_content["document_id"], "quote": QUOTE}
+        )
+        exported = await client.call_tool(
+            "export_robust_links",
+            {"anchor_ids": [cited.structured_content["anchor_id"]]},
+        )
+        item = exported.structured_content["items"][0]["html"]
+        assert f'data-originalurl="{base_url}/moved"' in item, item
+        assert f'href="{base_url}/article"' in item, item
+
+        timemap = await client.call_tool(
+            "get_timemap", {"document_id": fetched.structured_content["document_id"]}
+        )
+        assert f'<{base_url}/moved>; rel="original"' in timemap.structured_content["body"]

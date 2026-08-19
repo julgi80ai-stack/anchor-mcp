@@ -158,3 +158,91 @@ def test_json_format_says_which_memento_is_last():
     rels = {item["version_id"]: item["rel"] for item in payload["mementos"]}
     assert rels == {"v-a": "first last memento", "v-b": "memento"}
     assert payload["mementos"][0]["last_observed_at"] == "2026-08-20T00:00:00Z"
+
+
+# -- D-244·D-245·D-246: 인용의 정체성 우선순위 -------------------------------
+
+MOVED_DOC = Document(
+    id="doc-2",
+    url="https://cdn.example.net/export/9f2c7a1e/8d3e5f0a/",  # 일회용 세션 토큰
+    original_url="https://docs.example.com/document/d/1aBcD/export?format=txt",
+    title="2026 Report",
+    first_seen_at="2026-07-15T09:11:00Z",
+    last_checked_at="2026-08-16T04:12:00Z",
+    status="live",
+    etag=None,
+    last_modified=None,
+    robots_allowed=True,
+)
+
+
+def _anchor(cited_url: str | None):
+    from anchor.models import AnchorRecord
+
+    return AnchorRecord(
+        id="anc-1",
+        document_id="doc-2",
+        created_version="v-new",
+        exact="인용문",
+        prefix="앞",
+        suffix="뒤",
+        position_hint=0,
+        exact_hash="b3:x",
+        quality="ok",
+        note=None,
+        created_at="2026-08-16T04:12:00Z",
+        cited_url=cited_url,
+    )
+
+
+def test_export_prefers_the_url_recorded_on_the_anchor():
+    """앵커가 자기 정체성을 알면 그것이 먼저다 — 병합 뒤에도 살아남는 유일한 값."""
+    cited = "https://old.example.org/2026/report"
+    html = robustlinks.to_html(MOVED_DOC, V2, _anchor(cited))
+    assert f'data-originalurl="{cited}"' in html
+    assert f'href="{MOVED_DOC.url}"' in html  # "지금 볼 곳"은 그대로다
+    md = robustlinks.to_markdown(MOVED_DOC, V2, _anchor(cited))
+    assert f'data-originalurl="{cited}"' in md
+    assert f"({MOVED_DOC.url})" in md
+    note = robustlinks.to_bibtex_note(MOVED_DOC, V2, _anchor(cited))
+    assert cited in note and MOVED_DOC.url not in note
+
+
+def test_export_falls_back_to_the_documents_identity_when_the_anchor_predates_v9():
+    """`cited_url`이 NULL이면 문서의 `original_url`이 우리가 아는 전부다."""
+    html = robustlinks.to_html(MOVED_DOC, V2, _anchor(None))
+    assert f'data-originalurl="{MOVED_DOC.original_url}"' in html
+    md = robustlinks.to_markdown(MOVED_DOC, V2, _anchor(None))
+    assert f'data-originalurl="{MOVED_DOC.original_url}"' in md
+    note = robustlinks.to_bibtex_note(MOVED_DOC, V2, _anchor(None))
+    assert MOVED_DOC.original_url in note
+
+
+def test_export_without_an_anchor_uses_the_documents_identity():
+    """앵커 없이 직렬화하는 호출자(축 ③)도 정본 URL을 찍어서는 안 된다."""
+    html = robustlinks.to_html(MOVED_DOC, V2)
+    assert f'data-originalurl="{MOVED_DOC.original_url}"' in html
+
+
+def test_timemap_original_is_the_documents_identity_not_its_fetch_target():
+    """RFC 7089의 URI-R는 **원 리소스**다 (D-245)."""
+    body = timemap.to_link_format(MOVED_DOC, [V1, V2])
+    assert f'<{MOVED_DOC.original_url}>; rel="original"' in body
+    assert MOVED_DOC.url not in body
+    payload = timemap.to_json_format(MOVED_DOC, [V1, V2])
+    assert payload["original_uri"] == MOVED_DOC.original_url
+
+
+def test_a_titleless_export_labels_the_link_with_the_cited_url():
+    """제목이 없을 때의 대체 표기도 출력물이다 (D-244).
+
+    정본 URL을 쓰면 독자가 **보는** 문구가 사용자가 인용한 적 없는 주소가 된다.
+    """
+    from dataclasses import replace
+
+    titleless = replace(MOVED_DOC, title=None)
+    cited = "https://old.example.org/2026/report"
+    html_out = robustlinks.to_html(titleless, V2, _anchor(cited))
+    assert f">{cited}</a>" in html_out, html_out
+    md = robustlinks.to_markdown(titleless, V2, _anchor(cited))
+    assert md.startswith(f"[{cited}]"), md

@@ -1,5 +1,5 @@
 -- SPDX-License-Identifier: Apache-2.0
--- Anchor 스키마 v8 — 신규 DB용 전체 스키마 (SPEC §4.1 + robots 캐시).
+-- Anchor 스키마 v9 — 신규 DB용 전체 스키마 (SPEC §4.1 + robots 캐시).
 -- 기존 DB는 migrations/ 아래의 증분 SQL로 따라온다.
 
 -- 논리적 문서 (Memento: Original Resource / URI-R). URL 정규화 후 유일.
@@ -96,7 +96,13 @@ CREATE TABLE anchors (
     -- 생성 시점에 인용문이 원문에 몇 번 나왔는가 (v7). 앵커는 첫 출현에
     -- 묶이므로 2 이상이면 어느 인스턴스가 "그" 인용인지 모호하다. NULL은
     -- v7 이전에 만들어져 **모르는** 것이다 — 1로 채우면 단정이 된다.
-    occurrences       INTEGER
+    occurrences       INTEGER,
+    -- 이 앵커가 **인용한 URL** (v9, D-246). 생성 시점 문서의 original_url이다.
+    -- 문서를 경유해서는 알 수 없다 — 병합은 source의 original_url을 버리고
+    -- documents 행을 지우므로, 옮겨간 앵커는 target의 정체성을 물려받는다.
+    -- NULL은 v9 이전에 만들어져 **모르는** 것이다(내보내기는 그때만 문서의
+    -- original_url로 물러선다).
+    cited_url         TEXT
 );
 
 -- 재검증 이력.

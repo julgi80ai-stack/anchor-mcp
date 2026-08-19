@@ -1,0 +1,15 @@
+-- SPDX-License-Identifier: Apache-2.0
+-- v8 → v9: 앵커가 **어느 URL을 인용한 것인지**를 스스로 기록한다 (D-246).
+--
+-- 인용의 정체성은 지금까지 `documents.original_url`을 경유해서만 알 수 있었다.
+-- 그런데 문서는 사라질 수 있다 — `merge_document`는 source의 `url`만 별칭으로
+-- 남기고 `original_url`은 버린다(그것이 documents 행을 지우는 유일한 경로다).
+-- 앵커는 target으로 옮겨가면서 **남의 정체성**을 물려받고, 그 앵커의 Robust
+-- Links는 사용자가 인용한 적 없는 URL을 출력한다.
+--
+-- 기존 행은 전부 NULL이다 — 그 앵커가 어느 URL을 인용했는지는 저장된 적이
+-- 없다. 지금 문서의 `original_url`로 채우고 싶어지지만, 그 문서는 그 사이
+-- 병합됐을 수 있으므로 그것은 **되짚어 안 것이 아니라 추측**이다. NULL은
+-- "모른다"이고, 내보내기는 그때만 문서의 정체성으로 물러선다 (v7
+-- occurrences·v8 coverage와 같은 판단).
+ALTER TABLE anchors ADD COLUMN cited_url TEXT;

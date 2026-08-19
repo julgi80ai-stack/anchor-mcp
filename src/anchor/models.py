@@ -156,6 +156,21 @@ class Coverage:
 
 
 @dataclass(frozen=True)
+class Redirect:
+    """이번 호출에서 실제로 따라간 리다이렉트 (v9, D-247). **사실이지 판단이 아니다.**
+
+    기사가 삭제되고 홈으로 301되는 soft-404는 이 도구가 가장 자주 만나는
+    링크 부패의 모양이지만, 우리는 그것을 **판정하지 않는다** — 해시 비교로는
+    정상 개정과 구분되지 않고(모든 개정이 해시를 바꾼다), 유사도 문턱은 곧
+    판단이다. 대신 이미 있는 신호를 건넨다: "영구 리다이렉트가 있었다"와
+    "그 문서의 앵커가 전부 MISSING"을 잇는 것은 에이전트의 일이다.
+    """
+
+    to: str          # 도달한 곳 (정규화된 최종 URL)
+    permanent: bool  # 301·308이면 참. 302·307·303은 거짓이다 (SPEC §5.1)
+
+
+@dataclass(frozen=True)
 class Document:
     id: str
     url: str
@@ -209,6 +224,12 @@ class AnchorRecord:
     # 하다. `cite` 응답 문자열로만 두면 다른 세션에서 재검증하는 사용자는
     # 그 모호성을 알 길이 없다. `None`은 v7 이전에 만들어져 **모르는** 것이다.
     occurrences: int | None = None
+    # 이 앵커가 **인용한 URL** (v9, D-246). 생성 시점 문서의 `original_url`이다.
+    # 문서를 경유해 답할 수 없는 이유는 문서가 사라질 수 있기 때문이다 —
+    # 병합은 source의 `original_url`을 버리고 그 행을 지우므로, 옮겨간 앵커는
+    # target의 정체성을 물려받는다. 앵커는 "이 URL의 이 문장을 인용했다"는
+    # 기록이어야 한다. `None`은 v9 이전에 만들어져 **모르는** 것이다.
+    cited_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -328,6 +349,11 @@ class FetchResult:
     coverage: Coverage = field(default_factory=Coverage.unknown)
     # 포착 범위에 대해 할 말 (D-239·D-242). 판정을 바꾸지 않는 사실 문장이다.
     notes: tuple[str, ...] = ()
+    # 이번 호출에서 리다이렉트를 따라갔는가 (D-247). `None`은 두 가지다 —
+    # 리다이렉트가 없었거나(200 직행), 이번 호출이 네트워크에 나가지 않아
+    # **볼 기회가 없었다**(cache_hit). 후자는 `outcome`이 이미 말한다.
+    # **판정(outcome)은 이 값과 무관하다.**
+    redirect: Redirect | None = None
     content: str | None = field(default=None, repr=False)
 
     @property

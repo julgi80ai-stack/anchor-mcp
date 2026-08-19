@@ -115,7 +115,7 @@ anchor-mcp/
 ├── NOTICE                     저작권 고지 · attribution (distributed)
 ├── THIRD-PARTY.md             제3자 라이선스 대장 · third-party license ledger
 ├── docs/
-│   ├── SPEC.md                기술사양서 v1.13 · technical spec (Korean)
+│   ├── SPEC.md                기술사양서 v1.14 · technical spec (Korean)
 │   ├── MANIFESTO.md           설계 철학 · design philosophy (Korean)
 │   └── decisions/             ADR — 판단 기록 (동결) · frozen decision records
 ├── src/anchor/                구현 · implementation (fetcher / normalize / anchoring / export / store / server / cli)
@@ -140,8 +140,8 @@ The ledger and the decision records serve different purposes: `THIRD-PARTY.md` a
 
 | 항목 · Item | 상태 · State |
 |---|---|
-| 기술사양서 · Spec | v1.13 (2026-08-19, KR/EN) |
-| 구현 · Implementation | **v1.11.0** (2026-08-19) — 우리가 무엇을 모르는지 말한다: **문서의 얼마를 보고 그 말을 하는지 밝힌다**(산문 포착률 — RFC 9110은 1.4%). 판정은 그대로 두고 사실만 더한다 · We say what we do not know: the tool now states **how much of a document it saw before speaking** (prose capture ratio — 1.4% for RFC 9110). Verdicts are untouched; only facts are added. 테스트 1100개 · 1100 tests. CI: 3 OS × Python 3.11–3.13, license gate, benchmark gate |
+| 기술사양서 · Spec | v1.14 (2026-08-19, KR/EN) |
+| 구현 · Implementation | **v1.12.0** (2026-08-19) — 인용의 정체성은 움직이지 않는다: 내보내기가 **사용자가 인용한 그 URL**을 출력하고(페치 대상과 분리), 리다이렉트는 판단 없이 사실로 고지한다 · A citation's identity does not move: exports now emit **the URL the user actually cited** (separated from the fetch target), and a redirect is disclosed as a fact without judgment. 테스트 1136개 · 1136 tests. CI: 3 OS × Python 3.11–3.13, license gate, benchmark gate |
 | 실사용 관찰 · Field observation | 30일 hit_rate 관찰 창 진행 중 · 30-day hit-rate window in progress (`anchor stats`) |
 | 라이선스 감사 · License audit | 카피레프트 강제 0건 · zero forced copyleft (선택형 `tld`는 MPL-1.1 선택 · disjunctive `tld` elected as MPL-1.1, THIRD-PARTY §4.4) |
 

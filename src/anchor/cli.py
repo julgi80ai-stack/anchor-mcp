@@ -81,6 +81,10 @@ def fetch(
         typer.echo(f"  제목      {result.title}")
     typer.echo(f"  버전      {result.version_id}  ({result.captured_at}, {result.source})")
     typer.echo(f"  text_hash {result.text_hash}")
+    if result.redirect is not None:
+        # 사실이지 경고가 아니다 (D-247) — 판정은 하지 않는다.
+        kind = "영구" if result.redirect.permanent else "일시"
+        typer.echo(f"  리다이렉트 {kind} → {result.redirect.to}")
     if result.raw_changed:
         # 판정은 unchanged다. 달라진 것은 우리가 보는 영역 **밖**이다 (D-232).
         typer.secho(

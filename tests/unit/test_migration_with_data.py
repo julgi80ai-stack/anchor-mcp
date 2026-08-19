@@ -154,7 +154,7 @@ def _user_version(path: Path) -> int:
 # -- D-077: 데이터가 든 구 DB의 마이그레이션 -------------------------------
 
 
-@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6, 7])
+@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6, 7, 8])
 def test_migrates_old_db_that_has_rows(tmp_path, source_version):
     path = tmp_path / f"v{source_version}.db"
     build_old_db(path, source_version)
@@ -171,7 +171,7 @@ def test_migrates_old_db_that_has_rows(tmp_path, source_version):
         assert after["verifications"] == before["verifications"] == 1
 
 
-@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6, 7])
+@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6, 7, 8])
 def test_migration_leaves_no_dangling_references(tmp_path, source_version):
     """표를 다시 만드는 v5 이후에도 참조가 살아 있어야 한다."""
     path = tmp_path / f"fk-v{source_version}.db"
@@ -220,6 +220,64 @@ def test_migrated_db_with_rows_is_usable(tmp_path):
             source="archive",
             source_uri="https://archive.test/x",
         )
+    finally:
+        repository.close()
+
+
+# -- D-246: 인용의 정체성은 앵커에 남는다 (v9) -------------------------------
+
+
+@pytest.mark.parametrize("source_version", [2, 3, 4, 5, 6, 7, 8])
+def test_pre_v9_anchors_do_not_claim_a_cited_url_they_never_recorded(
+    tmp_path, source_version
+):
+    """v9 이전 앵커의 `cited_url`은 **NULL**이다 (D-246).
+
+    문서의 `original_url`로 채우고 싶어지지만, 그 문서는 그 사이 병합됐을 수
+    있고 그러면 남의 정체성을 그 앵커의 것으로 단정하는 셈이다. v7
+    `occurrences`·v8 `coverage`와 같은 판단이다 — 모르는 것은 NULL로 둔다.
+    """
+    path = tmp_path / f"cited-v{source_version}.db"
+    build_old_db(path, source_version)
+    Repository(path).close()
+
+    connection = sqlite3.connect(path)
+    try:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(anchors)").fetchall()
+        }
+        assert "cited_url" in columns, "v9 열이 만들어지지 않았다"
+        rows = connection.execute("SELECT id, cited_url FROM anchors").fetchall()
+        assert rows, "픽스처 전제: 앵커 행이 실제로 있다"
+        assert all(row[1] is None for row in rows), rows
+    finally:
+        connection.close()
+
+
+def test_a_new_anchor_after_migration_records_its_cited_url(tmp_path):
+    """마이그레이션된 DB에서 **새로** 만든 앵커는 정체성을 기록한다."""
+    path = tmp_path / "cited-new.db"
+    build_old_db(path, 8)
+    repository = Repository(path)
+    try:
+        document = repository.get_document("doc-2")
+        assert document is not None
+        assert document.url != document.original_url, "픽스처 전제: 이사한 문서다"
+        created = repository.insert_anchor(
+            document_id="doc-2",
+            created_version="ver-3",
+            exact="인용문 하나가 여기에 있다",
+            prefix="앞",
+            suffix="뒤",
+            position_hint=0,
+            exact_hash="b3:x",
+            quality="ok",
+            note=None,
+            created_at="2026-08-19T00:00:00Z",
+            cited_url=document.original_url,
+        )
+        assert created.cited_url == document.original_url
+        assert repository.get_anchor(created.id).cited_url == document.original_url
     finally:
         repository.close()
 
@@ -544,7 +602,7 @@ def test_lock_contention_is_still_retried(monkeypatch):
 # -- D-083: 관측 시간축을 뒤늦게 도입할 때 -----------------------------------
 
 
-@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6, 7])
+@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6, 7, 8])
 def test_observation_timeline_is_seeded_for_existing_rows(tmp_path, source_version):
     """v6 이전의 행에도 **관측 순서가 있어야** 한다 (D-083).
 
@@ -644,7 +702,7 @@ def test_migration_puts_the_current_body_newest(tmp_path):
 # -- D-231: v6 → v7, 중복 출현 횟수 ------------------------------------------
 
 
-@pytest.mark.parametrize("source_version", [2, 3, 4, 5, 6, 7])
+@pytest.mark.parametrize("source_version", [2, 3, 4, 5, 6, 7, 8])
 def test_existing_anchors_admit_they_do_not_know_their_occurrence_count(
     tmp_path, source_version
 ):
@@ -692,7 +750,7 @@ def test_new_anchors_carry_their_occurrence_count_after_migration(tmp_path):
 # -- D-239: v7 → v8, 포착 범위 -----------------------------------------------
 
 
-@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6, 7])
+@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6, 7, 8])
 def test_existing_versions_admit_they_do_not_know_their_coverage(
     tmp_path, source_version
 ):

@@ -4,6 +4,11 @@
 로컬 버전에는 `anchor://` URI 스킴을 부여하고, 아카이브에서 온 버전은
 실제 URI-M을 그대로 노출한다. 외부 Memento 클라이언트가 읽을 수 있는
 application/link-format으로 내보낸다.
+
+`rel="original"`(RFC 7089의 URI-R)은 **원 리소스**다 — 우리가 지금 본문을
+가지러 가는 곳(`documents.url`)이 아니라 그 문서로서 등록된 곳
+(`documents.original_url`)이다 (D-245). 영구 리다이렉트가 정본 URL을 옮긴
+뒤에도 TimeMap이 가리키는 원 리소스는 옮겨가지 않는다.
 """
 
 from __future__ import annotations
@@ -16,6 +21,11 @@ from anchor.models import Document, Version, parse_iso
 def _http_date(iso: str) -> str:
     """ISO 8601 → RFC 1123 HTTP-date (Memento-Datetime 표기)."""
     return format_datetime(parse_iso(iso), usegmt=True)
+
+
+def _original_uri(document: Document) -> str:
+    """이 TimeMap이 말하는 원 리소스 (URI-R). `documents.url`이 아니다 (D-245)."""
+    return document.original_url
 
 
 def _memento_uri(document: Document, version: Version) -> str:
@@ -62,7 +72,7 @@ def _last_memento_index(document: Document, versions: list[Version]) -> int:
 def to_link_format(document: Document, versions: list[Version]) -> str:
     """versions는 captured_at 오름차순이어야 한다."""
     lines = [
-        f'<{document.url}>; rel="original"',
+        f'<{_original_uri(document)}>; rel="original"',
         f'<anchor:///{document.id}/timemap>; rel="self"; type="application/link-format"',
     ]
     last = _last_memento_index(document, versions)
@@ -87,7 +97,7 @@ def _rel(index: int, last: int) -> str:
 def to_json_format(document: Document, versions: list[Version]) -> dict:
     last = _last_memento_index(document, versions)
     return {
-        "original_uri": document.url,
+        "original_uri": _original_uri(document),
         "timemap_uri": f"anchor:///{document.id}/timemap",
         "mementos": [
             {

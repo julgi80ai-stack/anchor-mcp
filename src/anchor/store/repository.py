@@ -16,7 +16,7 @@ import zstandard
 from anchor.errors import DocumentNotFound, StorageError
 from anchor.models import AnchorRecord, Coverage, Document, Version, uuid7
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 ZSTD_LEVEL = 6
 
 
@@ -182,6 +182,7 @@ MIGRATION_FILES: dict[int, str] = {
     6: "migrations/0006_version_observation.sql",
     7: "migrations/0007_anchor_occurrences.sql",
     8: "migrations/0008_version_coverage.sql",
+    9: "migrations/0009_anchor_cited_url.sql",
 }
 
 
@@ -207,6 +208,14 @@ def _row_coverage(row: sqlite3.Row) -> Coverage:
         captured_chars=row["coverage_captured_chars"],
         dropped=Coverage.decode_dropped(row["coverage_dropped"]),
     )
+
+
+def _row_optional(row: sqlite3.Row, column: str):
+    """v9 이후에 생긴 열을 방어적으로 읽는다 — 구버전 행 표현에서는 없다."""
+    try:
+        return row[column]
+    except (IndexError, KeyError):
+        return None
 
 
 def _coverage_columns(coverage: Coverage | None) -> tuple:
@@ -570,6 +579,18 @@ class Repository:
             return
         with self._connection:
             connection = self._connection
+            # 옮기기 전에 source의 정체성을 앵커에 새긴다 (D-246). 병합은
+            # source의 `original_url`을 버리고 그 행을 지우는 유일한 경로이므로,
+            # 여기서 남기지 않으면 v9 이전에 만들어진 앵커(`cited_url` NULL)의
+            # 폴백 대상이 **target의 정체성**으로 바뀐다 — 사용자가 인용한 적
+            # 없는 URL이다. 새로 아는 사실을 만드는 것이 아니라, 지금 이 순간
+            # 내보내기가 쓰고 있는 값을 사라지기 전에 고정하는 것이다.
+            connection.execute(
+                """UPDATE anchors SET cited_url = (
+                       SELECT original_url FROM documents WHERE id = ?
+                   ) WHERE document_id = ? AND cited_url IS NULL""",
+                (source_id, source_id),
+            )
             connection.execute(
                 "UPDATE documents SET current_version = NULL WHERE id = ?", (source_id,)
             )
@@ -1135,6 +1156,7 @@ class Repository:
         note: str | None,
         created_at: str,
         occurrences: int | None = None,
+        cited_url: str | None = None,
     ) -> AnchorRecord:
         anchor_id = uuid7()
         with self._connection:
@@ -1151,8 +1173,8 @@ class Repository:
                 """INSERT INTO anchors
                    (id, document_id, created_version, exact, prefix, suffix,
                     position_hint, exact_hash, quality, note, created_at,
-                    occurrences)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    occurrences, cited_url)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     anchor_id,
                     document_id,
@@ -1166,6 +1188,9 @@ class Repository:
                     note,
                     created_at,
                     occurrences,
+                    # 이 앵커가 인용한 URL (D-246). 문서는 병합으로 사라질 수
+                    # 있으므로, 정체성은 앵커 자신이 들고 있어야 한다.
+                    cited_url,
                 ),
             )
             row = self._connection.execute(
@@ -1314,6 +1339,7 @@ class Repository:
             note=row["note"],
             created_at=row["created_at"],
             occurrences=row["occurrences"],
+            cited_url=_row_optional(row, "cited_url"),
         )
 
     @staticmethod

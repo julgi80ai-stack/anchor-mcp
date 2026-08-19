@@ -519,6 +519,15 @@ def build_server(
                 "elapsed_ms": result.network.elapsed_ms,
             },
         }
+        if result.redirect is not None:
+            # 이번 호출에서 실제로 따라간 리다이렉트다 (D-247). **사실만
+            # 싣는다** — 이것이 soft-404인지, 인용이 아직 유효한지는 판정하지
+            # 않는다. 영구 리다이렉트 뒤 그 문서의 앵커가 전부 MISSING이면
+            # 그것이 soft-404의 모양이고, 두 신호를 잇는 것은 호출자의 일이다.
+            payload["redirect"] = {
+                "to": result.redirect.to,
+                "permanent": result.redirect.permanent,
+            }
         if include_content and result.content is not None:
             if start_index < 0 or max_length < 0:
                 raise ValueError(

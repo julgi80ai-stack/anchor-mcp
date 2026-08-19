@@ -43,6 +43,7 @@ from anchor.models import (
     Document,
     FetchResult,
     Network,
+    Redirect,
     VerifyReport,
     Version,
     age_seconds,
@@ -139,6 +140,23 @@ def _with_archive_note(error: AnchorError) -> AnchorError:
             message, http_status=error.http_status, reason=error.reason
         )
     return AnchorError(message)
+
+
+def _observed_redirect(norm_url: str, response: FetchResponse) -> Redirect | None:
+    """이번 응답이 리다이렉트를 지나서 왔는가 (D-247).
+
+    최종 URL은 정규화해서 싣는다 — 응답의 다른 URL 필드가 전부 정규화된
+    값이므로, 여기만 원문 표기로 두면 호출자가 두 표기를 대조해야 한다.
+    정규화가 실패하는 목적지(우리가 따라가지 않았을 URL)는 그 자리에서
+    보고할 사실이 아니므로 조용히 비운다.
+    """
+    try:
+        final_url = normalize_url(response.final_url)
+    except AnchorError:
+        return None
+    if final_url == norm_url:
+        return None
+    return Redirect(to=final_url, permanent=response.permanent_redirect)
 
 
 def _may_consult_archive(error: AnchorError) -> bool:
@@ -583,6 +601,9 @@ class Anchor:
                 traffic.bytes_down,
                 started,
                 include_content,
+                # 본문이 안 바뀌었다는 것과 **그 홉이 리다이렉트를 지났다**는
+                # 것은 다른 사실이다 (D-247).
+                redirect=_observed_redirect(norm_url, response),
             )
 
         if response.status == 200:
@@ -665,6 +686,10 @@ class Anchor:
             # 출현 횟수를 저장한다 (D-231). 응답 문자열로만 두면 다른 세션의
             # verify는 이 모호성을 알 길이 없다.
             occurrences=selector.occurrences,
+            # 이 앵커가 **인용한 URL** (D-246). 문서의 `url`은 영구 리다이렉트를
+            # 따라 움직이고(§5.1), 병합에서는 문서 행 자체가 사라진다. 인용의
+            # 정체성은 그때 잃어서는 안 되므로 앵커가 직접 들고 있는다.
+            cited_url=document.original_url,
         )
         warnings_list: list[str] = []
         if selector.quality == QUALITY_SHORT:
@@ -1300,6 +1325,13 @@ class Anchor:
         final_url = normalize_url(response.final_url)
         moved = final_url != norm_url and response.permanent_redirect
         canonical_url = final_url if moved else norm_url
+        # 정본 URL을 바꾸는지와 무관하게, 리다이렉트를 지났다는 것은 사실이다
+        # (D-247). 일시 리다이렉트도 마찬가지다 — 판단은 하지 않는다.
+        redirect = (
+            Redirect(to=final_url, permanent=response.permanent_redirect)
+            if final_url != norm_url
+            else None
+        )
 
         if document is not None and final_url == norm_url and document.url != norm_url:
             # 옛 별칭이 리다이렉트를 멈추고 **자기 콘텐츠**를 서빙하기
@@ -1359,6 +1391,7 @@ class Anchor:
                 started,
                 include_content,
                 coverage=normalized.coverage,
+                redirect=redirect,
             )
 
         # 직전 관측본과 비교한다 — 캡처 시각 최대값이 아니라 "원문이 지금까지
@@ -1420,6 +1453,7 @@ class Anchor:
             include_content,
             raw_changed=raw_changed,
             coverage=normalized.coverage,
+            redirect=redirect,
         )
 
     def _recover_from_archive(
@@ -1566,6 +1600,7 @@ class Anchor:
         *,
         raw_changed: bool = False,
         coverage: Coverage | None = None,
+        redirect: Redirect | None = None,
     ) -> FetchResult:
         # 원문을 실제로 관측한 결과라면 관측을 남긴다 — 포인터와 관측 시각.
         # cache_hit은 관측이 아니므로 건드리지 않는다 (D-011/D-012/D-024).
@@ -1609,6 +1644,10 @@ class Anchor:
             # 포착 범위에 대해 할 말이 있으면 문장으로 함께 싣는다 (D-239·
             # D-242). **판정(outcome)은 이 문장들과 무관하다.**
             notes=coverage_notes(coverage, raw_changed=raw_changed),
+            # 이번 호출에서 실제로 따라간 리다이렉트 (D-247). 사실만 싣는다 —
+            # 그것이 soft-404인지, 인용이 여전히 유효한지는 우리가 판정하지
+            # 않는다. cache_hit은 네트워크에 나가지 않았으므로 항상 None이다.
+            redirect=redirect,
             content=content,
         )
 
