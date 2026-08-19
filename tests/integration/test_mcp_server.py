@@ -220,3 +220,64 @@ async def test_verify_citations_as_task(fixture_server, mcp_server):
             CallToolResult,
         )
         assert payload.structured_content["summary"]["INTACT"] == 1
+
+
+# -- 8단계-가: 새 사실이 MCP 응답에도 실린다 (D-227·D-229·D-230~D-232·D-235) --
+
+
+async def test_mcp_responses_carry_the_new_facts(fixture_server, mcp_server):
+    """같은 결함은 다른 진입점에도 있다 — 라이브러리·CLI에서 고친 사실이
+    MCP 응답에서 빠지면 도구를 쓰는 클라이언트만 여전히 모른다."""
+    base_url, state = fixture_server
+    async with Client(mcp_server) as client:
+        fetched = await client.call_tool("fetch_document", {"url": f"{base_url}/article"})
+        document_id = fetched.structured_content["document_id"]
+        assert fetched.structured_content["outcome"] == "created"
+        assert fetched.structured_content["raw_changed"] is False   # D-232
+
+        cited = await client.call_tool("cite", {"document_id": document_id, "quote": QUOTE})
+        # D-230: 어느 시점 판본에 닻을 내렸는가
+        assert cited.structured_content["captured_at"]
+        assert cited.structured_content["last_checked_at"]
+
+        # D-232: <script> 안만 달라진 재수신 — 판정은 unchanged, 사실은 남는다
+        state.html = article_html(nonce="n1")
+        state.etag = '"v2"'
+        again = await client.call_tool(
+            "fetch_document", {"url": f"{base_url}/article", "max_age": 0}
+        )
+        assert again.structured_content["outcome"] == "unchanged"
+        assert again.structured_content["raw_changed"] is True
+
+        report = await client.call_tool("verify_citations", {})
+        # D-231·D-235: 판정 뒤의 사실이 보고서 수준에 있다
+        assert report.structured_content["ambiguous"] == 0
+        assert report.structured_content["pipeline_changed"] == 0
+
+        stats = await client.call_tool("cache_stats", {})
+        window = stats.structured_content["last_30d"]
+        # D-227: 첫 페치가 "바뀌었다"로 계상되지 않는다
+        assert window["created"] == 1 and window["changed"] == 0
+        detail = sum(
+            window[name]
+            for name in (
+                "cache_hits", "not_modified", "unchanged", "created",
+                "changed", "renormalized", "archive", "errors",
+            )
+        )
+        assert detail == window["requests"]
+
+
+async def test_mcp_verify_puts_unreachable_in_attention(fixture_server, mcp_server):
+    """도구 설명이 "attention에는 조치가 필요한 항목만"이라고 안내하므로,
+    아무것도 검증하지 못한 배치가 빈 attention이면 "이상 없음"으로 읽힌다 (D-229)."""
+    base_url, state = fixture_server
+    async with Client(mcp_server) as client:
+        fetched = await client.call_tool("fetch_document", {"url": f"{base_url}/article"})
+        await client.call_tool(
+            "cite", {"document_id": fetched.structured_content["document_id"], "quote": QUOTE}
+        )
+        state.status_override = 403
+        report = await client.call_tool("verify_citations", {})
+    assert report.structured_content["summary"]["UNREACHABLE"] == 1
+    assert [item["state"] for item in report.structured_content["attention"]] == ["UNREACHABLE"]

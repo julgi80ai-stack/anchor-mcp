@@ -90,6 +90,51 @@ _ARCHIVE_FALLBACK_STATUSES = frozenset({402, 403, 404, 410, 429})
 _ARCHIVE_FALLBACK_REASONS = frozenset({"network"})
 
 
+# 폴백을 **시도했으나 스냅샷이 없었다**는 사실을 원래 오류에 덧붙이는 꼬리
+# (D-228). 시도조차 안 한 것과 같은 문장으로 보이면, 전자는 설정을 켜라는
+# 신호이고 후자는 인용을 포기할 근거인데 사용자가 둘을 가를 수 없다.
+_ARCHIVE_TRIED_NOTE = (
+    " [archive fallback was tried and found no snapshot — 아카이브 폴백을 "
+    "시도했으나 스냅샷을 찾지 못했습니다]"
+)
+
+
+def _robots_message(url: str, reason: str) -> str:
+    """robots 판정 실패를 **사유대로** 말한다 (D-228, SPEC §5.2 2단계).
+
+    한 문장으로 뭉뚱그리면, 호스트가 통째로 사라진 링크 부패 상황에서
+    원인이 "사이트 소유자의 거부"로 오귀속된다 — 이 도구가 존재하는 바로
+    그 상황에서 사실을 뒤집는 것이고, §5.1 4-2가 "사실 보고 원칙 위반 중
+    가장 나쁜 부류"로 규정한 자리와 같은 부류다 (D-108·D-139 계보).
+    """
+    if reason == "explicit":
+        return (
+            "Fetch disallowed by robots.txt — robots.txt의 규칙이 페치를 "
+            f"거부합니다: {url}"
+        )
+    return (
+        "Could not obtain robots.txt rules (host gone, 5xx, or network failure); "
+        "not fetching without them — robots.txt 규칙을 물어보지 못했습니다"
+        f"(호스트 소멸·5xx·네트워크 실패). 규칙 없이 가져가지 않습니다: {url}"
+    )
+
+
+def _with_archive_note(error: AnchorError) -> AnchorError:
+    """구제를 시도했으나 없었다는 사실을 오류에 덧붙인다 (D-228).
+
+    종류·사유·상태는 그대로 옮긴다 — 폴백 자격 판정(`_may_consult_archive`)과
+    verify의 상태 매핑이 그 값을 읽는다.
+    """
+    message = f"{error}{_ARCHIVE_TRIED_NOTE}"
+    if isinstance(error, RobotsDisallowed):
+        return RobotsDisallowed(message, reason=error.reason)
+    if isinstance(error, FetchFailed):
+        return FetchFailed(
+            message, http_status=error.http_status, reason=error.reason
+        )
+    return AnchorError(message)
+
+
 def _may_consult_archive(error: AnchorError) -> bool:
     """이 실패가 아카이브를 확인할 자격이 있는가 (SPEC §5.2 6단계).
 
@@ -456,9 +501,10 @@ class Anchor:
                 # (D-133). 다만 이 판정에 쓴 바이트는 페처에게 돌려줄 기회가
                 # 없으므로(예외로 나간다) 여기서 직접 계상한다 (D-134).
                 traffic.add(hop_verdict.bytes_down)
+                # 사유를 구분해 말한다 (D-228) — "막혔다"와 "물어보지 못했다"는
+                # 사용자에게 전혀 다른 사실이다.
                 raise RobotsDisallowed(
-                    "Fetch disallowed by robots.txt — robots.txt가 페치를 거부: "
-                    f"{hop_url}",
+                    _robots_message(hop_url, hop_verdict.reason),
                     reason=hop_verdict.reason,
                 )
             self._ratelimit.acquire(httpx.URL(hop_url).host or "")
@@ -490,11 +536,25 @@ class Anchor:
             )
             if recovered is not None:
                 return recovered
+            if self._archive.enabled:
+                # 구제를 시도했다가 실패했다는 사실이 사라지면, 사용자는
+                # 폴백이 꺼져 있는 것과 구분할 수 없다 (D-228).
+                raise _with_archive_note(error) from error
             raise
         traffic.http_status = response.status
 
         if response.status == 304:
-            assert document is not None, "304는 저장된 검증자가 있어야만 온다"
+            if document is None:
+                # 304는 조건부 요청에만 오는 응답이다(RFC 9110 §15.4.5).
+                # 검증자를 보낸 적이 없는데 왔다면 **서버가 규약을 어긴** 것이지
+                # 우리 불변식이 깨진 것이 아니다 — `assert`는 `python -O`에서
+                # 사라져 그 자리가 `AttributeError`가 되고, 남아 있어도
+                # `AssertionError`는 CLI의 오류 표면 밖이다 (D-233, SPEC §8).
+                raise FetchFailed(
+                    "Server sent 304 for an unconditional request — 조건부 요청을 "
+                    f"보내지 않았는데 304를 받았습니다: {norm_url}",
+                    http_status=304,
+                )
             latest = self._repository.current_version(document.id)
             if latest is None:
                 raise FetchFailed("Got 304 but no stored version exists — 304를 받았으나 저장된 버전이 없습니다", http_status=304)
@@ -505,10 +565,18 @@ class Anchor:
                 etag=response.etag or document.etag,
                 last_modified=response.last_modified or document.last_modified,
             )
-            document = self._repository.get_document_by_any_url(norm_url)
-            assert document is not None
+            # 갱신된 검증자를 다시 읽는다. 그 사이 다른 프로세스의 병합이
+            # 문서를 옮겼다면 방금 쓴 값 대신 손에 있는 행으로 답한다 —
+            # 여기서 단정할 이유가 없다 (D-233).
+            refreshed = self._repository.get_document_by_any_url(norm_url)
             return self._finish(
-                document, latest, "not_modified", 304, traffic.bytes_down, started, include_content
+                refreshed or document,
+                latest,
+                "not_modified",
+                304,
+                traffic.bytes_down,
+                started,
+                include_content,
             )
 
         if response.status == 200:
@@ -522,7 +590,9 @@ class Anchor:
             self._repository.set_document_status(document.id, status_label, utcnow_iso())
 
         # 6단계: GONE 확정 전 아카이브 폴백 (SPEC §5.2). 기본 비활성.
+        tried_archive = False
         if response.status in _ARCHIVE_FALLBACK_STATUSES and self._archive.enabled:
+            tried_archive = True
             # 조회가 무산돼도 받은 바이트는 sink로 이미 들어왔다 (D-135).
             hit = self._archive.lookup(norm_url, on_bytes=traffic.add)
             if hit is not None:
@@ -541,7 +611,9 @@ class Anchor:
         # 문서가 아직 없어도 실패는 회계에 남긴다 (D-014) — 기록은
         # `_fetch_locked`의 한 곳에서 한다 (D-130·D-133).
         raise FetchFailed(
-            f"HTTP {response.status}: {norm_url}", http_status=response.status
+            f"HTTP {response.status}: {norm_url}"
+            + (_ARCHIVE_TRIED_NOTE if tried_archive else ""),
+            http_status=response.status,
         )
 
     @_foreground
@@ -584,6 +656,9 @@ class Anchor:
             quality=selector.quality,
             note=note,
             created_at=now,
+            # 출현 횟수를 저장한다 (D-231). 응답 문자열로만 두면 다른 세션의
+            # verify는 이 모호성을 알 길이 없다.
+            occurrences=selector.occurrences,
         )
         warnings_list: list[str] = []
         if selector.quality == QUALITY_SHORT:
@@ -601,6 +676,26 @@ class Anchor:
                 f"— 인용문이 원문에 {selector.occurrences}회 이상 나옵니다. 앵커는 첫 출현에 "
                 "묶이므로 재검증이 다른 인스턴스를 잡을 수 있습니다."
             )
+        # 이 판본이 얼마나 오래된 것인가 (D-230). `cite`는 **어떤 경우에도
+        # 네트워크에 나가지 않으므로**, 말해 주지 않으면 사용자는 며칠 전
+        # 스냅샷에 인용을 걸면서 그 사실을 모른다. 문턱은 `default_max_age`다 —
+        # "이보다 오래된 캐시는 원본과 다시 대조한다"가 이 프로젝트가 이미
+        # 정해 둔 신선도의 정의이고(SPEC §7.1), 정의를 둘로 늘릴 이유가 없다.
+        # 그 값이 0(=매번 재확인)이면 문턱이 무너져 **방금 페치한 판본까지**
+        # 경고를 받는다 — 항상 울리는 경고에는 정보가 없으므로 그때는
+        # 배포 기본값으로 물러선다.
+        stale_after = self._config.default_max_age or Config.default_max_age
+        age = age_seconds(document.last_checked_at)
+        if age > stale_after:
+            warnings_list.append(
+                f"Anchored to a body last confirmed against the origin "
+                f"{int(age // 3600)}h ago; cite never goes to the network, so "
+                f"re-fetch with max_age=0 if you need the current text "
+                f"— 원본과 마지막으로 대조한 지 {int(age // 3600)}시간 지난 "
+                f"판본에 앵커를 달았습니다(오래됐습니다). cite는 네트워크에 "
+                f"나가지 않으므로, 지금 본문이 필요하면 max_age=0으로 다시 "
+                f"fetch 하세요."
+            )
         warnings = tuple(warnings_list)
         return CiteResult(
             anchor_id=anchor.id,
@@ -612,6 +707,9 @@ class Anchor:
             quality=selector.quality,
             warnings=warnings,
             created_at=now,
+            # 어느 시점의 본문에 닻을 내렸는가 (D-230).
+            captured_at=latest.captured_at,
+            last_checked_at=document.last_checked_at,
         )
 
     @_foreground
@@ -670,6 +768,13 @@ class Anchor:
         requests = 0
         not_modified = 0
         bytes_down = 0
+        # 모호한 앵커(인용문이 원문에 여러 번)와 파이프라인이 달라진 앵커의
+        # 수 (D-231·D-235). 둘 다 `attention`에만 달면 **INTACT로 끝난
+        # 앵커에서 사실이 사라진다** — sources(D-093)와 같은 판단이다.
+        ambiguous = 0
+        pipeline_changed = 0
+        # 앵커를 만든 판본의 조회 결과를 배치 안에서 재사용한다 (D-235).
+        created_versions: dict[str, Version | None] = {}
 
         by_document: dict[str, list[AnchorRecord]] = {}
         for anchor in anchors:
@@ -731,18 +836,25 @@ class Anchor:
                     )
                     summary[failure_state] += 1
                     sources["none"] += 1  # 대조가 없었다 — 출처를 지어내지 않는다
-                    if failure_state == matcher.GONE:
-                        attention.append(
-                            AttentionItem(
-                                anchor_id=anchor.id,
-                                url=document.url,
-                                state=failure_state,
-                                before=anchor.exact,
-                                after=None,
-                                match_score=None,
-                                edit_distance=None,
-                            )
+                    if anchor.occurrences is not None and anchor.occurrences > 1:
+                        ambiguous += 1
+                    # GONE만 담으면 **아무것도 검증하지 못한 배치가 빈
+                    # attention으로 보인다** — 도구 설명이 "attention에는
+                    # 조치가 필요한 항목만"이라고 안내하므로 사용자는 그것을
+                    # "이상 없음"으로 읽는다 (D-229). UNREACHABLE의 조치는
+                    # "재시도 예약"이고(SPEC §6.3), 조치가 있으면 목록에 있다.
+                    attention.append(
+                        AttentionItem(
+                            anchor_id=anchor.id,
+                            url=document.url,
+                            state=failure_state,
+                            before=anchor.exact,
+                            after=None,
+                            match_score=None,
+                            edit_distance=None,
+                            occurrences=anchor.occurrences,
                         )
+                    )
                 continue
 
             # 방금 관측한 버전을 그대로 쓴다. 여기서 latest_version()을 다시
@@ -791,6 +903,23 @@ class Anchor:
                 )
                 summary[result.state] += 1
                 sources[latest.source] = sources.get(latest.source, 0) + 1
+                if anchor.occurrences is not None and anchor.occurrences > 1:
+                    ambiguous += 1
+                # 앵커를 만든 판본과 대조 판본의 추출 파이프라인이 다르면,
+                # 원문이 한 글자도 안 바뀌었어도 경보가 쏟아진다 (실측: 앵커
+                # 40개 중 39개). **판정은 바꾸지 않고** 사실만 표시한다 —
+                # trafilatura 업그레이드 한 번이면 실현되는 상황이다 (D-235).
+                if anchor.created_version not in created_versions:
+                    created_versions[anchor.created_version] = (
+                        self._repository.get_version(anchor.created_version)
+                    )
+                origin_version = created_versions[anchor.created_version]
+                pipeline_moved = (
+                    origin_version is not None
+                    and origin_version.pipeline_version != latest.pipeline_version
+                )
+                if pipeline_moved:
+                    pipeline_changed += 1
                 if result.state in (matcher.ALTERED, matcher.MISSING, matcher.UNRESOLVED):
                     attention.append(
                         AttentionItem(
@@ -805,6 +934,8 @@ class Anchor:
                             position_hint=anchor.position_hint,
                             found_offset=result.found_offset,
                             source=latest.source,
+                            occurrences=anchor.occurrences,
+                            pipeline_changed=pipeline_moved,
                         )
                     )
             if stopped_early:
@@ -821,6 +952,8 @@ class Anchor:
             requests=requests,
             not_modified=not_modified,
             bytes_down=bytes_down,
+            ambiguous=ambiguous,
+            pipeline_changed=pipeline_changed,
         )
 
     @_foreground
@@ -924,9 +1057,16 @@ class Anchor:
                 "cache_hits": cache_hits,
                 "not_modified": not_modified,
                 "unchanged": window.get("unchanged", 0),
-                "changed": window.get("changed", 0)
-                + window.get("created", 0)
-                + window.get("renormalized", 0),
+                # created·renormalized를 changed에 합치지 않는다 (D-227).
+                # 합치면 첫 페치 60건이 "changed 60"으로 보고돼 사용자가
+                # "60개 문서가 전부 바뀌었다"로 읽는다 — 실제로는 `fetch_log`의
+                # changed가 0행이다. 셋은 서로 다른 사건이고(SPEC §5.2 5단계),
+                # 특히 renormalized는 "원문이 안 바뀌었음"을 뜻하는 안전장치라
+                # changed에 섞이면 그 장치가 보이지 않는다. 내역의 합 =
+                # requests는 그대로다 (D-136, SPEC §7.7).
+                "changed": window.get("changed", 0),
+                "created": window.get("created", 0),
+                "renormalized": window.get("renormalized", 0),
                 # 아카이브 구제도 표시되는 버킷 하나에 속해야 한다 — 빠지면
                 # 내역의 합이 총 요청 수와 맞지 않는다 (D-136, SPEC §7.7).
                 "archive": window.get("archive", 0),
@@ -1115,6 +1255,7 @@ class Anchor:
         normalized = extract.to_normalized(response.content, response.content_type)
         raw_hash = hash_bytes(response.content)
         text_hash = hash_text(normalized.text)
+        raw_changed = False  # unchanged 분기에서만 참이 될 수 있다 (D-232)
 
         # 리다이렉트를 따라갔다면 문서는 정규화된 목적지 URL로 귀속된다 —
         # 단 **영구 리다이렉트일 때만**이다. 302·307은 "지금만 다른 곳을
@@ -1201,6 +1342,13 @@ class Anchor:
         elif text_hash == latest.text_hash and latest.source == "live":
             outcome = "unchanged"
             version = latest
+            # 여기서 `raw_hash`를 계산해 놓고 버리면, "원문 바이트는 달라졌는데
+            # 우리가 보는 영역 **밖에서** 달라졌다"는 신호가 사라진다 (D-232).
+            # 그것은 추출 사각지대(본문으로 뽑히지 않는 영역의 변경)를 가리키는
+            # 유일한 저비용 단서다 — 정적 문서에서는 노이즈가 아니다(위키·
+            # python docs·MDN은 재요청해도 바이트가 동일하다). **판정은
+            # 그대로 unchanged다**: 사실 하나를 더할 뿐이다.
+            raw_changed = raw_hash != latest.raw_hash
         elif text_hash == latest.text_hash:
             # 본문은 같지만 지금 가리키는 것은 **아카이브 판본**이다. 그대로
             # 재사용하면 살아 있는 원문의 인용에 아카이브 URI-M과 과거 날짜가
@@ -1221,7 +1369,14 @@ class Anchor:
             version = self._insert_or_reuse(document, response, raw_hash, text_hash, normalized, now)
 
         return self._finish(
-            document, version, outcome, 200, bytes_down, started, include_content
+            document,
+            version,
+            outcome,
+            200,
+            bytes_down,
+            started,
+            include_content,
+            raw_changed=raw_changed,
         )
 
     def _recover_from_archive(
@@ -1356,6 +1511,8 @@ class Anchor:
         bytes_down: int,
         started: float,
         include_content: bool,
+        *,
+        raw_changed: bool = False,
     ) -> FetchResult:
         # 원문을 실제로 관측한 결과라면 관측을 남긴다 — 포인터와 관측 시각.
         # cache_hit은 관측이 아니므로 건드리지 않는다 (D-011/D-012/D-024).
@@ -1379,6 +1536,7 @@ class Anchor:
             char_count=version.char_count,
             source=version.source,
             network=Network(bytes_down=bytes_down, elapsed_ms=elapsed_ms),
+            raw_changed=raw_changed,
             content=content,
         )
 

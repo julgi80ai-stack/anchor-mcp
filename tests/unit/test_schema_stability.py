@@ -65,5 +65,9 @@ def test_future_schema_version_is_rejected(tmp_path):
 
     import pytest
 
-    with pytest.raises(RuntimeError):
+    from anchor.errors import StorageError
+
+    # 버전 롤백은 사용자의 평범한 상황이지 "도구가 깨졌다"가 아니다 — 도메인
+    # 예외라야 CLI가 트레이스백 대신 한 줄로 답한다 (D-233, SPEC §8).
+    with pytest.raises(StorageError, match=str(SCHEMA_VERSION + 1)):
         Repository(db_path)

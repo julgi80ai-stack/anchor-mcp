@@ -83,7 +83,10 @@ def test_verify_reports_unreachable_on_403(fixture_server, anchor):
 
     report = anchor.verify()
     assert report.summary["UNREACHABLE"] == 1
-    assert report.attention == ()  # UNREACHABLE은 재시도 대상이지 조치 대상이 아니다
+    # UNREACHABLE의 조치는 "재시도 예약"이다(SPEC §6.3) — 조치가 있으면
+    # 목록에 있어야 한다. 빼 두면 아무것도 검증하지 못한 배치가 빈
+    # attention으로 보여 "이상 없음"으로 읽힌다 (D-229).
+    assert [item.state for item in report.attention] == ["UNREACHABLE"]
 
 
 def test_cite_rejects_absent_quote(fixture_server, anchor):

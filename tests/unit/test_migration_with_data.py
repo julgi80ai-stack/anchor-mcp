@@ -154,7 +154,7 @@ def _user_version(path: Path) -> int:
 # -- D-077: 데이터가 든 구 DB의 마이그레이션 -------------------------------
 
 
-@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5])
+@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6])
 def test_migrates_old_db_that_has_rows(tmp_path, source_version):
     path = tmp_path / f"v{source_version}.db"
     build_old_db(path, source_version)
@@ -171,7 +171,7 @@ def test_migrates_old_db_that_has_rows(tmp_path, source_version):
         assert after["verifications"] == before["verifications"] == 1
 
 
-@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5])
+@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6])
 def test_migration_leaves_no_dangling_references(tmp_path, source_version):
     """표를 다시 만드는 v5 이후에도 참조가 살아 있어야 한다."""
     path = tmp_path / f"fk-v{source_version}.db"
@@ -372,7 +372,7 @@ def test_foreign_keys_are_restored_when_migration_fails(tmp_path):
     connection.commit()
     connection.close()
 
-    with pytest.raises(RuntimeError, match="무결성"):
+    with pytest.raises(StorageError, match="무결성"):
         Repository(path)
 
     # 같은 파일을 다시 열어도(정상화 후) FK가 켜져 있어야 한다
@@ -399,7 +399,7 @@ def test_migration_refuses_to_commit_dangling_references(tmp_path):
     connection.commit()
     connection.close()
 
-    with pytest.raises(RuntimeError, match="무결성"):
+    with pytest.raises(StorageError, match="무결성"):
         Repository(path)
 
     # 어중간하게 올라가지 않았는가 — 원인을 고치면 다시 올릴 수 있어야 한다
@@ -544,7 +544,7 @@ def test_lock_contention_is_still_retried(monkeypatch):
 # -- D-083: 관측 시간축을 뒤늦게 도입할 때 -----------------------------------
 
 
-@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5])
+@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6])
 def test_observation_timeline_is_seeded_for_existing_rows(tmp_path, source_version):
     """v6 이전의 행에도 **관측 순서가 있어야** 한다 (D-083).
 
@@ -637,5 +637,53 @@ def test_migration_puts_the_current_body_newest(tmp_path):
                 "포인터가 가리키는 본문이 관측 순서 맨 앞이 아니다"
             )
             assert len({v.last_observed_seq for v in ordered}) == len(ordered)
+    finally:
+        repository.close()
+
+
+# -- D-231: v6 → v7, 중복 출현 횟수 ------------------------------------------
+
+
+@pytest.mark.parametrize("source_version", [2, 3, 4, 5, 6])
+def test_existing_anchors_admit_they_do_not_know_their_occurrence_count(
+    tmp_path, source_version
+):
+    """되짚어 셀 수 없는 값을 1로 채우면 "유일하다"고 단정하는 것이 된다.
+
+    그 사이 본문이 바뀌었을 수 있으므로 옛 앵커의 출현 횟수는 **모르는**
+    것이고, 모를 때는 모른다고 적는다 (NULL).
+    """
+    path = tmp_path / f"occ-v{source_version}.db"
+    build_old_db(path, source_version)
+    repository = Repository(path)
+    try:
+        record = repository.get_anchor("anc-1")
+        assert record is not None
+        assert record.occurrences is None
+    finally:
+        repository.close()
+
+
+def test_new_anchors_carry_their_occurrence_count_after_migration(tmp_path):
+    """열리는 것으로 끝나지 않는다 — 새 열이 실제로 쓰이는지 확인한다."""
+    path = tmp_path / "occ-usable.db"
+    build_old_db(path, 6)
+    repository = Repository(path)
+    try:
+        created = repository.insert_anchor(
+            document_id="doc-1",
+            created_version="ver-1",
+            exact="여러 번 나오는 문장",
+            prefix="앞",
+            suffix="뒤",
+            position_hint=0,
+            exact_hash="b3:x",
+            quality="ok",
+            note=None,
+            created_at="2026-08-19T00:00:00Z",
+            occurrences=3,
+        )
+        assert created.occurrences == 3
+        assert repository.get_anchor(created.id).occurrences == 3
     finally:
         repository.close()

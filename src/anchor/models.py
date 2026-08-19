@@ -121,6 +121,11 @@ class AnchorRecord:
     quality: str  # ok | short
     note: str | None
     created_at: str
+    # 생성 시점에 인용문이 원문에서 몇 번 나왔는가 (v7, D-231). 앵커는 첫
+    # 출현에 묶이므로(D-047) 2 이상이면 어느 인스턴스가 "그" 인용인지 모호
+    # 하다. `cite` 응답 문자열로만 두면 다른 세션에서 재검증하는 사용자는
+    # 그 모호성을 알 길이 없다. `None`은 v7 이전에 만들어져 **모르는** 것이다.
+    occurrences: int | None = None
 
 
 @dataclass(frozen=True)
@@ -139,6 +144,12 @@ class CiteResult:
     quality: Quality
     warnings: tuple[str, ...]
     created_at: str
+    # 앵커를 단 판본의 나이 (D-230). `cite`는 **어떤 경우에도 네트워크에
+    # 나가지 않으므로**, 이 둘이 없으면 사용자는 며칠 전 스냅샷에 인용을
+    # 걸면서 그 사실을 모른다. captured_at은 그 본문이 처음 캡처된 때이고
+    # last_checked_at은 그 문서를 원본과 마지막으로 대조한 때다.
+    captured_at: str = ""
+    last_checked_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -160,6 +171,13 @@ class AttentionItem:
     # 무엇과 대조했는가 (live | archive). 대조 자체가 없었던 항목(GONE·
     # UNREACHABLE)은 None이다 — 출처를 지어내지 않는다 (D-093).
     source: str | None = None
+    # 이 인용문이 생성 시점에 원문에서 몇 번 나왔는가 (D-231). 2 이상이면
+    # 앵커가 어느 인스턴스를 가리키는지 모호하다. None은 모른다는 뜻이다.
+    occurrences: int | None = None
+    # 앵커를 만든 판본과 대조 판본의 추출 파이프라인이 다른가 (D-235).
+    # 참이면 원문이 그대로여도 경보가 날 수 있다 — **판정은 바꾸지 않고**
+    # 사실만 표시한다.
+    pipeline_changed: bool = False
 
 
 @dataclass(frozen=True)
@@ -177,6 +195,13 @@ class VerifyReport:
     requests: int
     not_modified: int  # 304로 끝난 요청 수 (SPEC §7.3 network)
     bytes_down: int
+    # 검증한 앵커 중 인용문이 원문에 여러 번 나오던 것의 수 (D-231).
+    # `attention`에만 달면 모호한 채 INTACT가 된 앵커에서 그 사실이 사라진다 —
+    # 사용자가 인용한 인스턴스가 지워져도 다른 인스턴스가 잡히기 때문이다.
+    ambiguous: int = 0
+    # 앵커를 만든 판본과 대조 판본의 추출 파이프라인이 달랐던 앵커의 수
+    # (D-235). 이 값이 크면 경보의 원인이 원문 변경이 아닐 수 있다.
+    pipeline_changed: int = 0
 
 
 @dataclass(frozen=True)
@@ -199,6 +224,11 @@ class FetchResult:
     char_count: int
     source: str
     network: Network
+    # 원본 바이트는 달라졌는데 추출된 본문은 같았는가 (D-232). "원문은
+    # 바뀌었는데 우리가 보는 영역 밖에서 바뀌었다"를 정확히 가리키는
+    # 신호다 — 추출 사각지대의 저비용 탐지 수단이므로 버리지 않는다.
+    # **판정(outcome)은 이 값과 무관하다.**
+    raw_changed: bool = False
     content: str | None = field(default=None, repr=False)
 
     @property

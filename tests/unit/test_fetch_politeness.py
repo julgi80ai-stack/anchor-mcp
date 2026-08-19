@@ -60,12 +60,25 @@ def test_long_retry_after_stops_retrying(monkeypatch):
 
 
 def test_retry_after_wins_over_backoff():
+    """서버가 지정하면 **그 값**이다 — 우리 백오프로 늘리지 않는다 (D-238).
+
+    예전에는 `max(requested, backoff)`였다. 더 정중한 방향이지만 서버의
+    지시를 덮어쓰는 것이고, 그만큼 호출자를 붙잡는다: `Retry-After: 1`을 준
+    서버에게 백오프 1·2·4초가 총 7초를 기다리게 했다(실측 7,015ms). SPEC §10
+    "실패는 빨라야 한다"는 추가 대기를 **서버가 지정한 만큼만** 허용한다.
+    """
     from anchor.fetcher.client import ConditionalFetcher
 
     fetcher = ConditionalFetcher(
         client=None, user_agent="t", max_content_bytes=1024, retry_backoff_base=1.0
     )
     assert fetcher._retry_delay(_Response("30"), 0) == 30.0
+    # 백오프가 지정값보다 커지는 회차에서도 지정값을 지킨다 — 여기가 옛
+    # `max()`와 갈리는 자리다(attempt 2의 백오프는 4초).
+    assert fetcher._retry_delay(_Response("1"), 0) == 1.0
+    assert fetcher._retry_delay(_Response("1"), 2) == 1.0
+    # 지정이 없으면 그때만 우리가 물러설 시간을 정한다.
+    assert fetcher._retry_delay(_Response(None), 2) == 4.0
 
 
 # -- D-009 / D-010 레이트 제한 ----------------------------------------------
@@ -115,3 +128,50 @@ def test_sequential_rate_is_unchanged(monkeypatch):
     # 버스트 2개는 즉시, 나머지 3개는 각각 정확히 1/rate = 0.1초를 기다린다.
     assert clock.slept == [pytest.approx(0.1)] * 3, clock.slept
     fake_clock.assert_close(clock.elapsed, 0.3, what="5회 acquire의 총 대기")
+
+
+# -- D-237: 403은 초대받았을 때만 다시 두드린다 ------------------------------
+
+
+def _response(status: int, retry_after: str | None = None):
+    from anchor.fetcher.client import FetchResponse
+
+    return FetchResponse(
+        status=status,
+        content=b"",
+        content_type="text/html",
+        etag=None,
+        last_modified=None,
+        retry_after=retry_after,
+        final_url="https://example.test/a",
+        bytes_down=0,
+        elapsed_ms=0,
+    )
+
+
+def test_plain_403_is_not_retried():
+    """안티봇의 항구적 거부에 매번 7초(1+2+4)를 쓸 이유가 없다 (SPEC §5.4)."""
+    from anchor.fetcher.client import _may_retry
+
+    assert _may_retry(_response(403)) is False
+
+
+def test_403_with_a_retry_after_is_an_invitation():
+    """서버가 대기 시간을 명시했으면 그 말을 무시하는 것도 정직하지 않다."""
+    from anchor.fetcher.client import _may_retry
+
+    assert _may_retry(_response(403, "5")) is True
+
+
+def test_403_with_an_unreadable_retry_after_is_not_an_invitation():
+    from anchor.fetcher.client import _may_retry
+
+    assert _may_retry(_response(403, "곧")) is False
+
+
+def test_429_is_still_retried():
+    """레이트 제한의 규약은 그대로다 — 물러났다 다시 오는 것이 그 뜻이다."""
+    from anchor.fetcher.client import _may_retry
+
+    assert _may_retry(_response(429)) is True
+    assert _may_retry(_response(429, "3")) is True

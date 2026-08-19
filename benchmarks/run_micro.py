@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from anchor.anchoring.matcher import UNRESOLVED, match_anchor  # noqa: E402
 from anchor.anchoring.selector import build_selector  # noqa: E402
 from anchor.config import Config  # noqa: E402
+from anchor.errors import AnchorError  # noqa: E402
 from anchor.models import utcnow_iso  # noqa: E402
 from anchor.normalize.hashing import hash_text  # noqa: E402
 from anchor.service import Anchor  # noqa: E402
@@ -370,12 +371,93 @@ def bench_normal_corpus() -> None:
     gate("UNRESOLVED < 1%", rate < 0.01, f"{unresolved}/{len(anchors)} ({rate:.2%})")
 
 
+def bench_failure_is_fast() -> None:
+    """실패는 그것을 안 순간 보고돼야 한다 (SPEC §10 v1.12).
+
+    이 도구는 AI 에이전트의 도구 호출 경로에 있다 — 우리가 늦으면 그 지연이
+    사람에게 그대로 간다. 정확성 회귀를 CI로 막았듯 **채택 가능성의 회귀도**
+    같은 방식으로 막는다: 맞는 답을 줘도 느리면 쓰이지 않고, 쓰이지 않는
+    무결성 계층은 아무것도 지키지 못한다.
+
+    네트워크 없이 로컬 픽스처 서버로 잰다 — 기계 편차에 강하고, 재시도
+    기제가 되살아나면 **그 실패 종류만** 정확히 빨개진다. 조치 전 실측:
+    403이 7,010ms(재시도 3회 × 백오프 1+2+4초), `Retry-After: 1`을 준 429가
+    7,015ms(우리 백오프가 서버 지시를 덮어씀). 나머지 실패는 전부 20ms 안이라
+    이 둘만이 지연의 원인이었다.
+    """
+    import json as _json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    state = {"status": 404, "robots": "User-agent: *\nAllow: /\n", "retry_after": None}
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):  # 벤치 출력에 섞이지 않게
+            pass
+
+        def do_GET(self):
+            if self.path == "/robots.txt":
+                body = state["robots"].encode()
+                self.send_response(200)
+            else:
+                body = b"<html><body><p>" + b"x" * 400 + b"</p></body></html>"
+                self.send_response(state["status"])
+                if state["retry_after"] is not None:
+                    self.send_header("Retry-After", state["retry_after"])
+                self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+
+    # (이름, 상태, robots, Retry-After, 상한 ms). 상한은 실측 기준선(전부
+    # 20ms 안)에 네트워크 없는 루프백과 SQLite 커밋의 여유를 얹은 값이다.
+    # 서버가 대기를 지정한 429만 그 지정을 존중하므로 예외로 둔다.
+    cases = [
+        ("404", 404, "User-agent: *\nAllow: /\n", None, 500.0),
+        ("500", 500, "User-agent: *\nAllow: /\n", None, 500.0),
+        ("403(맨몸)", 403, "User-agent: *\nAllow: /\n", None, 500.0),
+        ("robots 거부", 200, "User-agent: *\nDisallow: /\n", None, 500.0),
+        ("429(Retry-After:1)", 429, "User-agent: *\nAllow: /\n", "1", 4000.0),
+    ]
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            for index, (label, status, robots, retry_after, ceiling) in enumerate(cases):
+                state.update(status=status, robots=robots, retry_after=retry_after)
+                # **케이스마다 새 저장소**다. robots는 오리진 단위로 24시간
+                # 캐시되므로(SPEC §5.2) 한 DB를 공유하면 앞 케이스가 캐시해 둔
+                # `Allow`가 뒤의 `Disallow` 케이스를 통과시킨다 — 이 게이트를
+                # 처음 돌렸을 때 실제로 그렇게 "성공(예상 밖)"이 나왔다.
+                db = Path(tmp) / f"fail{index}.db"
+                url = f"{base}/case{index}"
+                with Anchor(db_path=db, config=Config(db_path=db)) as ax:
+                    start = time.perf_counter()
+                    try:
+                        ax.fetch(url, max_age=0)
+                        outcome = "성공(예상 밖)"
+                    except AnchorError as error:
+                        outcome = type(error).__name__
+                    elapsed = (time.perf_counter() - start) * 1000
+                gate(
+                    f"실패는 빠르다: {label} < {ceiling:.0f}ms",
+                    elapsed < ceiling and outcome != "성공(예상 밖)",
+                    f"{elapsed:.0f}ms ({outcome}) — 재시도가 되살아나면 이 종류만 빨개진다",
+                )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def main() -> int:
     bench_cache_hit()
     bench_cache_hit_under_load()
     foreground_unresolved = bench_matcher_worst_case()
     bench_matcher_under_contention(foreground_unresolved)
     bench_normal_corpus()
+    bench_failure_is_fast()
     if FAILURES:
         print(f"\n게이트 실패: {', '.join(FAILURES)}", file=sys.stderr)
         return 1

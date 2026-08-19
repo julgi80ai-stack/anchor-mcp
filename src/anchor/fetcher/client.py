@@ -2,7 +2,7 @@
 """httpx 기반 조건부 GET (SPEC §5.2 4단계, RFC 9110).
 
 정직한 클라이언트로 동작한다: 위장 없음, Retry-After 존중,
-403/429는 지수 백오프 재시도 후 그대로 보고 (SPEC §5.4).
+429는 지수 백오프 재시도 후 그대로 보고 (SPEC §5.4).
 
 리다이렉트는 클라이언트에 맡기지 않고 직접 따라간다. 목적지마다 robots를
 다시 판정해야 하기 때문이다 — 자동 추종에 맡기면 금지된 경로·호스트를
@@ -21,7 +21,17 @@ from anchor.errors import ContentTooLarge, FetchFailed, InvalidURL, RobotsDisall
 from anchor.fetcher.urlnorm import normalize_url
 
 ACCEPT_HEADER = "text/html, application/xhtml+xml, text/plain, application/pdf"
-RETRYABLE_STATUSES = frozenset({403, 429})
+# 재시도가 **규약인** 상태. 429는 레이트 제한이고, 물러났다 다시 오는 것이
+# 그 상태코드가 요구하는 행동이다.
+RETRYABLE_STATUSES = frozenset({429})
+# 재시도가 **초대받았을 때만** 성립하는 상태 (D-237). 403은 안티봇의 항구적
+# 거부가 대부분이라 3회 재시도 + 지수 백오프가 매번 7초를 쓰고 같은 403으로
+# 끝난다(사용자 실 저장소의 오류 17건 중 7건). SPEC §5.4는 "403은 403으로
+# 보고한다"이지 "7초 뒤에 보고한다"가 아니다. 다만 서버가 `Retry-After`로
+# 대기 시간을 **명시**했다면 그것은 "지금은 안 되지만 그때 다시 오라"는
+# 초대이고, 그 말을 무시하는 것도 정직한 클라이언트가 아니다 — 해석 가능한
+# 값이 실렸을 때만 재시도한다(값이 없거나 못 읽으면 초대가 아니다).
+INVITED_RETRY_STATUSES = frozenset({403})
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 # 301·308만 "영구히 옮겼다"이다. 302·307은 지금만 다른 곳을 보라는 뜻이고,
 # 303은 다른 리소스를 보라는 뜻이라 정본 URL을 바꿀 근거가 아니다 (D-102).
@@ -138,7 +148,7 @@ class ConditionalFetcher:
             response = self._request(current, headers, account)
             attempted_bytes += account(response.bytes_down)
             for attempt in range(MAX_RETRIES):
-                if response.status not in RETRYABLE_STATUSES:
+                if not _may_retry(response):
                     break
                 delay = self._retry_delay(response, attempt)
                 if delay is None:  # 서버가 지정한 대기가 상한을 넘는다
@@ -211,7 +221,12 @@ class ConditionalFetcher:
         if requested > MAX_RETRY_AFTER_SECONDS:
             # 지정 시각보다 일찍 두드리지 않는다 (SPEC §5.4 "항상 존중").
             return None
-        return max(requested, backoff)
+        # 서버가 지정했으면 **그 값을 쓴다** (D-238, SPEC §10 "실패는 빨라야
+        # 한다"). `max(requested, backoff)`는 더 정중한 방향이지만 서버의
+        # 지시를 덮어쓰는 것이고, 그만큼 호출자를 붙잡는다 — `Retry-After: 1`을
+        # 준 서버에게 우리 백오프(1·2·4초)가 총 7초를 기다리게 했다. 지시가
+        # 있으면 그것이 답이고, 없을 때만 우리가 물러설 시간을 정한다.
+        return requested
 
     def _request(
         self,
@@ -291,6 +306,18 @@ class ConditionalFetcher:
             raise FetchFailed(
                 f"Network error — 네트워크 오류: {url} ({error})", reason="network"
             ) from error
+
+
+def _may_retry(response: FetchResponse) -> bool:
+    """이 응답을 다시 두드려도 되는가 (D-237).
+
+    429는 무조건, 403은 서버가 `Retry-After`로 초대했을 때만이다.
+    """
+    if response.status in RETRYABLE_STATUSES:
+        return True
+    if response.status not in INVITED_RETRY_STATUSES:
+        return False
+    return response.retry_after is not None and _parse_retry_after(response.retry_after) is not None
 
 
 def _spill(account: Callable[[int], int] | None, total: int) -> None:

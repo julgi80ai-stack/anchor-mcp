@@ -53,6 +53,10 @@ class FixtureState:
         self.robots_content_type: str = "text/plain"    # charset 축 (D-190)
         self.robots_delay: float = 0.0
         self.status_override: int | None = None
+        # 실패 응답에 실을 추가 헤더. `Retry-After`가 있는 403과 없는 403은
+        # 서로 다른 사건이다 — 전자는 "그때 다시 오라"는 초대이고 후자는
+        # 항구적 거부다. 이 축이 없으면 재시도 정책을 시험할 수 없다 (D-237).
+        self.status_override_headers: dict[str, str] = {}
         self.requests: list[str] = []  # 수신한 경로 순서
         # 아카이브 에뮬레이션: 설정 시 CDX·MemGator API·/web/ 재생이 살아난다.
         self.archive_html: str | None = None
@@ -243,6 +247,8 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_response(state.status_override)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            for name, value in state.status_override_headers.items():
+                self.send_header(name, value)
             self.end_headers()
             if body:
                 self.wfile.write(body)

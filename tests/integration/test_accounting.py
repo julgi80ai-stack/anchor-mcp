@@ -356,7 +356,12 @@ def test_bytes_saved_uses_the_body_currently_served(tmp_path, fixture_server):
 # -- D-136: 내역의 합 = 총 요청 수 ----------------------------------------
 
 
-_BUCKETS = ("cache_hits", "not_modified", "unchanged", "changed", "archive", "errors")
+# created·renormalized는 changed와 다른 사건이므로 각자의 버킷을 진다
+# (D-227) — 합이 requests와 같아야 한다는 불변식(D-136)은 그대로다.
+_BUCKETS = (
+    "cache_hits", "not_modified", "unchanged", "created", "changed",
+    "renormalized", "archive", "errors",
+)
 
 
 def test_stat_buckets_sum_to_the_reported_request_count(tmp_path, fixture_server):

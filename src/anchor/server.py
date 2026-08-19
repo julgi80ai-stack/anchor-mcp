@@ -458,8 +458,10 @@ def build_server(
             "web-fetch tools whenever you need the content of a URL — it caches, "
             "deduplicates, and records provenance automatically. This server does "
             "NOT search the web; the caller supplies URLs. Use cite to anchor an "
-            "exact quote, verify_citations to re-check quotes against the live "
-            "source. 403/404 are reported truthfully, never bypassed. // "
+            "exact quote, verify_citations to re-check quotes against their "
+            "current source (the live origin, or an archive snapshot when the "
+            "original is unreachable). 403/404 are reported truthfully, never "
+            "bypassed. // "
             "웹 문서의 버전·출처·인용 유효성을 추적하는 로컬 캐시입니다. URL 본문을 "
             "열람할 때는 일반 fetch/웹페치 도구 대신 fetch_document를 우선 사용하세요 "
             "— 캐시·중복 제거·출처 기록이 자동입니다. 검색 기능은 없습니다(URL은 "
@@ -504,6 +506,9 @@ def build_server(
             "text_hash": result.text_hash,
             "char_count": result.char_count,
             "source": result.source,
+            # 원본 바이트는 달라졌는데 추출 본문은 같았다 (D-232). 판정
+            # (outcome)은 이 값과 무관하다 — 사실을 하나 더할 뿐이다.
+            "raw_changed": result.raw_changed,
             "network": {
                 "bytes_down": result.network.bytes_down,
                 "elapsed_ms": result.network.elapsed_ms,
@@ -543,14 +548,17 @@ def build_server(
         older_than: str | None = None,
         time_budget_ms: int | None = None,
     ) -> dict[str, Any]:
-        """Re-verify anchored quotes against the current live sources. With no
-        filters, verifies everything. older_than is an ISO 8601 duration (e.g.
-        P7D) — anchors verified within it are skipped. `attention` lists only
-        items needing action (ALTERED/MISSING/GONE/UNRESOLVED). Attach task
+        """Re-verify anchored quotes against their current source — the live
+        origin, or an archive snapshot when the original is unreachable; each
+        item and the `sources` totals say which. With no filters, verifies
+        everything. older_than is an ISO 8601 duration (e.g. P7D) — anchors
+        verified within it are skipped. `attention` lists only items needing
+        action (ALTERED/MISSING/GONE/UNREACHABLE/UNRESOLVED). Attach task
         metadata to run large batches as a background task.
 
-        앵커들을 현재 원문 대비 재검증한다. 조건이 없으면 전체. attention에는
-        조치가 필요한 항목만 담긴다.
+        앵커들을 현재 원문(또는 원본에 닿지 못하면 아카이브 스냅샷) 대비
+        재검증한다. 조건이 없으면 전체. attention에는 조치가 필요한 항목만
+        담긴다.
         """
         return _verify_payload(
             {

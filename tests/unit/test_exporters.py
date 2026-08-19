@@ -108,3 +108,53 @@ def test_parse_iso_duration():
 
     with pytest.raises(ValueError):
         parse_iso_duration("7d")
+
+
+# -- D-236: 되돌림 뒤의 "last memento" ---------------------------------------
+
+
+def _doc(current: str | None):
+    import dataclasses
+
+    return dataclasses.replace(DOC, current_version=current)
+
+
+def test_last_memento_is_the_body_the_origin_serves_now():
+    """A→B→A 되돌림. 캡처 시각 최대값은 B이지만 지금 서빙되는 것은 A다.
+
+    B를 `rel="last"`로 가리키면 Memento 클라이언트가 **더 이상 서빙되지 않는
+    본문**을 최신으로 받는다. 정렬은 RFC 7089대로 captured_at 그대로다.
+    """
+    a = make_version("v-a", "2026-07-15T09:11:00Z", observed="2026-08-20T00:00:00Z", seq=3)
+    b = make_version("v-b", "2026-08-16T04:12:00Z", observed="2026-08-16T04:12:00Z", seq=2)
+    body = timemap.to_link_format(_doc("v-a"), [a, b])
+
+    assert '<anchor:///doc-1/v/v-a>; rel="first last memento"' in body
+    assert '<anchor:///doc-1/v/v-b>; rel="memento"' in body
+    # 시간축(datetime)은 그대로 캡처 시각 오름차순이다.
+    assert body.index("v-a") < body.index("v-b")
+
+
+def test_last_memento_falls_back_to_the_observation_axis():
+    """포인터가 아직 없어도(구 DB) 관측 순번이 답한다."""
+    a = make_version("v-a", "2026-07-15T09:11:00Z", observed="2026-08-20T00:00:00Z", seq=3)
+    b = make_version("v-b", "2026-08-16T04:12:00Z", observed="2026-08-16T04:12:00Z", seq=2)
+    body = timemap.to_link_format(_doc(None), [a, b])
+    assert 'rel="first last memento"' in body
+
+
+def test_without_a_rollback_last_is_still_the_newest_capture():
+    """관측 순번이 캡처 순과 같은 평범한 문서에서는 아무것도 달라지지 않는다."""
+    a = make_version("v-a", "2026-07-15T09:11:00Z", seq=1)
+    b = make_version("v-b", "2026-08-16T04:12:00Z", seq=2)
+    body = timemap.to_link_format(_doc("v-b"), [a, b])
+    assert '<anchor:///doc-1/v/v-b>; rel="last memento"' in body
+
+
+def test_json_format_says_which_memento_is_last():
+    a = make_version("v-a", "2026-07-15T09:11:00Z", observed="2026-08-20T00:00:00Z", seq=3)
+    b = make_version("v-b", "2026-08-16T04:12:00Z", seq=2)
+    payload = timemap.to_json_format(_doc("v-a"), [a, b])
+    rels = {item["version_id"]: item["rel"] for item in payload["mementos"]}
+    assert rels == {"v-a": "first last memento", "v-b": "memento"}
+    assert payload["mementos"][0]["last_observed_at"] == "2026-08-20T00:00:00Z"

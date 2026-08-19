@@ -16,8 +16,32 @@ import zstandard
 from anchor.errors import DocumentNotFound, StorageError
 from anchor.models import AnchorRecord, Document, Version, uuid7
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 ZSTD_LEVEL = 6
+
+
+# 잠금 경합 실패를 알아보는 표지. SQLite는 `database is locked`/`database is
+# busy`로 말한다 — 우리 코드가 깨진 것이 아니라 저장소를 **지금** 쓸 수 없는
+# 것이다 (D-233).
+_LOCK_HINTS = ("locked", "busy")
+
+
+def _busy_as_storage_error(error: sqlite3.OperationalError) -> StorageError | None:
+    """잠금 경합이면 도메인 예외를, 아니면 None (D-233, SPEC §8).
+
+    다른 프로세스가 busy timeout(60초)보다 오래 쓰기 락을 쥐면 `BEGIN
+    IMMEDIATE`가 `sqlite3.OperationalError: database is locked`를 낸다.
+    생 예외로 새면 CLI의 `_USER_ERRORS`가 못 잡아 트레이스백이 되고,
+    라이브러리 직접 사용자도 `AnchorError` 하나로 받지 못한다. **경합만**
+    접는다 — 다른 OperationalError(문법 오류 등)는 진짜 결함이므로 그대로
+    올라가야 한다.
+    """
+    if not any(hint in str(error).lower() for hint in _LOCK_HINTS):
+        return None
+    return StorageError(
+        f"store is busy; another process holds the write lock: {error} — "
+        "저장소가 사용 중입니다 (다른 프로세스가 쓰기 락을 쥐고 있습니다)"
+    )
 
 
 class _Rows:
@@ -53,12 +77,24 @@ class _SerializedConnection:
     def execute(self, sql: str, params: Sequence[Any] = ()) -> _Rows:
         with self._lock:
             self._raise_if_closed()
-            return _Rows(self._connection.execute(sql, params).fetchall())
+            try:
+                return _Rows(self._connection.execute(sql, params).fetchall())
+            except sqlite3.OperationalError as error:
+                busy = _busy_as_storage_error(error)
+                if busy is None:
+                    raise
+                raise busy from error
 
     def executemany(self, sql: str, seq: Sequence[Sequence[Any]]) -> None:
         with self._lock:
             self._raise_if_closed()
-            self._connection.executemany(sql, seq)
+            try:
+                self._connection.executemany(sql, seq)
+            except sqlite3.OperationalError as error:
+                busy = _busy_as_storage_error(error)
+                if busy is None:
+                    raise
+                raise busy from error
 
     def __enter__(self) -> _SerializedConnection:
         self._lock.acquire()
@@ -70,7 +106,14 @@ class _SerializedConnection:
                 # within a transaction"으로 조용히 막힌다 — D-124가 고치려던
                 # 바로 그 상태가 다른 경로로 재현된다.
                 self._rollback_quietly()
-            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as error:
+                # 다른 프로세스가 쓰기 락을 60초 넘게 쥐고 있다 (D-233).
+                busy = _busy_as_storage_error(error)
+                if busy is None:
+                    raise
+                raise busy from error
         except BaseException:
             self._lock.release()
             raise
@@ -137,6 +180,7 @@ MIGRATION_FILES: dict[int, str] = {
     4: "migrations/0004_document_aliases.sql",
     5: "migrations/0005_version_source_unique.sql",
     6: "migrations/0006_version_observation.sql",
+    7: "migrations/0007_anchor_occurrences.sql",
 }
 
 
@@ -377,7 +421,7 @@ class Repository:
             # FK를 끈 구간이므로 커밋 전에 직접 검사한다 (SQLite 공식 ALTER 절차).
             violations = connection.execute("PRAGMA foreign_key_check").fetchall()
             if violations:
-                raise RuntimeError(
+                raise StorageError(
                     f"마이그레이션 v{target_version} 적용 후 참조 무결성 위반: "
                     f"{[tuple(row) for row in violations[:5]]}"
                 )
@@ -400,8 +444,15 @@ class Repository:
             for _ in range(2 * SCHEMA_VERSION + 4):
                 (current,) = self._connection.execute("PRAGMA user_version").fetchone()
                 if current > SCHEMA_VERSION:
-                    raise RuntimeError(
-                        f"DB 스키마 버전 {current}이 코드가 아는 버전 {SCHEMA_VERSION}보다 높습니다"
+                    # 버전 롤백(새 anchor로 만든 DB를 옛 anchor로 여는 것)의
+                    # 평범한 모습이다. `RuntimeError`로 새면 `__init__`의
+                    # `except sqlite3.Error`가 못 잡아 CLI가 트레이스백을
+                    # 토한다 — 사용자의 상황은 "도구가 깨졌다"가 아니다
+                    # (D-233, SPEC §8).
+                    raise StorageError(
+                        f"DB 스키마 버전 {current}이 코드가 아는 버전 "
+                        f"{SCHEMA_VERSION}보다 높습니다 (anchor를 올리세요): "
+                        f"{self._db_path}"
                     )
                 if current == SCHEMA_VERSION:
                     return
@@ -416,7 +467,7 @@ class Repository:
                     .read_text("utf-8")
                 )
                 self._apply_sql_atomically(sql, current + 1, expected_version=current)
-            raise RuntimeError("스키마 마이그레이션이 진행되지 않았습니다")
+            raise StorageError("스키마 마이그레이션이 진행되지 않았습니다")
         finally:
             self._connection.execute("PRAGMA foreign_keys = ON")
 
@@ -1030,6 +1081,7 @@ class Repository:
         quality: str,
         note: str | None,
         created_at: str,
+        occurrences: int | None = None,
     ) -> AnchorRecord:
         anchor_id = uuid7()
         with self._connection:
@@ -1045,8 +1097,9 @@ class Repository:
             self._connection.execute(
                 """INSERT INTO anchors
                    (id, document_id, created_version, exact, prefix, suffix,
-                    position_hint, exact_hash, quality, note, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    position_hint, exact_hash, quality, note, created_at,
+                    occurrences)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     anchor_id,
                     document_id,
@@ -1059,6 +1112,7 @@ class Repository:
                     quality,
                     note,
                     created_at,
+                    occurrences,
                 ),
             )
             row = self._connection.execute(
@@ -1206,6 +1260,7 @@ class Repository:
             quality=row["quality"],
             note=row["note"],
             created_at=row["created_at"],
+            occurrences=row["occurrences"],
         )
 
     @staticmethod

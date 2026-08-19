@@ -1,5 +1,5 @@
 -- SPDX-License-Identifier: Apache-2.0
--- Anchor 스키마 v6 — 신규 DB용 전체 스키마 (SPEC §4.1 + robots 캐시).
+-- Anchor 스키마 v7 — 신규 DB용 전체 스키마 (SPEC §4.1 + robots 캐시).
 -- 기존 DB는 migrations/ 아래의 증분 SQL로 따라온다.
 
 -- 논리적 문서 (Memento: Original Resource / URI-R). URL 정규화 후 유일.
@@ -83,7 +83,11 @@ CREATE TABLE anchors (
     exact_hash        TEXT NOT NULL,
     quality           TEXT NOT NULL,           -- ok | short (32자 미만)
     note              TEXT,
-    created_at        TEXT NOT NULL
+    created_at        TEXT NOT NULL,
+    -- 생성 시점에 인용문이 원문에 몇 번 나왔는가 (v7). 앵커는 첫 출현에
+    -- 묶이므로 2 이상이면 어느 인스턴스가 "그" 인용인지 모호하다. NULL은
+    -- v7 이전에 만들어져 **모르는** 것이다 — 1로 채우면 단정이 된다.
+    occurrences       INTEGER
 );
 
 -- 재검증 이력.

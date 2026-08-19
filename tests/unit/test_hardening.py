@@ -217,3 +217,49 @@ def test_bounded_edit_distance_respects_budget():
     long_b = "나" * 3000
     with pytest.raises(TimeoutError):
         bounded_edit_distance(long_a, long_b, 3000, Budget(0))
+
+
+# -- D-233: 저장소 계층의 도메인 밖 예외 -------------------------------------
+# (스키마 버전 롤백은 tests/unit/test_schema_stability.py가 진다.)
+
+
+def test_a_locked_store_is_a_storage_error_not_a_raw_sqlite_error(tmp_path):
+    """다른 프로세스가 쓰기 락을 오래 쥐면 `BEGIN IMMEDIATE`가 죽는다 (D-233)."""
+    import sqlite3
+
+    from anchor.errors import StorageError
+    from anchor.store.repository import _SerializedConnection
+
+    path = tmp_path / "busy.db"
+    holder = sqlite3.connect(path, isolation_level=None)
+    holder.execute("CREATE TABLE t (x INTEGER)")
+    try:
+        holder.execute("BEGIN EXCLUSIVE")
+        raw = sqlite3.connect(path, isolation_level=None, timeout=0.05)
+        wrapped = _SerializedConnection(raw)
+        try:
+            with pytest.raises(StorageError):
+                with wrapped:
+                    wrapped.execute("INSERT INTO t VALUES (1)")
+            # 읽기 경로도 같은 계약을 진다 — 한쪽만 접으면 다른 쪽이 남는다.
+            with pytest.raises(StorageError):
+                wrapped.execute("SELECT * FROM t")
+        finally:
+            wrapped.close()
+    finally:
+        holder.close()
+
+
+def test_a_real_sql_error_is_not_disguised_as_a_busy_store(tmp_path):
+    """경합만 접는다 — 문법 오류는 진짜 결함이므로 그대로 올라가야 한다."""
+    import sqlite3
+
+    from anchor.store.repository import _SerializedConnection
+
+    raw = sqlite3.connect(tmp_path / "plain.db", isolation_level=None)
+    wrapped = _SerializedConnection(raw)
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            wrapped.execute("SELECT * FROM no_such_table")
+    finally:
+        wrapped.close()

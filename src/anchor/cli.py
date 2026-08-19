@@ -78,6 +78,13 @@ def fetch(
         typer.echo(f"  제목      {result.title}")
     typer.echo(f"  버전      {result.version_id}  ({result.captured_at}, {result.source})")
     typer.echo(f"  text_hash {result.text_hash}")
+    if result.raw_changed:
+        # 판정은 unchanged다. 달라진 것은 우리가 보는 영역 **밖**이다 (D-232).
+        typer.secho(
+            "  원본 바이트가 달라졌습니다 — 추출된 본문은 같습니다"
+            " (본문으로 뽑히지 않는 영역의 변경일 수 있습니다)",
+            fg=typer.colors.YELLOW,
+        )
     typer.echo(
         f"  네트워크  {result.network.bytes_down:,} bytes down, {result.network.elapsed_ms} ms"
     )
@@ -108,6 +115,9 @@ def cite(
     typer.secho("앵커 생성", fg=typer.colors.GREEN, bold=True, nl=False)
     typer.echo(f"  {result.anchor_id}")
     typer.echo(f"  버전   {result.version_id}  오프셋 {result.offset}  품질 {result.quality}")
+    # 어느 시점 판본에 닻을 내렸는가 (D-230). cite는 네트워크에 나가지
+    # 않으므로, 이 줄이 없으면 사용자는 오래된 스냅샷에 인용을 걸면서 모른다.
+    typer.echo(f"  캡처   {result.captured_at}  (원본 대조 {result.last_checked_at})")
     if result.source == "archive":
         # `verify`와 같은 대칭이다 — 아카이브 스냅샷에 앵커를 달았다는 사실은
         # `--json`·MCP에만 있으면 안 된다. 사람이 읽는 출력에서만 빠지면
@@ -195,12 +205,44 @@ def verify(
             "아카이브 스냅샷과 대조했습니다",
             fg=typer.colors.YELLOW,
         )
+    if report.pipeline_changed:
+        # 원문이 한 글자도 안 바뀌었는데 경보가 쏟아지는 유일한 이유다 (D-235).
+        typer.secho(
+            f"추출 파이프라인 변경 {report.pipeline_changed}건 — 원문 변경이 "
+            "아닐 수 있습니다",
+            fg=typer.colors.YELLOW,
+        )
+    if report.ambiguous:
+        # 모호한 채 INTACT가 된 앵커는 attention에 없다 (D-231).
+        typer.secho(
+            f"중복 출현 {report.ambiguous}건 — 인용문이 원문에 여러 번 나와 "
+            "앵커가 어느 인스턴스를 가리키는지 모호합니다",
+            fg=typer.colors.YELLOW,
+        )
     if not report.attention:
         return
     typer.secho("\n주의 필요:", bold=True)
     for item in report.attention:
         typer.secho(f"[{item.state}] ", fg=typer.colors.YELLOW, bold=True, nl=False)
         typer.echo(item.url)
+        if item.source == "archive":
+            # 집계 줄만으로는 혼합 배치에서 **어느 항목이** 아카이브 대조인지
+            # 알 수 없다 (D-234, D-218의 나머지 절반).
+            typer.secho(
+                "  출처: archive — 원본이 아니라 아카이브 스냅샷과 대조했습니다",
+                fg=typer.colors.YELLOW,
+            )
+        if item.pipeline_changed:
+            typer.secho(
+                "  추출 파이프라인이 달라졌습니다 — 원문 변경이 아닐 수 있습니다",
+                fg=typer.colors.YELLOW,
+            )
+        if item.occurrences is not None and item.occurrences > 1:
+            typer.secho(
+                f"  인용문이 원문에 {item.occurrences}회 이상 나왔습니다 — "
+                "앵커가 어느 인스턴스를 가리키는지 모호합니다",
+                fg=typer.colors.YELLOW,
+            )
         typer.echo(f"  이전: {item.before}")
         if item.after is not None:
             typer.echo(f"  현재: {item.after}")
@@ -280,9 +322,12 @@ def stats(
         f" · 디스크 {payload['disk_bytes']:,} bytes"
     )
     typer.echo(
+        # created·renormalized를 changed와 나눠 적는다 (D-227). 한 이름으로
+        # 묶으면 첫 페치가 "바뀌었다"로 읽힌다.
         f"최근 30일: 요청 {window['requests']}"
         f" (cache_hit {window['cache_hits']}, not_modified {window['not_modified']},"
-        f" unchanged {window['unchanged']}, changed {window['changed']},"
+        f" unchanged {window['unchanged']}, created {window['created']},"
+        f" changed {window['changed']}, renormalized {window['renormalized']},"
         f" archive {window['archive']}, error {window['errors']})"
     )
     typer.echo(
