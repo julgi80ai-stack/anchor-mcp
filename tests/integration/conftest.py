@@ -77,6 +77,15 @@ class FixtureState:
         self.status_override_with_body: bool = False
         # 애그리게이터 응답을 이상한 페이로드로 바꿔치기 (파싱 견고성 검증용)
         self.archive_payload_override: str | None = None
+        # CDX 응답의 statuscode 축 (D-092). 우리가 `filter=statuscode:200`을
+        # 요청했다는 사실은 응답이 그 필터를 지켰다는 증거가 아니다 — 필터를
+        # 무시하는 미러, statuscode 열 자체를 주지 않는 미러가 실재한다.
+        # 기본값(None)만 두면 그 축이 픽스처에 존재하지 않는다.
+        self.cdx_header: list[str] | None = None   # None이면 표준 7열
+        self.cdx_rows: list[list[str]] | None = None  # None이면 200 한 줄
+        # 재생 본문을 타임스탬프별로 다르게 준다 — 어느 행을 채택했는지가
+        # 본문으로 드러나야 "마지막 행"과 "마지막 200 행"을 구분할 수 있다.
+        self.archive_html_by_timestamp: dict[str, str] = {}
         # -- 결정론적 겹침 장치 (D-128/D-129) --------------------------------
         # 동시성 계약은 sleep으로 재현하면 픽스처가 무효다(5단계 교훈). 요청이
         # 핸들러 안에서 **서로 만나게** 하고, 만났는지를 사실로 남긴다.
@@ -208,6 +217,15 @@ class _Handler(BaseHTTPRequestHandler):
         uri_m = f"http://{host}/web/{state.archive_timestamp}id_/{original}"
 
         if self.path.startswith("/web/"):
+            stamp = self.path[len("/web/"):].split("id_/", 1)[0]
+            if stamp in state.archive_html_by_timestamp:
+                body = state.archive_html_by_timestamp[stamp].encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if state.archive_html is None:
                 self.send_response(404)
                 self.send_header("Content-Length", "0")
@@ -222,12 +240,26 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         if self.path.startswith("/cdx/search/cdx"):
-            if state.archive_html is None:
+            header = state.cdx_header or [
+                "urlkey", "timestamp", "original", "mimetype", "statuscode", "digest", "length"
+            ]
+            if state.cdx_rows is not None:
+                payload = _json.dumps(
+                    [header]
+                    + [
+                        [
+                            (original if cell == "$original" else cell)
+                            for cell in row
+                        ]
+                        for row in state.cdx_rows
+                    ]
+                ).encode("utf-8")
+            elif state.archive_html is None:
                 payload = b"[]"
             else:
                 payload = _json.dumps(
                     [
-                        ["urlkey", "timestamp", "original", "mimetype", "statuscode", "digest", "length"],
+                        header,
                         ["key", state.archive_timestamp, original, "text/html", "200", "D", "1"],
                     ]
                 ).encode("utf-8")

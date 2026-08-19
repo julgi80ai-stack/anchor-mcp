@@ -130,6 +130,11 @@ class CiteResult:
     anchor_id: str
     document_id: str
     version_id: str
+    # 앵커가 붙은 판본의 출처 (live | archive). SPEC §5.2는 아카이브에서
+    # 확인된 것을 사용자가 **항상** 알 수 있어야 한다고 규정하는데, 그 사실이
+    # `fetch_document`·`get_version`에만 있었다 (D-093) — 원본이 죽어 아카이브
+    # 스냅샷에 앵커를 단 것과 원본에 단 것이 응답에서 구분되지 않았다.
+    source: str
     offset: int
     quality: Quality
     warnings: tuple[str, ...]
@@ -152,12 +157,20 @@ class AttentionItem:
     # 왔다는 뜻이다 — 편집거리만 보고는 알 수 없다 (D-115).
     position_hint: int | None = None
     found_offset: int | None = None
+    # 무엇과 대조했는가 (live | archive). 대조 자체가 없었던 항목(GONE·
+    # UNREACHABLE)은 None이다 — 출처를 지어내지 않는다 (D-093).
+    source: str | None = None
 
 
 @dataclass(frozen=True)
 class VerifyReport:
     checked: int
     summary: dict[str, int]
+    # 대조 상대의 출처별 집계 (live | archive | none). `attention`에만 출처를
+    # 달면 **전부 INTACT인 보고서에서 그 사실이 통째로 사라진다** — 원본은
+    # 404이고 아카이브 스냅샷만 봤다는 것이 "이상 없음"으로 읽힌다 (D-093).
+    # 합은 항상 `checked`와 같다.
+    sources: dict[str, int]
     attention: tuple[AttentionItem, ...]
     anchor_ids: tuple[str, ...]  # 이번에 검증한 앵커들 (SPEC §8 예시의 재내보내기용)
     stopped_early: bool  # 취소·종료 신호로 중도 종료됐는가 (부분 결과)

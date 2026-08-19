@@ -447,9 +447,8 @@ class Anchor:
             경로나 다른 호스트를 robots 요청조차 없이 가져오게 된다.
             """
             hop_verdict = self._robots.check(hop_url)
+            self._record_robots_verdict(hop_url, hop_verdict, document)
             if not hop_verdict.allowed:
-                if document:
-                    self._repository.set_robots_allowed(document.id, False)
                 # 여기서 기록하지 않는다 — 아카이브로 구제되면 이 호출은
                 # 결국 성공이고, 중간 실패를 남기면 한 호출이 두 행이 된다
                 # (D-133). 다만 이 판정에 쓴 바이트는 페처에게 돌려줄 기회가
@@ -605,6 +604,8 @@ class Anchor:
             anchor_id=anchor.id,
             document_id=document.id,
             version_id=latest.id,
+            # 앵커가 붙은 판본이 원본인지 아카이브 스냅샷인지 (D-093, SPEC §5.2).
+            source=latest.source,
             offset=selector.position_hint,
             quality=selector.quality,
             warnings=warnings,
@@ -660,6 +661,9 @@ class Anchor:
         )
 
         summary = {state: 0 for state in matcher.ALL_STATES}
+        # 무엇과 대조했는가의 집계. attention에만 출처를 달면 전부 INTACT인
+        # 보고서에서 "원본은 404였고 아카이브만 봤다"가 사라진다 (D-093).
+        sources = {"live": 0, "archive": 0, "none": 0}
         attention: list[AttentionItem] = []
         requests = 0
         not_modified = 0
@@ -690,6 +694,7 @@ class Anchor:
                 # 그래도 못 찾으면 이 묶음만 보류하고 배치는 계속 간다.
                 for record in document_anchors:
                     summary[matcher.UNRESOLVED] += 1
+                    sources["none"] += 1
                 continue
 
             failure_state: str | None = None
@@ -723,6 +728,7 @@ class Anchor:
                         elapsed_ms=0,
                     )
                     summary[failure_state] += 1
+                    sources["none"] += 1  # 대조가 없었다 — 출처를 지어내지 않는다
                     if failure_state == matcher.GONE:
                         attention.append(
                             AttentionItem(
@@ -782,6 +788,7 @@ class Anchor:
                     elapsed_ms=elapsed_ms,
                 )
                 summary[result.state] += 1
+                sources[latest.source] = sources.get(latest.source, 0) + 1
                 if result.state in (matcher.ALTERED, matcher.MISSING, matcher.UNRESOLVED):
                     attention.append(
                         AttentionItem(
@@ -795,6 +802,7 @@ class Anchor:
                             truncated=result.truncated,
                             position_hint=anchor.position_hint,
                             found_offset=result.found_offset,
+                            source=latest.source,
                         )
                     )
             if stopped_early:
@@ -804,6 +812,7 @@ class Anchor:
         return VerifyReport(
             checked=checked,
             summary=summary,
+            sources=sources,
             attention=tuple(attention),
             anchor_ids=tuple(anchor.id for anchor in anchors),
             stopped_early=stopped_early,
@@ -873,6 +882,16 @@ class Anchor:
         context_lines: int = 2,
     ) -> str:
         """두 버전의 본문 차이를 통합 diff로 (SPEC §7.4)."""
+        if context_lines < 0:
+            # 익스포터 안쪽에도 같은 가드가 있지만(D-025 시절), 거기까지
+            # 가려면 버전 참조 해석과 본문 두 벌 읽기가 먼저 끝나야 한다 —
+            # 버전이 하나뿐인 문서에서는 사용자가 진짜 원인(음수 인자) 대신
+            # "버전 없음"을 받는다. 인자 검증은 공통 길목에서 먼저 한다
+            # (D-211, D-122의 선례).
+            raise ValueError(
+                f"context_lines must be >= 0, got {context_lines} — "
+                "context_lines는 0 이상이어야 합니다"
+            )
         document = self._resolve_document(document_ref)
         from_version = self._resolve_version_ref(document.id, from_ref)
         to_version = self._resolve_version_ref(document.id, to_ref)
@@ -982,7 +1001,23 @@ class Anchor:
         시간축이 접히므로, 그 축을 따로 들고 있어야 답할 수 있다.
         """
         if ref == "latest" or ref.startswith("latest~"):
-            back = int(ref[7:]) if ref.startswith("latest~") else 0
+            back = 0
+            if ref.startswith("latest~"):
+                suffix = ref[7:]
+                # N은 **0 이상의 십진 정수**만이다. 음수는 `back >= len(versions)`
+                # 가드를 그대로 통과해 파이썬 음수 인덱스로 들어가, `latest~-1`이
+                # 거부 없이 **가장 오래된 판본**을 돌려줬다 (D-085) — "인용 당시
+                # 원문을 되살린다"가 정확히 반대쪽 끝을 준다. 비정수는 `int()`의
+                # 생 ValueError로 새어 MCP 클라이언트에 파이썬 내부 메시지가
+                # 그대로 노출됐다 (D-086). 전각·아라비아 숫자는 `int()`가 받지만
+                # 사용자가 쓴 표기가 아니므로 ASCII만 받는다.
+                if not (suffix.isascii() and suffix.isdigit()):
+                    raise ValueError(
+                        f"Version ref must be 'latest', 'latest~N' (N a non-negative "
+                        f"integer), or a version id, got {ref!r} — 버전 참조는 "
+                        f"'latest', 'latest~N'(N은 0 이상의 정수) 또는 버전 id여야 합니다"
+                    )
+                back = int(suffix)
             if back == 0:
                 # "latest" = 원문이 지금 서빙하는 본문 (캡처 시각 최대값이
                 # 아니다 — 되돌림·아카이브에서 갈린다, D-012/D-024).
@@ -1017,6 +1052,40 @@ class Anchor:
             if checked is None or checked[1] != latest.id:
                 return True
         return False
+
+    def _record_robots_verdict(self, hop_url: str, verdict, document: Document | None) -> None:
+        """robots 판정을 **판정된 그 문서**에 사실대로 기록한다 (D-097).
+
+        세 가지가 어긋나 있었다.
+
+        ① **귀속**: 막힌 것이 리다이렉트 목적지의 다른 호스트인데 입력 URL의
+           문서에 False를 썼다 — 아무것도 금지하지 않은 사이트가 금지한
+           것으로 남는다. 판정된 URL이 속한 문서에만 적는다.
+        ② **사유**: `unavailable`(5xx·판정 불능)은 소유자의 의사가 아니다.
+           이 열은 "소유자의 규칙이 막는가"이므로, 물어보지 못한 것을 거부로
+           적으면 일시 장애가 영구 금지로 굳는다. 모를 때는 쓰지 않는다.
+        ③ **회복**: `True`로 되돌리는 호출처가 저장소 전체에 없어, robots가
+           다시 허용해도 기록은 영원히 False였다.
+
+        기록은 부기(簿記)일 뿐이므로 어떤 경우에도 페치를 죽이지 않는다.
+        """
+        try:
+            hop_norm = normalize_url(hop_url)
+        except AnchorError:
+            return
+        if verdict.allowed:
+            # 회복은 문서 자신의 URL에서만 판단한다 — 평범한 홉마다 조회를
+            # 늘리지 않기 위해서다(쓰기가 필요한 경우는 드물다).
+            if document is not None and not document.robots_allowed and hop_norm == document.url:
+                self._repository.set_robots_allowed(document.id, True)
+            return
+        if verdict.reason != "explicit":
+            return  # ② 물어보지 못한 것은 거부가 아니다
+        target = document if (document is not None and hop_norm == document.url) else None
+        if target is None:
+            target = self._repository.get_document_by_any_url(hop_norm)
+        if target is not None and target.robots_allowed:
+            self._repository.set_robots_allowed(target.id, False)
 
     def _resolve_document(self, document_ref: str) -> Document:
         if document_ref.startswith(("http://", "https://")):

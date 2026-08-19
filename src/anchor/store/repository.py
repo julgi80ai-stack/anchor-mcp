@@ -642,6 +642,12 @@ class Repository:
             return self._to_version(row)
 
     def set_robots_allowed(self, document_id: str, allowed: bool) -> None:
+        """이 문서의 URL을 **소유자의 robots 규칙이 막는가**를 기록한다.
+
+        "판정 불능"(5xx·호스트 소멸)은 이 열의 값이 아니다 — 모르는 것을
+        거부로 적으면 일시 장애가 영구 금지로 굳는다. 무엇을 쓸지의 판단은
+        호출자(service의 `_record_robots_verdict`)에 있다 (D-097).
+        """
         with self._connection:
             self._connection.execute(
                 "UPDATE documents SET robots_allowed = ? WHERE id = ?",

@@ -149,13 +149,33 @@ class ArchiveFallback:
             return None
         if len(rows) < 2:  # 첫 행은 헤더
             return None
-        header, snapshot = rows[0], rows[-1]
-        record = dict(zip(header, snapshot))
-        timestamp = record["timestamp"]
-        original = record["original"]
-        # id_ 접미사는 재생 UI 없이 원본 바이트를 돌려준다.
-        uri_m = f"{WAYBACK_BASE}/web/{timestamp}id_/{original}"
-        return uri_m, _cdx_timestamp_to_iso(timestamp), len(response.content)
+        header, snapshots = rows[0], rows[1:]
+        if "statuscode" not in header:
+            # 우리가 `filter=statuscode:200`을 **요청했다는 사실**은 응답이 그
+            # 필터를 지켰다는 증거가 아니다 (D-092). 열이 없으면 그 행이 200
+            # 스냅샷인지 **알 수 없고**, 모르는 것을 아는 것처럼 다루면
+            # 아카이브된 404 오류 페이지가 "구제된 본문"이 되어 그 위의 인용이
+            # MISSING으로 단정된다. 구제를 포기하고 원 상태(gone)를 사실대로
+            # 보고하는 편이 낫다 — 안 쓴 것보다 나빠지지 않는다 (§5.4).
+            return None
+        for snapshot in reversed(snapshots):  # 가장 최근 200 스냅샷
+            record = dict(zip(header, snapshot))
+            if str(record.get("statuscode")) != "200":
+                continue
+            timestamp = record.get("timestamp")
+            original = record.get("original")
+            if not timestamp or not original:
+                continue
+            try:
+                captured_at = _cdx_timestamp_to_iso(timestamp)
+            except ValueError:
+                # 이 행의 시각을 읽지 못한 것이 더 오래된 200 스냅샷까지
+                # 포기할 이유는 아니다.
+                continue
+            # id_ 접미사는 재생 UI 없이 원본 바이트를 돌려준다.
+            uri_m = f"{WAYBACK_BASE}/web/{timestamp}id_/{original}"
+            return uri_m, captured_at, len(response.content)
+        return None
 
 
 def _to_iso(value: str) -> str:

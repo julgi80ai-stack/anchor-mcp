@@ -179,6 +179,14 @@ def verify(
     summary_line = " · ".join(f"{state} {count}" for state, count in report.summary.items())
     typer.echo(f"검증 {report.checked}건: {summary_line}")
     typer.echo(f"네트워크: 요청 {report.requests}건, {report.bytes_down:,} bytes down")
+    if report.sources.get("archive"):
+        # 전부 INTACT여도 이 사실은 남아야 한다 — 원본이 아니라 아카이브
+        # 스냅샷과 대조한 것이다 (D-093, SPEC §5.2).
+        typer.secho(
+            f"출처: archive {report.sources['archive']}건 — 원본이 아니라 "
+            "아카이브 스냅샷과 대조했습니다",
+            fg=typer.colors.YELLOW,
+        )
     if not report.attention:
         return
     typer.secho("\n주의 필요:", bold=True)

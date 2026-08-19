@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import sys
 import threading
@@ -52,6 +53,13 @@ TASKABLE_TOOLS = frozenset({"verify_citations"})
 _TASK_DEFAULT_TTL_MS = 30 * 60 * 1000  # ttl 미지정 시 기본 보존 30분
 _TASK_MAX_TTL_MS = 24 * 60 * 60 * 1000  # 요청 ttl 상한 24시간
 
+# tasks/list 한 페이지의 크기 (D-054). 장기 실행 서버에서 전량 반환은 응답이
+# 목록 크기만큼 커진다 — MCP의 커서 페이지네이션이 있는 이유다. 항목 하나가
+# 수백 바이트이므로 50건이면 응답은 수십 KB에 머물고, 대부분의 클라이언트는
+# 첫 페이지만으로 끝난다.
+_TASK_PAGE_SIZE = 50
+_CURSOR_PREFIX = "tasks/list:"
+
 # shutdown이 "등록됐지만 스레드가 시작되지 않은" 항목을 기다려 주는 시간.
 # 정상 경로에서 이 상태는 등록→start() 사이의 찰나지만, start()가 실패하면
 # (스레드 한도 등) 영구히 남는다 — 무한히 기다리면 서버가 영영 안 꺼진다.
@@ -61,6 +69,25 @@ _TASK_START_PATIENCE_S = 2.0
 # ---------------------------------------------------------------------------
 # Tasks 확장 (MCP Tasks, SPEC §7.0)
 # ---------------------------------------------------------------------------
+
+
+def _encode_cursor(task_id: str) -> str:
+    """불투명 커서. 클라이언트가 해석하지 않도록 인코딩한다 (MCP: opaque)."""
+    return base64.urlsafe_b64encode(f"{_CURSOR_PREFIX}{task_id}".encode()).decode()
+
+
+def _decode_cursor(cursor: str | None) -> str | None:
+    """커서를 '이 id 다음부터'로 되돌린다. 우리가 발급한 것이 아니면 거부한다 —
+    조용히 처음부터 주면 클라이언트는 같은 항목을 두 번 읽고도 모른다."""
+    if cursor is None:
+        return None
+    try:
+        decoded = base64.urlsafe_b64decode(cursor.encode()).decode()
+    except (ValueError, UnicodeDecodeError) as error:
+        raise MCPError(_INVALID_PARAMS, f"invalid cursor — 잘못된 커서: {cursor!r}") from error
+    if not decoded.startswith(_CURSOR_PREFIX):
+        raise MCPError(_INVALID_PARAMS, f"invalid cursor — 잘못된 커서: {cursor!r}")
+    return decoded[len(_CURSOR_PREFIX):]
 
 
 @dataclass
@@ -360,11 +387,26 @@ class AnchorTasksExtension(Extension):
         return self._wire_task(entry.task)
 
     async def _on_list(self, ctx, params: PaginatedRequestParams | None) -> dict[str, Any]:
+        """커서 기반 페이지네이션 (MCP §pagination, D-054).
+
+        정렬 기준은 task id다 — uuid7이라 사전순이 곧 생성 시각순이므로,
+        별도 정렬 키 없이 안정적이고 클라이언트가 읽는 순서도 자연스럽다.
+        커서는 **위치가 아니라 항목**을 가리킨다("이 id 다음부터") — 페이지
+        사이에서 prune이 항목을 지워도 남은 것을 건너뛰지 않는다.
+        """
         self.prune()
+        after = _decode_cursor(params.cursor if params is not None else None)
+        with self._entries_lock:
+            ordered = sorted(self._entries.values(), key=lambda entry: entry.task.task_id)
+        if after is not None:
+            ordered = [entry for entry in ordered if entry.task.task_id > after]
+        page = ordered[:_TASK_PAGE_SIZE]
         # dict 반환 이유는 _on_get과 같다 (D-116) — ttl 키가 빠진 항목 하나가
         # tasks/list 전체를 영구히 파싱 불가로 만들었다.
-        with self._entries_lock:
-            return {"tasks": [self._wire_task(entry.task) for entry in self._entries.values()]}
+        payload: dict[str, Any] = {"tasks": [self._wire_task(entry.task) for entry in page]}
+        if len(ordered) > len(page):
+            payload["nextCursor"] = _encode_cursor(page[-1].task.task_id)
+        return payload
 
 
 # ---------------------------------------------------------------------------
