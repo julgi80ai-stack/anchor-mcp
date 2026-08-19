@@ -14,9 +14,9 @@ from typing import Any, Sequence
 import zstandard
 
 from anchor.errors import DocumentNotFound, StorageError
-from anchor.models import AnchorRecord, Document, Version, uuid7
+from anchor.models import AnchorRecord, Coverage, Document, Version, uuid7
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 ZSTD_LEVEL = 6
 
 
@@ -181,6 +181,7 @@ MIGRATION_FILES: dict[int, str] = {
     5: "migrations/0005_version_source_unique.sql",
     6: "migrations/0006_version_observation.sql",
     7: "migrations/0007_anchor_occurrences.sql",
+    8: "migrations/0008_version_coverage.sql",
 }
 
 
@@ -190,6 +191,34 @@ class RobotsEntry:
     body: str
     fetch_status: int
     fetched_at: str
+
+
+def _row_coverage(row: sqlite3.Row) -> Coverage:
+    """행에서 포착 범위를 읽는다. v8 이전 행은 전부 NULL → `unknown`."""
+    try:
+        basis = row["coverage_basis"]
+    except (IndexError, KeyError):
+        return Coverage.unknown()
+    if not basis:
+        return Coverage.unknown()
+    return Coverage(
+        basis=basis,
+        prose_chars=row["coverage_prose_chars"],
+        captured_chars=row["coverage_captured_chars"],
+        dropped=Coverage.decode_dropped(row["coverage_dropped"]),
+    )
+
+
+def _coverage_columns(coverage: Coverage | None) -> tuple:
+    """저장할 4열. 재지 못한 것은 NULL로 남긴다 — 모르는 것을 적지 않는다."""
+    if coverage is None or coverage.basis == "unknown":
+        return (None, None, None, None)
+    return (
+        coverage.basis,
+        coverage.prose_chars,
+        coverage.captured_chars,
+        coverage.encode_dropped(),
+    )
 
 
 def _load_schema() -> str:
@@ -833,6 +862,7 @@ class Repository:
         http_status: int,
         source: str = "live",
         source_uri: str | None = None,
+        coverage: Coverage | None = None,
         observe: bool = False,
     ) -> Version:
         """`observe=True`면 **같은 트랜잭션에서** 현재 버전 포인터까지 옮긴다.
@@ -851,11 +881,13 @@ class Repository:
                 """INSERT INTO versions
                    (id, document_id, text_hash, raw_hash, pipeline_version, captured_at,
                     last_observed_at, last_observed_seq, byte_size, char_count,
-                    content_blob, http_status, source, source_uri)
+                    content_blob, http_status, source, source_uri,
+                    coverage_basis, coverage_prose_chars, coverage_captured_chars,
+                    coverage_dropped)
                    VALUES (?, ?, ?, ?, ?, ?, ?,
                            (SELECT COALESCE(MAX(last_observed_seq), 0) + 1 FROM versions
                             WHERE document_id = ?),
-                           ?, ?, ?, ?, ?, ?)
+                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(document_id, text_hash, source) DO NOTHING""",
                 (
                     version_id,
@@ -872,6 +904,7 @@ class Repository:
                     http_status,
                     source,
                     source_uri,
+                    *_coverage_columns(coverage),
                 ),
             )
             # 이미 있으면 그 행을 쓴다. 같은 목적지로 리다이렉트되는 두 URL을
@@ -888,6 +921,26 @@ class Repository:
                     (row["id"], document_id),
                 )
         return self._to_version(row)
+
+    def update_version_coverage(self, version_id: str, coverage: Coverage) -> None:
+        """다시 관측한 판본의 포착 범위를 갱신한다 (D-239).
+
+        본문이 같아도(`unchanged`) 원본 HTML은 달라질 수 있다 — 정정 고지가
+        새로 붙으면 산문 총량이 늘고 포착률이 떨어진다. 그 값은 **지금**의
+        사실이므로 최신 관측으로 덮는다. `captured_at`과 달리 이 열은
+        Memento의 좌표가 아니라 관측의 성질이다 (`last_observed_at`과 같은
+        갈래). 재지 못한 관측(304·캐시 히트)은 여기 오지 않는다 — 모르는
+        것으로 아는 것을 지우지 않는다.
+        """
+        if coverage.basis == "unknown":
+            return
+        with self._connection:
+            self._connection.execute(
+                """UPDATE versions SET coverage_basis = ?, coverage_prose_chars = ?,
+                       coverage_captured_chars = ?, coverage_dropped = ?
+                   WHERE id = ?""",
+                (*_coverage_columns(coverage), version_id),
+            )
 
     def get_version_text(self, version_id: str) -> str:
         row = self._connection.execute(
@@ -1279,4 +1332,5 @@ class Repository:
             http_status=row["http_status"],
             source=row["source"],
             source_uri=row["source_uri"],
+            coverage=_row_coverage(row),
         )

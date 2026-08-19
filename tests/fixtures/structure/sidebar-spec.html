@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Example Transfer Protocol — Conformance Handbook</title>
+</head><body>
+<h1>Example Transfer Protocol — Conformance Handbook</h1>
+<nav id="toc"><ul>
+<li><a href="#s1">1. Message framing</a></li>
+<li><a href="#s2">2. Conditional requests</a></li>
+<li><a href="#s3">3. Response caching</a></li>
+<li><a href="#s4">4. Redirection</a></li>
+<li><a href="#s5">5. Field syntax</a></li>
+<li><a href="#s6">6. Authentication</a></li>
+</ul></nav>
+
+<section id="s1"><h2>1. Message framing</h2>
+<p>This section introduces message framing and the vocabulary used throughout.</p>
+<aside class="requirement"><p>An implementation MUST NOT forward a message whose framing it could not determine; it MUST close the connection instead and report the failure to its operator, because a forwarded message with ambiguous framing is the primitive that every deployment guide warns about.</p>
+<p>A sender that generates a message containing content SHOULD generate a Content-Length header field when the body size is known in advance, and a recipient MUST be able to parse a chunked transfer coding regardless of that field.</p></aside>
+</section>
+
+<section id="s2"><h2>2. Conditional requests</h2>
+<p>This section introduces conditional requests and the preconditions they carry.</p>
+<aside class="requirement"><p>An origin server MUST evaluate every precondition it understands before performing the method, and it MUST NOT apply a partial update when any precondition fails, because a partial update leaves the resource in a state no client asked for.</p>
+<p>A client that has one or more stored responses for a target resource MAY include a conditional request header field, and a server that ignores such a field MUST NOT claim conformance with this section.</p></aside>
+</section>
+
+<section id="s3"><h2>3. Response caching</h2>
+<p>This section introduces response caching and the storage rules that follow from it.</p>
+<aside class="requirement"><p>A shared cache MUST NOT store a response containing an Authorization header field unless the response explicitly allows it, and an implementation that does so MUST record the decision so that the behaviour can be audited afterwards by a third party.</p>
+<p>A cache MUST NOT store a response to a request whose method it does not understand, because a stored response for an unknown method cannot be invalidated correctly later.</p></aside>
+</section>
+
+<section id="s4"><h2>4. Redirection</h2>
+<p>This section introduces redirection and the limits placed on automatic following.</p>
+<aside class="requirement"><p>A user agent MUST NOT automatically follow a redirection to a scheme it does not support, and it MUST NOT resend credentials to an origin other than the one they were issued for, even when the redirection appears to stay within the same site.</p>
+<p>Automatic redirection SHOULD be limited to a finite number of hops, and an implementation that reaches that limit MUST report the limit rather than the last response it happened to receive.</p></aside>
+</section>
+
+<section id="s5"><h2>5. Field syntax</h2>
+<p>This section introduces field syntax and the parsing rules that recipients apply.</p>
+<aside class="requirement"><p>A recipient MUST reject, rather than repair, a message that contains a bare carriage return in the header section, because repairing such a message hides the disagreement between the two parsers that produced it.</p>
+<p>A field value MUST NOT contain leading or trailing whitespace, and a sender that emits such whitespace MUST NOT assume that any recipient will strip it on its behalf.</p></aside>
+</section>
+
+<section id="s6"><h2>6. Authentication</h2>
+<p>This section introduces authentication and the challenge exchange it depends on.</p>
+<aside class="requirement"><p>A server generating a 401 response MUST send a WWW-Authenticate header field, and a client MUST NOT send credentials to a different origin after a redirect even when the two origins share a registrable domain.</p>
+<p>An implementation SHOULD record every rejected challenge so that repeated failures can be distinguished from a single misconfiguration during an audit.</p></aside>
+<aside class="correction"><p>Correction (2026-08-19): the requirement stated in Section 6 was withdrawn by erratum 7042; implementations MUST NOT rely on it and SHOULD treat the earlier text as historical only.</p></aside>
+</section>
+
+<footer><p>Published by the Example Working Group. This handbook is informative and does not replace the protocol specification itself.</p></footer>
+</body></html>

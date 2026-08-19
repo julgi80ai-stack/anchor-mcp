@@ -12,7 +12,7 @@ from __future__ import annotations
 import importlib.metadata as _metadata
 import io
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import markdownify
 import pypdf
@@ -21,6 +21,8 @@ from charset_normalizer import from_bytes
 from readability import Document as ReadabilityDocument
 
 from anchor.errors import ExtractionFailed, UnsupportedContent
+from anchor.models import Coverage
+from anchor.normalize import coverage as coverage_metric
 from anchor.normalize.text import NORM_VERSION, dehyphenate, normalize_text
 
 _CHARSET_VERSION = _metadata.version("charset-normalizer")
@@ -52,6 +54,11 @@ class NormalizedDoc:
     text: str
     title: str | None
     pipeline_version: str
+    # 이 본문이 원본 문서의 얼마를 담고 있는가 (D-239). 경로마다 잴 수 있는
+    # 것이 다르다 — HTML은 산문 단위로 재고, text/plain은 고른 것이 없으니
+    # 전부이며, PDF는 **잴 수 없다**(가시 텍스트를 독립적으로 얻을 수단이
+    # 없어, 재면 항상 1.0이 나와 거짓 확신이 된다).
+    coverage: Coverage = field(default_factory=Coverage.unknown)
 
 
 def decode_bytes(raw: bytes) -> str:
@@ -75,7 +82,10 @@ def to_normalized(raw: bytes, content_type: str) -> NormalizedDoc:
                 "Plain-text body is empty after normalization — 정규화 후 본문이 비었습니다"
             )
         return NormalizedDoc(
-            text=text, title=None, pipeline_version=PLAIN_PIPELINE_VERSION
+            text=text,
+            title=None,
+            pipeline_version=PLAIN_PIPELINE_VERSION,
+            coverage=coverage_metric.whole_document(),
         )
 
     if media_type in _PDF_TYPES:
@@ -119,7 +129,15 @@ def to_normalized(raw: bytes, content_type: str) -> NormalizedDoc:
         except Exception:
             title = None
 
-    return NormalizedDoc(text=text, title=title, pipeline_version=pipeline_version)
+    # 계측은 **확정된 본문**을 기준으로 한다 — 폴백이 채택된 경우 그쪽이
+    # 저장될 본문이므로, trafilatura 산출로 재면 저장되지 않은 것을 잰 셈이
+    # 된다.
+    return NormalizedDoc(
+        text=text,
+        title=title,
+        pipeline_version=pipeline_version,
+        coverage=coverage_metric.measure_html(html, text),
+    )
 
 
 _BLOCK_TAG_RE = re.compile(r"<(?:p|h[1-6]|li|blockquote|pre|tr|dd|dt)\b", re.IGNORECASE)
@@ -164,4 +182,9 @@ def _from_pdf(raw: bytes) -> NormalizedDoc:
     except Exception:
         title = None
 
-    return NormalizedDoc(text=text, title=title, pipeline_version=PDF_PIPELINE_VERSION)
+    return NormalizedDoc(
+        text=text,
+        title=title,
+        pipeline_version=PDF_PIPELINE_VERSION,
+        coverage=coverage_metric.not_measurable(),
+    )

@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Status codes at a glance</title></head><body>
+<h1>Status codes at a glance</h1>
+<p>The table below lists the status codes this deployment emits and the condition that produces each one.</p>
+<table>
+<tr><th>Code</th><th>Condition</th></tr>
+<tr><td>200</td><td>The request was understood and the representation returned is the current state of the resource.</td></tr>
+<tr><td>304</td><td>The validator supplied by the client still matches, so the stored representation may be reused unchanged.</td></tr>
+<tr><td>403</td><td>The request was understood but the policy in force refuses it, and repeating the request will not help.</td></tr>
+<tr><td>404</td><td>No representation exists for the target, and the server does not say whether one ever did exist.</td></tr>
+<tr><td>410</td><td>A representation existed and has been removed deliberately, which is a stronger statement than 404.</td></tr>
+<tr><td>429</td><td>The client exceeded the rate the deployment is willing to serve, and the Retry-After field says when to return.</td></tr>
+</table>
+<h2>Operational checklist</h2>
+<ul>
+<li>Confirm that the conditional request path is exercised, because a deployment that never emits 304 is paying for every byte twice over.</li>
+<li>Confirm that 403 is reported as received and never retried automatically, because retrying a policy refusal is how a client earns a block.</li>
+<li>Confirm that 410 is preserved in the record, because collapsing it into 404 destroys the distinction the origin deliberately drew.</li>
+<li>Confirm that Retry-After is honoured, because ignoring it converts a temporary limit into a permanent one for everyone sharing the address.</li>
+</ul>
+</body></html>

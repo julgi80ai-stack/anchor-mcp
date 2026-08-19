@@ -1,5 +1,5 @@
 -- SPDX-License-Identifier: Apache-2.0
--- Anchor 스키마 v7 — 신규 DB용 전체 스키마 (SPEC §4.1 + robots 캐시).
+-- Anchor 스키마 v8 — 신규 DB용 전체 스키마 (SPEC §4.1 + robots 캐시).
 -- 기존 DB는 migrations/ 아래의 증분 SQL로 따라온다.
 
 -- 논리적 문서 (Memento: Original Resource / URI-R). URL 정규화 후 유일.
@@ -41,6 +41,15 @@ CREATE TABLE versions (
     -- 시각을 순서로 쓰면 같은 초 안의 두 관측이 갈리지 않는다.
     last_observed_at  TEXT NOT NULL,
     last_observed_seq INTEGER NOT NULL,
+    -- 이 본문이 원본 문서의 얼마를 담고 있는가 (v8, D-239). 추출기가 본문으로
+    -- 보지 않는 영역의 개정은 text_hash에 나타나지 않으므로, 판정이 문서의
+    -- 얼마를 보고 내려진 것인지를 함께 남긴다. **판정을 바꾸지 않는다.**
+    -- NULL은 v8 이전에 만들어져 잰 적이 없다는 뜻이다 — 1.0으로 채우면
+    -- 모르는 것이 확신으로 둔갑한다.
+    coverage_basis          TEXT,     -- html-prose | whole-document | no-prose | not-measurable
+    coverage_prose_chars    INTEGER,  -- 원본에서 센 산문 단위의 총 문자수
+    coverage_captured_chars INTEGER,  -- 그중 저장 본문에서 발견된 문자수
+    coverage_dropped        TEXT,     -- "aside:32 dd:554" — 미포착 블록의 구조별 개수
     -- 같은 본문이라도 출처가 다르면 별개의 memento다 (v5).
     UNIQUE (document_id, text_hash, source)
 );

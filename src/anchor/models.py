@@ -77,6 +77,85 @@ def iso_ago(seconds: float) -> str:
 
 
 @dataclass(frozen=True)
+class Coverage:
+    """저장 본문이 원본 문서의 얼마를 담고 있는가 (D-239, SPEC §5.5).
+
+    **판정이 아니라 사실이다.** `outcome`도 `INTACT/ALTERED`도 이 값으로
+    달라지지 않는다 — 다만 그 판정이 문서의 얼마를 보고 내려진 것인지를
+    함께 밝힌다. 측정 방법과 문턱의 근거는 `anchor.normalize.coverage`.
+
+    basis:
+      html-prose      HTML에서 산문 단위를 세어 잰 값.
+      whole-document  text/plain — 고른 것이 없으니 버린 영역도 없다.
+      no-prose        HTML이지만 셀 만한 산문 단위가 없다(색인 페이지).
+      not-measurable  PDF — 가시 텍스트를 독립적으로 잴 수단이 없다.
+      unknown         재지 못했거나(파싱 실패) 저장된 적이 없다(v8 이전 행).
+
+    `ratio`가 `None`이면 **모른다**는 뜻이다. 1.0으로 채우면 사각지대가
+    확신으로 둔갑한다.
+    """
+
+    basis: str
+    prose_chars: int | None = None
+    captured_chars: int | None = None
+    # 저장 본문에서 발견되지 않은 블록의 (구조 이름, 개수). 정정 고지가
+    # 실릴 법한 구조(aside·figcaption·details·blockquote·dd·caption)로
+    # 귀속시킨 이름이다.
+    dropped: tuple[tuple[str, int], ...] = ()
+
+    @property
+    def measured(self) -> bool:
+        return self.basis in ("html-prose", "whole-document")
+
+    @property
+    def ratio(self) -> float | None:
+        if self.basis == "whole-document":
+            return 1.0
+        if self.basis != "html-prose":
+            return None
+        if not self.prose_chars:
+            return None
+        return (self.captured_chars or 0) / self.prose_chars
+
+    @staticmethod
+    def unknown() -> "Coverage":
+        return Coverage(basis="unknown")
+
+    def encode_dropped(self) -> str | None:
+        """저장용 표기 — `"aside:13 p:1"`. 빈 값은 NULL이 아니라 빈 문자열이다
+        (v8 이후 행에서 "없다"와 "모른다"가 갈려야 한다)."""
+        if self.basis == "unknown":
+            return None
+        return " ".join(f"{tag}:{count}" for tag, count in self.dropped)
+
+    def as_payload(self) -> dict:
+        """응답용 표현. `ratio`는 파생값이라 `asdict`에 담기지 않으므로 여기서
+        명시적으로 싣는다 — 빠지면 응답을 읽는 쪽이 스스로 나눠야 한다."""
+        return {
+            "basis": self.basis,
+            "prose_chars": self.prose_chars,
+            "captured_chars": self.captured_chars,
+            "ratio": self.ratio,
+            "dropped": [{"structure": tag, "blocks": n} for tag, n in self.dropped],
+        }
+
+    @staticmethod
+    def decode_dropped(value: str | None) -> tuple[tuple[str, int], ...]:
+        if not value:
+            return ()
+        items: list[tuple[str, int]] = []
+        for chunk in value.split():
+            tag, _, count = chunk.rpartition(":")
+            if not tag:
+                continue
+            try:
+                items.append((tag, int(count)))
+            except ValueError:
+                continue
+        return tuple(items)
+
+
+@dataclass(frozen=True)
 class Document:
     id: str
     url: str
@@ -106,6 +185,10 @@ class Version:
     http_status: int
     source: str  # live | archive
     source_uri: str | None
+    # 이 본문이 원본 문서의 얼마를 담고 있는가 (v8, D-239). `cite`는 어떤
+    # 경우에도 네트워크에 나가지 않으므로, 저장해 두지 않으면 인용을 거는
+    # 순간에 그 사실을 말할 수 없다. v8 이전 행은 basis="unknown"이다.
+    coverage: Coverage = field(default_factory=Coverage.unknown)
 
 
 @dataclass(frozen=True)
@@ -150,6 +233,9 @@ class CiteResult:
     # last_checked_at은 그 문서를 원본과 마지막으로 대조한 때다.
     captured_at: str = ""
     last_checked_at: str = ""
+    # 닻을 내린 판본이 원본 문서의 얼마를 담고 있는가 (D-240). 인용을 거는
+    # 순간이 사용자가 그 본문을 신뢰하기로 결정하는 순간이다.
+    coverage: Coverage = field(default_factory=Coverage.unknown)
 
 
 @dataclass(frozen=True)
@@ -178,6 +264,8 @@ class AttentionItem:
     # 참이면 원문이 그대로여도 경보가 날 수 있다 — **판정은 바꾸지 않고**
     # 사실만 표시한다.
     pipeline_changed: bool = False
+    # 대조한 판본이 원본 문서의 얼마를 담고 있었는가 (D-241). None은 모른다.
+    coverage_ratio: float | None = None
 
 
 @dataclass(frozen=True)
@@ -202,6 +290,12 @@ class VerifyReport:
     # 앵커를 만든 판본과 대조 판본의 추출 파이프라인이 달랐던 앵커의 수
     # (D-235). 이 값이 크면 경보의 원인이 원문 변경이 아닐 수 있다.
     pipeline_changed: int = 0
+    # 대조 판본의 포착 범위가 경보 문턱 아래였던 앵커의 수 (D-241). 그런
+    # 문서에서는 사각지대의 개정이 판정에 나타나지 않으므로, INTACT가
+    # "본 범위 안에서 이상 없음"이라는 뜻으로 좁아진다. `attention`에만
+    # 달면 전부 INTACT인 보고서에서 이 사실이 통째로 사라진다 (D-093과
+    # 같은 판단). **판정은 바꾸지 않는다.**
+    low_coverage: int = 0
 
 
 @dataclass(frozen=True)
@@ -229,6 +323,11 @@ class FetchResult:
     # 신호다 — 추출 사각지대의 저비용 탐지 수단이므로 버리지 않는다.
     # **판정(outcome)은 이 값과 무관하다.**
     raw_changed: bool = False
+    # 저장 본문이 이 문서의 얼마를 담고 있는가 (D-239). 캐시 히트·304에는
+    # 원본 HTML이 없으므로 저장된 값(없으면 unknown)을 그대로 싣는다.
+    coverage: Coverage = field(default_factory=Coverage.unknown)
+    # 포착 범위에 대해 할 말 (D-239·D-242). 판정을 바꾸지 않는 사실 문장이다.
+    notes: tuple[str, ...] = ()
     content: str | None = field(default=None, repr=False)
 
     @property

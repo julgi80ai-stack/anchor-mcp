@@ -509,6 +509,11 @@ def build_server(
             # 원본 바이트는 달라졌는데 추출 본문은 같았다 (D-232). 판정
             # (outcome)은 이 값과 무관하다 — 사실을 하나 더할 뿐이다.
             "raw_changed": result.raw_changed,
+            # 저장 본문이 이 문서의 얼마를 담고 있는가 (D-239). `outcome`은
+            # 이 값과 무관하다 — 판정이 문서의 얼마를 보고 내려진 것인지를
+            # 함께 밝힐 뿐이다. `ratio`가 null이면 재지 못했다는 뜻이다.
+            "coverage": result.coverage.as_payload(),
+            "notes": list(result.notes),
             "network": {
                 "bytes_down": result.network.bytes_down,
                 "elapsed_ms": result.network.elapsed_ms,
@@ -539,7 +544,10 @@ def build_server(
         완결된 문장 하나(32자 이상) 권장.
         """
         result = service.cite(document_id, quote, note=note)
-        return asdict(result)
+        payload = asdict(result)
+        # `ratio`는 파생값이라 asdict에 담기지 않는다 (D-240).
+        payload["coverage"] = result.coverage.as_payload()
+        return payload
 
     @server.tool(name="verify_citations")
     def verify_citations(
@@ -611,6 +619,9 @@ def build_server(
             "pipeline_version": version.pipeline_version,
             "source": version.source,
             "char_count": version.char_count,
+            # 이 본문이 원본 문서의 얼마였는가 (D-239). 원문이 사라진 뒤에
+            # 꺼내 보는 자리이므로 더욱 필요하다.
+            "coverage": version.coverage.as_payload(),
             "content": text,
         }
 

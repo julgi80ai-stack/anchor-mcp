@@ -281,3 +281,51 @@ async def test_mcp_verify_puts_unreachable_in_attention(fixture_server, mcp_serv
         report = await client.call_tool("verify_citations", {})
     assert report.structured_content["summary"]["UNREACHABLE"] == 1
     assert [item["state"] for item in report.structured_content["attention"]] == ["UNREACHABLE"]
+
+
+# -- 8단계-나: 포착 범위가 MCP 응답에도 실린다 (D-239~D-242) ------------------
+
+
+async def test_mcp_responses_carry_the_coverage_facts(fixture_server, mcp_server):
+    """라이브러리·CLI에서 고친 사실이 MCP 응답에서 빠지면, 도구를 쓰는
+    클라이언트(=읽는 AI)만 여전히 자기가 얼마를 보는지 모른다."""
+    from pathlib import Path
+
+    structure = Path(__file__).parent.parent / "fixtures" / "structure"
+    spec_html = (structure / "sidebar-spec.html").read_text("utf-8")
+    quote = "This section introduces message framing and the vocabulary used throughout."
+
+    base_url, state = fixture_server
+    state.html = spec_html
+    async with Client(mcp_server) as client:
+        fetched = await client.call_tool("fetch_document", {"url": f"{base_url}/article"})
+        payload = fetched.structured_content
+        document_id = payload["document_id"]
+        coverage = payload["coverage"]
+        assert coverage["basis"] == "html-prose"
+        assert coverage["ratio"] < 1 / 3
+        assert any(item["structure"] == "aside" for item in coverage["dropped"])
+        assert payload["notes"], "MCP 응답이 포착 범위에 대해 침묵한다"
+
+        cited = await client.call_tool("cite", {"document_id": document_id, "quote": quote})
+        assert cited.structured_content["coverage"]["ratio"] < 1 / 3
+        assert cited.structured_content["warnings"]
+
+        version = await client.call_tool(
+            "get_version", {"document_id": document_id, "ref": "latest"}
+        )
+        assert version.structured_content["coverage"]["basis"] == "html-prose"
+
+        # 판정은 그대로다 — 사각지대의 개정은 여전히 unchanged/INTACT다.
+        state.html = spec_html.replace("MUST NOT", "MAY")
+        state.etag = '"v2"'
+        again = await client.call_tool(
+            "fetch_document", {"url": f"{base_url}/article", "max_age": 0}
+        )
+        assert again.structured_content["outcome"] == "unchanged"
+        assert again.structured_content["raw_changed"] is True
+        assert len(again.structured_content["notes"]) == 2
+
+        report = await client.call_tool("verify_citations", {})
+        assert report.structured_content["summary"]["INTACT"] == 1
+        assert report.structured_content["low_coverage"] == 1

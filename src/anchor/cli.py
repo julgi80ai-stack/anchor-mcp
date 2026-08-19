@@ -13,6 +13,7 @@ import typer
 
 from anchor import __version__
 from anchor.errors import AnchorError
+from anchor.normalize.coverage import COVERAGE_WARN_RATIO, format_ratio
 from anchor.service import Anchor
 
 # 모든 명령이 같은 오류 표면을 진다 (D-138·D-147). 명령마다 다른 예외를 잡으면
@@ -69,6 +70,8 @@ def fetch(
         payload = dataclasses.asdict(result)
         if not show_content:
             payload.pop("content")
+        # `ratio`는 파생값이라 asdict에 담기지 않는다 (D-239).
+        payload["coverage"] = result.coverage.as_payload()
         typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
         return
 
@@ -85,12 +88,40 @@ def fetch(
             " (본문으로 뽑히지 않는 영역의 변경일 수 있습니다)",
             fg=typer.colors.YELLOW,
         )
+    # 우리가 이 문서의 얼마를 보고 위 판정을 했는가 (D-239). 경고가 아니라
+    # 사실이므로 색을 쓰지 않는다 — 사용자가 매번 보아야 할 값이다.
+    _echo_coverage(result.coverage)
+    for note in result.notes:
+        typer.secho(f"  {note}", fg=typer.colors.YELLOW)
     typer.echo(
         f"  네트워크  {result.network.bytes_down:,} bytes down, {result.network.elapsed_ms} ms"
     )
     if show_content and result.content is not None:
         typer.echo("---")
         typer.echo(result.content)
+
+
+def _echo_coverage(coverage) -> None:
+    """포착 범위 한 줄. 재지 못했으면 그렇게 적는다 (D-239·D-243)."""
+    ratio = coverage.ratio
+    if ratio is None:
+        reason = {
+            "no-prose": "셀 만한 산문 단위가 없습니다",
+            "not-measurable": "이 형식은 가시 텍스트를 잴 수단이 없습니다",
+        }.get(coverage.basis, "재지 않았습니다")
+        typer.echo(f"  포착 범위  측정 불가 — {reason}")
+        return
+    if coverage.basis == "whole-document":
+        typer.echo("  포착 범위  문서 전체 (고른 것이 없습니다)")
+        return
+    dropped = " ".join(f"{tag}×{count}" for tag, count in coverage.dropped[:4])
+    line = (
+        f"  포착 범위  산문 {coverage.captured_chars:,}/{coverage.prose_chars:,}자 "
+        f"({format_ratio(ratio)})"
+    )
+    if dropped:
+        line += f"  미포착 {dropped}"
+    typer.echo(line)
 
 
 @app.command()
@@ -118,6 +149,7 @@ def cite(
     # 어느 시점 판본에 닻을 내렸는가 (D-230). cite는 네트워크에 나가지
     # 않으므로, 이 줄이 없으면 사용자는 오래된 스냅샷에 인용을 걸면서 모른다.
     typer.echo(f"  캡처   {result.captured_at}  (원본 대조 {result.last_checked_at})")
+    _echo_coverage(result.coverage)
     if result.source == "archive":
         # `verify`와 같은 대칭이다 — 아카이브 스냅샷에 앵커를 달았다는 사실은
         # `--json`·MCP에만 있으면 안 된다. 사람이 읽는 출력에서만 빠지면
@@ -212,6 +244,14 @@ def verify(
             "아닐 수 있습니다",
             fg=typer.colors.YELLOW,
         )
+    if report.low_coverage:
+        # 포착 범위가 좁은 문서에서 INTACT는 "본 범위 안에서 이상 없음"이라는
+        # 뜻으로 좁아진다 (D-241). 전부 INTACT인 보고서에서도 남아야 한다.
+        typer.secho(
+            f"포착 범위 좁음 {report.low_coverage}건 — 저장 본문이 그 문서 산문의 "
+            "3분의 1 미만입니다. 그 밖에서 일어난 개정은 판정에 나타나지 않습니다",
+            fg=typer.colors.YELLOW,
+        )
     if report.ambiguous:
         # 모호한 채 INTACT가 된 앵커는 attention에 없다 (D-231).
         typer.secho(
@@ -235,6 +275,12 @@ def verify(
         if item.pipeline_changed:
             typer.secho(
                 "  추출 파이프라인이 달라졌습니다 — 원문 변경이 아닐 수 있습니다",
+                fg=typer.colors.YELLOW,
+            )
+        if item.coverage_ratio is not None and item.coverage_ratio < COVERAGE_WARN_RATIO:
+            typer.secho(
+                f"  대조 판본이 그 문서 산문의 {format_ratio(item.coverage_ratio)}만 "
+                "담고 있습니다 — 나머지는 판정에 나타나지 않습니다",
                 fg=typer.colors.YELLOW,
             )
         if item.occurrences is not None and item.occurrences > 1:

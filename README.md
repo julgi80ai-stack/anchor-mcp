@@ -115,7 +115,7 @@ anchor-mcp/
 ├── NOTICE                     저작권 고지 · attribution (distributed)
 ├── THIRD-PARTY.md             제3자 라이선스 대장 · third-party license ledger
 ├── docs/
-│   ├── SPEC.md                기술사양서 v1.12 · technical spec (Korean)
+│   ├── SPEC.md                기술사양서 v1.13 · technical spec (Korean)
 │   ├── MANIFESTO.md           설계 철학 · design philosophy (Korean)
 │   └── decisions/             ADR — 판단 기록 (동결) · frozen decision records
 ├── src/anchor/                구현 · implementation (fetcher / normalize / anchoring / export / store / server / cli)
@@ -140,8 +140,8 @@ The ledger and the decision records serve different purposes: `THIRD-PARTY.md` a
 
 | 항목 · Item | 상태 · State |
 |---|---|
-| 기술사양서 · Spec | v1.12 (2026-08-19, KR/EN) |
-| 구현 · Implementation | **v1.10.0** (2026-08-19) — 정직한 보고와 빠른 실패: 도구가 자신에 대해 말하는 문장을 사실과 맞추고(첫 페치를 "변경"이라 부르지 않기, 죽은 호스트를 소유자 거부라 하지 않기, 인용의 판본 나이·출처·모호성 공시), **실패는 그것을 안 순간 보고한다**(403 7초 → 5ms) · Honest reporting and fast failure: what the tool says about itself now matches the facts (a first fetch is not called "changed", a dead host is not called an owner's refusal, a citation discloses its version age, provenance, and ambiguity), and **a failure is reported the moment it is known** (403: 7 s → 5 ms). 테스트 1043개 · 1043 tests. CI: 3 OS × Python 3.11–3.13, license gate, benchmark gate |
+| 기술사양서 · Spec | v1.13 (2026-08-19, KR/EN) |
+| 구현 · Implementation | **v1.11.0** (2026-08-19) — 우리가 무엇을 모르는지 말한다: **문서의 얼마를 보고 그 말을 하는지 밝힌다**(산문 포착률 — RFC 9110은 1.4%). 판정은 그대로 두고 사실만 더한다 · We say what we do not know: the tool now states **how much of a document it saw before speaking** (prose capture ratio — 1.4% for RFC 9110). Verdicts are untouched; only facts are added. 테스트 1100개 · 1100 tests. CI: 3 OS × Python 3.11–3.13, license gate, benchmark gate |
 | 실사용 관찰 · Field observation | 30일 hit_rate 관찰 창 진행 중 · 30-day hit-rate window in progress (`anchor stats`) |
 | 라이선스 감사 · License audit | 카피레프트 강제 0건 · zero forced copyleft (선택형 `tld`는 MPL-1.1 선택 · disjunctive `tld` elected as MPL-1.1, THIRD-PARTY §4.4) |
 

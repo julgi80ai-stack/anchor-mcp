@@ -154,7 +154,7 @@ def _user_version(path: Path) -> int:
 # -- D-077: 데이터가 든 구 DB의 마이그레이션 -------------------------------
 
 
-@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6])
+@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6, 7])
 def test_migrates_old_db_that_has_rows(tmp_path, source_version):
     path = tmp_path / f"v{source_version}.db"
     build_old_db(path, source_version)
@@ -171,7 +171,7 @@ def test_migrates_old_db_that_has_rows(tmp_path, source_version):
         assert after["verifications"] == before["verifications"] == 1
 
 
-@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6])
+@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6, 7])
 def test_migration_leaves_no_dangling_references(tmp_path, source_version):
     """표를 다시 만드는 v5 이후에도 참조가 살아 있어야 한다."""
     path = tmp_path / f"fk-v{source_version}.db"
@@ -544,7 +544,7 @@ def test_lock_contention_is_still_retried(monkeypatch):
 # -- D-083: 관측 시간축을 뒤늦게 도입할 때 -----------------------------------
 
 
-@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6])
+@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6, 7])
 def test_observation_timeline_is_seeded_for_existing_rows(tmp_path, source_version):
     """v6 이전의 행에도 **관측 순서가 있어야** 한다 (D-083).
 
@@ -644,7 +644,7 @@ def test_migration_puts_the_current_body_newest(tmp_path):
 # -- D-231: v6 → v7, 중복 출현 횟수 ------------------------------------------
 
 
-@pytest.mark.parametrize("source_version", [2, 3, 4, 5, 6])
+@pytest.mark.parametrize("source_version", [2, 3, 4, 5, 6, 7])
 def test_existing_anchors_admit_they_do_not_know_their_occurrence_count(
     tmp_path, source_version
 ):
@@ -685,5 +685,84 @@ def test_new_anchors_carry_their_occurrence_count_after_migration(tmp_path):
         )
         assert created.occurrences == 3
         assert repository.get_anchor(created.id).occurrences == 3
+    finally:
+        repository.close()
+
+
+# -- D-239: v7 → v8, 포착 범위 -----------------------------------------------
+
+
+@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6, 7])
+def test_existing_versions_admit_they_do_not_know_their_coverage(
+    tmp_path, source_version
+):
+    """되짚어 잴 수 없는 값을 1.0으로 채우면 사각지대가 확신으로 둔갑한다.
+
+    저장하는 것은 정규화 본문뿐이고 원본 HTML은 남아 있지 않으므로, v8 이전
+    판본이 문서의 얼마를 담고 있었는지는 **모르는** 것이다.
+    """
+    path = tmp_path / f"cov-v{source_version}.db"
+    build_old_db(path, source_version)
+    repository = Repository(path)
+    try:
+        for version_id in ("ver-1", "ver-2", "ver-3"):
+            version = repository.get_version(version_id)
+            assert version is not None
+            assert version.coverage.basis == "unknown"
+            assert version.coverage.ratio is None
+            assert version.coverage.prose_chars is None
+    finally:
+        repository.close()
+
+
+def test_new_versions_carry_their_coverage_after_migration(tmp_path):
+    """열리는 것으로 끝나지 않는다 — 새 열이 실제로 쓰이는지 확인한다."""
+    from anchor.models import Coverage
+
+    path = tmp_path / "cov-usable.db"
+    build_old_db(path, 7)
+    repository = Repository(path)
+    try:
+        created = repository.insert_version(
+            document_id="doc-1",
+            text_hash="b3:coverage-new",
+            raw_hash="b3:raw-coverage",
+            pipeline_version="test/1",
+            captured_at="2026-08-19T00:00:00Z",
+            byte_size=10,
+            normalized_text="본문",
+            http_status=200,
+            coverage=Coverage(
+                basis="html-prose",
+                prose_chars=3355,
+                captured_chars=526,
+                dropped=(("aside", 13), ("p", 1)),
+            ),
+        )
+        assert created.coverage.prose_chars == 3355
+        reread = repository.get_version(created.id)
+        assert reread.coverage.captured_chars == 526
+        assert reread.coverage.dropped == (("aside", 13), ("p", 1))
+        assert abs(reread.coverage.ratio - 526 / 3355) < 1e-9
+    finally:
+        repository.close()
+
+
+def test_reobservation_fills_in_coverage_for_an_old_version(tmp_path):
+    """v8 이전 판본도 다시 관측되면 그때의 사실을 얻는다 (모름 → 잰 값)."""
+    from anchor.models import Coverage
+
+    path = tmp_path / "cov-fill.db"
+    build_old_db(path, 7)
+    repository = Repository(path)
+    try:
+        assert repository.get_version("ver-1").coverage.basis == "unknown"
+        repository.update_version_coverage(
+            "ver-1", Coverage(basis="html-prose", prose_chars=200, captured_chars=180)
+        )
+        assert repository.get_version("ver-1").coverage.ratio == 0.9
+        # 모르는 것으로 아는 것을 덮지 않는다 (304·캐시 히트 경로).
+        repository.update_version_coverage("ver-1", Coverage.unknown())
+        assert repository.get_version("ver-1").coverage.ratio == 0.9
     finally:
         repository.close()

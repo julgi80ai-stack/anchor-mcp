@@ -39,6 +39,7 @@ from anchor.models import (
     AnchorRecord,
     AttentionItem,
     CiteResult,
+    Coverage,
     Document,
     FetchResult,
     Network,
@@ -52,6 +53,11 @@ from anchor.models import (
 from anchor.export import diff as export_diff
 from anchor.export import robustlinks, timemap
 from anchor.normalize import extract
+from anchor.normalize.coverage import (
+    COVERAGE_WARN_RATIO,
+    coverage_notes,
+    format_ratio,
+)
 from anchor.normalize.hashing import hash_bytes, hash_text
 from anchor.store.repository import Repository
 
@@ -696,6 +702,25 @@ class Anchor:
                 f"나가지 않으므로, 지금 본문이 필요하면 max_age=0으로 다시 "
                 f"fetch 하세요."
             )
+        # 닻을 내리는 판본이 문서의 얼마를 담고 있는가 (D-240). `cite`는 어떤
+        # 경우에도 네트워크에 나가지 않으므로 여기서 다시 잴 수 없다 — 저장된
+        # 값(스키마 v8)을 읽는다. v8 이전에 만들어진 판본은 `unknown`이고,
+        # 그때는 아무 말도 하지 않는다(모르는 것을 경고로 바꾸지 않는다).
+        coverage = latest.coverage
+        ratio = coverage.ratio
+        if ratio is not None and ratio < COVERAGE_WARN_RATIO:
+            dropped = ", ".join(f"{tag}×{count}" for tag, count in coverage.dropped[:4])
+            percent = format_ratio(ratio)
+            warnings_list.append(
+                f"Only {percent} of this page's prose "
+                f"({coverage.captured_chars}/{coverage.prose_chars} chars) is in the body "
+                f"this anchor points into, so a revision outside it will re-verify as "
+                f"INTACT." + (f" Blocks not captured: {dropped}." if dropped else "")
+                + f" — 이 앵커가 가리키는 본문은 페이지 산문의 {percent}"
+                f"({coverage.captured_chars}/{coverage.prose_chars}자)입니다. 그 밖에서 "
+                f"일어난 개정은 재검증에서 INTACT로 나옵니다."
+                + (f" 미포착 블록: {dropped}." if dropped else "")
+            )
         warnings = tuple(warnings_list)
         return CiteResult(
             anchor_id=anchor.id,
@@ -710,6 +735,7 @@ class Anchor:
             # 어느 시점의 본문에 닻을 내렸는가 (D-230).
             captured_at=latest.captured_at,
             last_checked_at=document.last_checked_at,
+            coverage=coverage,
         )
 
     @_foreground
@@ -773,6 +799,10 @@ class Anchor:
         # 앵커에서 사실이 사라진다** — sources(D-093)와 같은 판단이다.
         ambiguous = 0
         pipeline_changed = 0
+        # 대조 판본의 포착 범위가 경보 문턱 아래였던 앵커의 수 (D-241).
+        # 그런 문서에서 INTACT는 "본 범위 안에서 이상 없음"이라는 뜻으로
+        # 좁아진다 — **판정은 그대로 두고** 그 사실만 센다.
+        low_coverage = 0
         # 앵커를 만든 판본의 조회 결과를 배치 안에서 재사용한다 (D-235).
         created_versions: dict[str, Version | None] = {}
 
@@ -903,6 +933,9 @@ class Anchor:
                 )
                 summary[result.state] += 1
                 sources[latest.source] = sources.get(latest.source, 0) + 1
+                checked_ratio = latest.coverage.ratio
+                if checked_ratio is not None and checked_ratio < COVERAGE_WARN_RATIO:
+                    low_coverage += 1
                 if anchor.occurrences is not None and anchor.occurrences > 1:
                     ambiguous += 1
                 # 앵커를 만든 판본과 대조 판본의 추출 파이프라인이 다르면,
@@ -936,6 +969,7 @@ class Anchor:
                             source=latest.source,
                             occurrences=anchor.occurrences,
                             pipeline_changed=pipeline_moved,
+                            coverage_ratio=checked_ratio,
                         )
                     )
             if stopped_early:
@@ -954,6 +988,7 @@ class Anchor:
             bytes_down=bytes_down,
             ambiguous=ambiguous,
             pipeline_changed=pipeline_changed,
+            low_coverage=low_coverage,
         )
 
     @_foreground
@@ -1316,7 +1351,14 @@ class Anchor:
                 # 사용자가 넘긴 URL로도 이 문서를 찾을 수 있어야 한다 (D-007).
                 self._repository.add_alias(norm_url, document.id)
             return self._finish(
-                document, version, "created", 200, bytes_down, started, include_content
+                document,
+                version,
+                "created",
+                200,
+                bytes_down,
+                started,
+                include_content,
+                coverage=normalized.coverage,
             )
 
         # 직전 관측본과 비교한다 — 캡처 시각 최대값이 아니라 "원문이 지금까지
@@ -1377,6 +1419,7 @@ class Anchor:
             started,
             include_content,
             raw_changed=raw_changed,
+            coverage=normalized.coverage,
         )
 
     def _recover_from_archive(
@@ -1456,12 +1499,20 @@ class Anchor:
                 http_status=200,
                 source="archive",
                 source_uri=hit.uri_m,
+                coverage=normalized.coverage,
                 observe=True,
             )
         refreshed = self._repository.get_document(document.id)
         assert refreshed is not None
         return self._finish(
-            refreshed, version, "archive", 200, bytes_down, started, include_content
+            refreshed,
+            version,
+            "archive",
+            200,
+            bytes_down,
+            started,
+            include_content,
+            coverage=normalized.coverage,
         )
 
     def _insert_or_reuse(
@@ -1499,6 +1550,7 @@ class Anchor:
             byte_size=len(response.content),
             normalized_text=normalized.text,
             http_status=response.status,
+            coverage=normalized.coverage,
             observe=True,
         )
 
@@ -1513,6 +1565,7 @@ class Anchor:
         include_content: bool,
         *,
         raw_changed: bool = False,
+        coverage: Coverage | None = None,
     ) -> FetchResult:
         # 원문을 실제로 관측한 결과라면 관측을 남긴다 — 포인터와 관측 시각.
         # cache_hit은 관측이 아니므로 건드리지 않는다 (D-011/D-012/D-024).
@@ -1520,6 +1573,21 @@ class Anchor:
         # "직전에 서빙되던 판본"을 이 시간축으로만 알 수 있다 (D-083).
         if outcome != "cache_hit":
             self._repository.observe_version(document.id, version.id, utcnow_iso())
+        # 이번 관측에서 실제로 잰 값이 있으면 그 판본의 기록을 갱신한다 —
+        # 본문이 같아도(`unchanged`) 원본에 정정 고지가 붙으면 포착률이
+        # 떨어지고, 그것이 지금의 사실이다 (D-239). 재지 못한 경로(캐시
+        # 히트·304)는 저장된 값을 그대로 읽어 싣는다 — 모르는 것으로 아는
+        # 것을 덮지 않는다.
+        if coverage is not None and coverage.basis != "unknown" and outcome != "cache_hit":
+            # 이미 같은 값이면 쓰지 않는다 — 정적 문서를 재확인할 때마다
+            # 같은 행에 같은 값을 다시 쓰는 것은 낭비다.
+            if coverage != version.coverage:
+                self._repository.update_version_coverage(version.id, coverage)
+        else:
+            # 재지 못한 경로(캐시 히트·304)이거나 계측이 실패했다. 그 판본에
+            # 저장된 값이 그 본문에 대해 우리가 아는 전부다 — 모르는 것으로
+            # 아는 것을 덮지 않는다.
+            coverage = version.coverage
         # 본문을 **기록 전에** 꺼낸다. gc가 방금 그 버전을 지우는 창에서
         # 여기가 `DocumentNotFound`를 던지면, 성공 1행을 남긴 채 실패 경로의
         # 회계가 한 행 더 붙는다 — "호출 1회 = 1행"이 깨진다 (D-130·D-133).
@@ -1537,6 +1605,10 @@ class Anchor:
             source=version.source,
             network=Network(bytes_down=bytes_down, elapsed_ms=elapsed_ms),
             raw_changed=raw_changed,
+            coverage=coverage,
+            # 포착 범위에 대해 할 말이 있으면 문장으로 함께 싣는다 (D-239·
+            # D-242). **판정(outcome)은 이 문장들과 무관하다.**
+            notes=coverage_notes(coverage, raw_changed=raw_changed),
             content=content,
         )
 
