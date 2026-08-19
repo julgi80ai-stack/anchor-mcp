@@ -15,7 +15,7 @@ from __future__ import annotations
 import time
 
 from anchor.anchoring import approx, matcher
-from anchor.anchoring.budget import Budget
+from anchor.anchoring.budget import _CREDIT_CAP_FRACTION, Budget
 
 
 def _count_yields(monkeypatch) -> dict:
@@ -115,23 +115,40 @@ def test_no_sleep_when_no_foreground_call_is_active(monkeypatch):
         approx.set_thread_yields(False)
 
 
-def test_budget_credit_is_capped(monkeypatch):
+def test_budget_credit_is_capped():
     """D-203: 크레딧 무상한은 "앵커 하나의 예산"을 탄력적으로 만든다 —
     경합 실측 앵커당 최대 971ms(예산의 4.9배), 서비스 계층 p99 345·478ms로
     §10 "최악 사례 p99 < 250ms" 위반. D-196이 없앤 판정의 경로 의존이
-    시간의 경로 의존으로 옮겨온 것. 크레딧 총량은 예산의 20%로 묶는다 —
+    시간의 경로 의존으로 옮겨온 것. 크레딧 총량은 **예산의 15%**로 묶는다 —
     그 너머의 잠듦은 예산을 먹고, 경계 문서는 UNRESOLVED로 보류된다(실측된
-    경합의 정직한 보고, SPEC §10)."""
-    budget = Budget(100.0)  # 상한 = 20ms
-    r0 = budget.remaining_seconds()
-    budget.credit(0.050)
-    r1 = budget.remaining_seconds()
-    assert 0.010 < (r1 - r0) < 0.030, (
-        f"50ms 크레딧 요청에 상한 20ms만 인정돼야 한다 (실제 연장 {(r1 - r0) * 1000:.1f}ms)"
+    경합의 정직한 보고, SPEC §10).
+
+    D-219: 단언을 상수에서 **유도**한다. 예전의 고정 구간(0.010~0.030)은
+    15%·20%·25%가 모두 통과해 문서화된 상수를 하나도 고정하지 못했다 —
+    상수를 바꿔도 빨개지지 않는 회귀선은 회귀선이 아니다. 그래서 값 자체를
+    먼저 못박고(SPEC §10·D-203이 적은 수치), 행동은 그 값에서 유도한다.
+    """
+    assert _CREDIT_CAP_FRACTION == 0.15, (
+        "SPEC §10과 D-203이 적은 상한은 예산의 15%다 — 상수를 바꾸려면 "
+        "SPEC·주석·이 시험을 함께 고쳐야 한다"
     )
-    budget.credit(0.050)  # 상한 소진 후에는 더 밀리지 않는다
+
+    budget_ms = 100.0
+    cap = budget_ms / 1000.0 * _CREDIT_CAP_FRACTION
+    budget = Budget(budget_ms)
+    r0 = budget.remaining_seconds()
+    budget.credit(cap * 10)  # 상한의 열 배를 요청해도 상한까지만 인정된다
+    r1 = budget.remaining_seconds()
+    granted = r1 - r0
+    # 남은 시간은 벽시계로 재므로 두 측정 사이에 흐른 만큼 줄어든다. 그
+    # 지터(아래 여유)를 빼면 인정량은 정확히 상한이어야 한다.
+    jitter = 0.005
+    assert cap - jitter < granted <= cap, (
+        f"상한 {cap * 1000:.1f}ms만 인정돼야 한다 (실제 연장 {granted * 1000:.1f}ms)"
+    )
+    budget.credit(cap * 10)  # 상한 소진 후에는 더 밀리지 않는다
     r2 = budget.remaining_seconds()
-    assert (r2 - r1) < 0.005, (
+    assert (r2 - r1) <= 0, (
         f"상한 소진 후에도 예산이 밀렸다 (+{(r2 - r1) * 1000:.1f}ms)"
     )
 

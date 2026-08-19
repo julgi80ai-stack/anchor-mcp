@@ -28,6 +28,19 @@ WAYBACK_BASE = "https://web.archive.org"
 
 
 @dataclass(frozen=True)
+class _Received:
+    """받은 만큼의 응답 (D-214).
+
+    전송이 본문 도중에 끊기면 그때까지 도착한 바이트만 담긴다 — 그 바이트도
+    회계에 남아야 하기 때문에 `httpx.Response`를 그대로 돌려주지 않는다.
+    """
+
+    status_code: int
+    content: bytes
+    headers: httpx.Headers
+
+
+@dataclass(frozen=True)
 class ArchiveHit:
     uri_m: str  # Memento URI-M
     memento_datetime: str  # ISO 8601 UTC
@@ -60,18 +73,32 @@ class ArchiveFallback:
         # (SPEC §5.2)가 말뿐이 된다. 우리가 가져오는 것에는 전부 판정을 건다.
         self._robots = robots
 
-    def _get(self, url: str, on_bytes=None, **kwargs) -> httpx.Response:
+    def _get(self, url: str, on_bytes=None, **kwargs) -> _Received:
         if self._ratelimit is not None:
             self._ratelimit.acquire(httpx.URL(url).host or "")
-        response = self._client.get(
-            url, headers=self._headers, timeout=self._timeout, **kwargs
-        )
-        # 조회가 무산돼도 이 바이트는 이미 나갔다 (D-135). 성공 반환 경로의
-        # `ArchiveHit.bytes_down`에만 실으면 "memento 없음"으로 끝난 조회의
-        # 트래픽이 회계 어디에도 남지 않는다.
-        if on_bytes is not None:
-            on_bytes(len(response.content))
-        return response
+        received = 0
+        try:
+            # 통째로 버퍼링하는 `client.get`이 아니라 흘려 받는다. 버퍼링은
+            # 전송이 도중에 끊긴 순간 이미 받은 청크를 예외와 함께 버려,
+            # 계상할 바이트 자체가 남지 않는다 (D-214).
+            with self._client.stream(
+                "GET", url, headers=self._headers, timeout=self._timeout, **kwargs
+            ) as response:
+                chunks: list[bytes] = []
+                for chunk in response.iter_bytes():
+                    received += len(chunk)
+                    chunks.append(chunk)
+                return _Received(
+                    status_code=response.status_code,
+                    content=b"".join(chunks),
+                    headers=response.headers,
+                )
+        finally:
+            # 조회가 무산돼도, 전송이 끊겨도 이 바이트는 이미 나갔다
+            # (D-135·D-214). 성공 반환 경로의 `ArchiveHit.bytes_down`에만
+            # 실으면 무산된 조회의 트래픽이 회계 어디에도 남지 않는다.
+            if on_bytes is not None and received:
+                on_bytes(received)
 
     def lookup(self, url: str, *, on_bytes=None) -> ArchiveHit | None:
         """URI-R로 가장 최근 URI-M을 찾아 본문까지 가져온다. 실패는 None —

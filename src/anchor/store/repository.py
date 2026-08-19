@@ -237,7 +237,13 @@ class Repository:
         # CLI가 아니라 여기서 감싸므로 라이브러리 직접 사용 경로(SPEC §8)도
         # 같은 보장을 받는다. **파일을 고치거나 지우지는 않는다** — 손상된
         # DB를 조용히 새로 만들면 사용자의 인용이 사라진다.
-        if not str(db_path).strip():
+        # `"."`도 빈 경로로 본다 (D-220). typer는 `--db ''`를 `Path('')`로
+        # 넘기고 `str(Path(''))`는 `"."`이므로, 빈 문자열만 막으면 이 가드가
+        # CLI에서 영영 도달하지 않고 원인이 "디렉터리"로 오귀속된다 —
+        # 환경변수가 비어 있는 흔한 호출(`--db "$ANCHOR_DB"`)이 그 모습이다.
+        # `Config._validate`가 이미 `("", ".")`를 같은 칸에 두므로(설정
+        # 파일에서도 `.`는 저장소가 아니다) 두 입구가 같은 규칙으로 답한다.
+        if str(db_path).strip() in ("", "."):
             raise StorageError(
                 "database path must not be empty — DB 경로가 비어 있습니다"
             )
@@ -316,12 +322,18 @@ class Repository:
             connection = sqlite3.connect(
                 self._db_path, timeout=_CHECKPOINT_TIMEOUT_SECONDS, isolation_level=None
             )
-        except sqlite3.OperationalError:
+        except sqlite3.Error:
             return
         try:
             connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        except sqlite3.OperationalError:
-            pass  # 동시 사용 중 — 다음 기회에
+        except sqlite3.Error:
+            # 동시 사용 중이면 `OperationalError`지만, 손상된 WAL 헤더에서는
+            # 상위 클래스 `DatabaseError`가 나온다("file is not a database").
+            # 좁게 잡으면 회계 조회 하나가 생 sqlite3 예외로 죽어 "라이브러리도
+            # `AnchorError` 하나로"(SPEC §8)가 깨진다 — 커넥션을 계속 여는
+            # `anchor serve`가 정확히 이 배치다 (D-215). 걷어내지 못하면
+            # 못한 대로, 그 순간 파일에 있는 것을 사실대로 잰다.
+            pass
         finally:
             connection.close()
 
@@ -919,8 +931,11 @@ class Repository:
             # VACUUM은 DB 전체를 **WAL에** 다시 쓴다. 회수하지 않으면 gc
             # 직후 `disk_bytes`가 오히려 늘어난다 (D-132).
             connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        except sqlite3.OperationalError:
-            pass  # 다른 프로세스가 쓰는 중이면 다음 기회에
+        except sqlite3.Error:
+            # 다른 프로세스가 쓰는 중이면 다음 기회에. 같은 체크포인트가
+            # 여기에도 있으므로 예외의 폭도 같아야 한다 — 좁게 잡으면
+            # `collect_garbage()`가 생 sqlite3 예외로 죽는다 (D-215).
+            pass
         finally:
             connection.close()
 

@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """공개 파사드. 페치 파이프라인(SPEC §5)의 판정 로직이 여기에 있다.
 
-v0.1 완료 기준: 같은 URL 두 번 호출 시 두 번째가 네트워크 0바이트.
+v0.1 완료 기준: 같은 URL 두 번 호출 시 두 번째가 본문 0바이트
+(cache_hit·직접 304 기준 — 리다이렉트 별칭 경유는 3xx 홉의 안내 본문이
+정직하게 계상되므로 0이 아닐 수 있다, SPEC §13·§7.7).
 """
 
 from __future__ import annotations

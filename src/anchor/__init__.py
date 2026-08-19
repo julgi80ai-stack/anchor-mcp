@@ -7,7 +7,11 @@ MCP 서버 + 도구 9종 + Tasks 확장(v0.3), PDF·gc·내보내기 CLI(v0.4), 
 SPEC §13 로드맵 참조.
 """
 
-from anchor.service import Anchor
+# 임포트보다 **먼저** 정의한다. `config`가 기본 User-Agent를 이 값에서
+# 만들기 때문이다(SPEC §5.4 `Anchor/<릴리스 버전>`) — 아래 임포트가
+# service → config를 끌어오므로, 순서를 바꾸면 순환 임포트가 된다 (D-221).
+__version__ = "1.9.0"
 
-__version__ = "1.8.0"
+from anchor.service import Anchor  # noqa: E402
+
 __all__ = ["Anchor", "__version__"]

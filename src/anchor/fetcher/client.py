@@ -219,6 +219,9 @@ class ConditionalFetcher:
         headers: dict[str, str],
         account: Callable[[int], int] | None = None,
     ) -> FetchResponse:
+        # 수신량은 `with` 밖에서 센다. 안에만 두면 전송 중단 예외와 함께
+        # 사라져, 이미 우리 손에 온 바이트가 회계에서 증발한다 (D-212).
+        total = 0
         try:
             with self._client.stream("GET", url, headers=headers) as response:
                 declared = response.headers.get("Content-Length")
@@ -230,7 +233,6 @@ class ConditionalFetcher:
                 # 크기 상한은 실패 응답에도 적용한다. 거대한 오류 페이지나
                 # 차단 인터스티셜을 통째로 버퍼링하지 않는다 (D-002).
                 chunks: list[bytes] = []
-                total = 0
                 for chunk in response.iter_bytes():
                     total += len(chunk)
                     if total > self._max_content_bytes:
@@ -263,6 +265,7 @@ class ConditionalFetcher:
             # **첫 응답을 받는 자리에서** 이 예외가 난다 — 우리 홉 루프의 방어가
             # 닿기 전이다. 여기서 계층 안으로 접지 않으면 문서 하나가 재검증
             # 배치 전체를 죽인다 (D-106).
+            _spill(account, total)
             raise FetchFailed(
                 f"Server sent an unfollowable Location — 따라갈 수 없는 Location: {url}",
                 reason="redirect",
@@ -271,19 +274,34 @@ class ConditionalFetcher:
             # 연결이 아예 성립하지 않는 것은 **호스트 소멸의 흔한 모습**이다
             # (방화벽 DROP·블랙홀 IP·주차된 도메인). 살아 있지만 느린 서버의
             # 읽기 타임아웃과 같은 칸에 넣으면 아카이브 구제가 막힌다 (D-181).
+            _spill(account, total)
             raise FetchFailed(
                 f"Connection timed out — 연결 타임아웃: {url}", reason="network"
             ) from error
         except httpx.TimeoutException as error:
+            _spill(account, total)
             raise FetchFailed(f"Timeout — 타임아웃: {url}", reason="timeout") from error
         except httpx.TooManyRedirects as error:
+            _spill(account, total)
             raise FetchFailed(
                 f"Too many redirects — 리다이렉트 한도 초과: {url}", reason="redirect"
             ) from error
         except httpx.HTTPError as error:
+            _spill(account, total)
             raise FetchFailed(
                 f"Network error — 네트워크 오류: {url} ({error})", reason="network"
             ) from error
+
+
+def _spill(account: Callable[[int], int] | None, total: int) -> None:
+    """전송이 중단돼도 이미 받은 바이트는 받은 것이다 (D-212, SPEC §7.7 불변식 2).
+
+    성공 반환 경로는 호출자가 `response.bytes_down`으로 계상하므로 여기서
+    흘리지 않는다 — 이 함수는 **예외로 나가는 출구에서만** 부른다. 그래서
+    이중 계상이 생기지 않는다.
+    """
+    if account is not None and total:
+        account(total)
 
 
 def _parse_retry_after(raw: str) -> float | None:

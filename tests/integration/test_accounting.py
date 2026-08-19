@@ -68,31 +68,99 @@ def test_hit_rate_is_not_inflated_by_exception_failures(tmp_path, fixture_server
     assert window["hit_rate"] == 0.3125
 
 
+def _robots_bytes(state) -> int:
+    return len(state.robots.encode("utf-8"))
+
+
+# 실패 픽스처의 축은 두 갈래다.
+#   (1) **응답을 끝까지 받은** 실패 — 지연·상태코드·크기 상한·추출 실패.
+#   (2) **이미 받은 뒤 끊긴** 실패 — 연결 절단·읽기 타임아웃.
+# (2)가 없으면 "받은 바이트는 전부 계상한다"(SPEC §7.7 불변식 2)가 어느
+# 계층에서 깨져도 보이지 않는다. 그래서 세 계층(문서 본문·robots.txt·아카이브
+# 조회) 전부에 (2)를 연다 (D-212·D-213·D-214).
+#
+# 각 사례는 **기대 바이트**를 함께 든다. 행 수와 outcome만 재면 회계가
+# 0을 적어도 초록이다 — 실제로 그렇게 세 자리가 살아남았다.
+_BIG_ARTICLE = article_html(nonce="big", extra_sentence=" 덧붙임 문장." * 4000)
+_BIG_ROBOTS = b"# " + b"x" * 60_000 + b"\nUser-agent: *\nAllow: /\n"
+_BIG_PAYLOAD = (
+    '{"original_uri": "x", "mementos": {}, "pad": "' + "x" * 60_000 + '"}'
+)
+
+
+def _prepare_body_cut(state) -> None:
+    state.bodies["/big"] = _BIG_ARTICLE
+    state.cut_after["/big"] = 50_000
+
+
+def _prepare_body_stall(state) -> None:
+    state.bodies["/big"] = _BIG_ARTICLE
+    state.stall_after["/big"] = 40_000
+    state.stall_seconds = 2.0
+
+
+def _prepare_robots_cut(state) -> None:
+    state.robots_body_override = _BIG_ROBOTS
+    state.cut_after["/robots.txt"] = 50_000
+
+
+def _prepare_archive_cut(state) -> None:
+    state.status_override = 404  # 원본 소멸 → 아카이브 조회로 넘어간다
+    state.archive_payload_override = _BIG_PAYLOAD
+    state.cut_after["/api/json/"] = 40_000
+
+
 FAILURE_CASES = [
-    # (이름, 서버 준비, 설정 덮어쓰기, 경로, 미리 등록할지)
-    ("robots_explicit_unregistered", lambda s: None, {}, "/private", False),
+    # (이름, 서버 준비, 설정 덮어쓰기(dict 또는 base→dict), 경로, 미리 등록할지,
+    #  기대 바이트(state→int))
+    (
+        "robots_explicit_unregistered",
+        lambda s: None,
+        {},
+        "/private",
+        False,
+        _robots_bytes,
+    ),
     (
         "robots_unavailable_unregistered",
         lambda s: setattr(s, "robots_status", 503),
         {},
         "/article",
         False,
+        _robots_bytes,
     ),
-    ("timeout", lambda s: setattr(s, "response_delay", 0.4), {"timeout_seconds": 0.05}, "/article", False),
+    (
+        "timeout",
+        lambda s: setattr(s, "response_delay", 0.4),
+        {"timeout_seconds": 0.05},
+        "/article",
+        False,
+        _robots_bytes,
+    ),
     (
         "redirect_limit",
         lambda s: s.redirects.update({"/a": "/b", "/b": "/a"}),
         {"max_redirects": 2},
         "/a",
         False,
+        lambda s: _robots_bytes(s) + 3 * len(s.redirect_body),
     ),
-    ("content_too_large", lambda s: None, {"max_content_bytes": 200}, "/article", False),
+    (
+        "content_too_large",
+        lambda s: None,
+        {"max_content_bytes": 200},
+        "/article",
+        False,
+        # 선언된 Content-Length에서 거절하므로 본문은 한 바이트도 오지 않는다.
+        _robots_bytes,
+    ),
     (
         "extraction_failed",
         lambda s: s.bodies.update({"/empty": "<html><body></body></html>"}),
         {},
         "/empty",
         False,
+        lambda s: _robots_bytes(s) + len(s.bodies["/empty"].encode("utf-8")),
     ),
     (
         "timeout_registered",
@@ -100,21 +168,61 @@ FAILURE_CASES = [
         {"timeout_seconds": 0.05},
         "/article",
         True,
+        # robots는 이미 캐시됐고 본문은 오지 않았다 — 0이 정답이다.
+        lambda s: 0,
+    ),
+    # -- (2) 이미 받은 뒤 끊긴다 -----------------------------------------
+    (
+        "body_cut_mid_transfer",
+        _prepare_body_cut,
+        {},
+        "/big",
+        False,
+        lambda s: _robots_bytes(s) + s.sent_bytes["/big"],
+    ),
+    (
+        "body_stall_mid_transfer",
+        _prepare_body_stall,
+        {"timeout_seconds": 0.5},
+        "/big",
+        False,
+        lambda s: _robots_bytes(s) + s.sent_bytes["/big"],
+    ),
+    (
+        "robots_cut_mid_transfer",
+        _prepare_robots_cut,
+        {},
+        "/article",
+        False,
+        lambda s: s.sent_bytes["/robots.txt"],
+    ),
+    (
+        "archive_lookup_cut_mid_transfer",
+        _prepare_archive_cut,
+        lambda base: {"archive_fallback_enabled": True, "archive_aggregator": base},
+        "/article",
+        False,
+        lambda s: _robots_bytes(s) + s.sent_bytes["/api/json/"],
     ),
 ]
 
 
 @pytest.mark.parametrize(
-    "name,prepare,overrides,path,pre_register",
+    "name,prepare,overrides,path,pre_register,expect",
     FAILURE_CASES,
     ids=[case[0] for case in FAILURE_CASES],
 )
-def test_every_failure_kind_leaves_exactly_one_row(
-    tmp_path, fixture_server, name, prepare, overrides, path, pre_register
+def test_every_failure_kind_leaves_one_row_with_the_bytes_it_downloaded(
+    tmp_path, fixture_server, name, prepare, overrides, path, pre_register, expect
 ):
-    """실패의 종류마다 정확히 한 행 (D-130). 미등록 문서도 예외가 아니다."""
+    """실패의 종류마다 정확히 한 행 (D-130), 그 행의 바이트는 실수령량이다.
+
+    미등록 문서도 예외가 아니고, **본문 도중에 끊긴** 실패도 예외가 아니다
+    (D-212~D-214, SPEC §7.7 불변식 2).
+    """
     base, state = fixture_server
-    with _anchor(tmp_path, **overrides) as anchor:
+    options = overrides(base) if callable(overrides) else overrides
+    with _anchor(tmp_path, **options) as anchor:
         if pre_register:
             anchor.fetch(f"{base}{path}")
         before = len(_log(anchor))
@@ -125,6 +233,9 @@ def test_every_failure_kind_leaves_exactly_one_row(
 
     assert len(rows) == 1, f"{name}: 실패 1회 = 회계 1행 (관측 {len(rows)}행)"
     assert rows[0]["outcome"] == "error"
+    assert rows[0]["bytes_down"] == expect(state), (
+        f"{name}: 실수령 {expect(state)}B 중 {rows[0]['bytes_down']}B만 계상됐다"
+    )
 
 
 # -- D-134: 실패해도 이미 내려받은 바이트는 계상한다 ----------------------
@@ -405,6 +516,51 @@ def test_gc_does_not_inflate_disk_bytes(tmp_path):
     assert wal_after_gc <= 64 * 1024, (
         f"gc가 DB를 통째로 WAL({wal_after_gc:,}B)에 다시 쓰고 회수하지 않았다"
     )
+
+
+def test_a_corrupt_write_ahead_log_does_not_leak_a_raw_sqlite_error(tmp_path):
+    """WAL이 깨져도 공개 API는 `AnchorError` 하나로만 말한다 (D-215, SPEC §8).
+
+    `PRAGMA wal_checkpoint(TRUNCATE)`가 던지는 것은 `OperationalError`만이
+    아니다 — 복구가 필요한 크기의 WAL에서 헤더가 깨져 있으면 상위 클래스
+    `DatabaseError`("file is not a database")가 나온다. 좁게 잡으면
+    `cache_stats()`가 생 sqlite3 예외로 죽어 CLI 오류 표면 계약이 깨진다.
+    커넥션을 계속 여는 `anchor serve`가 정확히 이 배치다. 걷어내지 못하면
+    걷어내지 못한 대로, 그 순간 파일 크기를 사실대로 보고한다.
+    """
+    import sqlite3
+
+    db = tmp_path / "store.db"
+    with _anchor(tmp_path) as anchor:
+        # 자동 체크포인트 문턱(기본 1000쪽 ≈ 4MB)을 넘겨야 새 커넥션이
+        # WAL 복구를 시도하고, 그때 비로소 헤더를 읽는다. 작은 WAL로는
+        # 손상이 조용히 무시돼 이 시험이 헛돈다.
+        _grow(anchor, 120)
+        wal = Path(str(db) + "-wal")
+        (page_size,) = anchor._repository._connection.execute(
+            "PRAGMA page_size"
+        ).fetchone()
+        assert wal.stat().st_size > 1000 * page_size, (
+            f"픽스처가 복구를 요구할 만큼 WAL을 키우지 못했다 ({wal.stat().st_size:,}B)"
+        )
+        with open(wal, "r+b") as handle:
+            handle.write(b"\x00" * 64)  # 헤더 파괴 — 잘라내기와는 다른 손상이다
+
+        # 픽스처가 실제로 결함 조건을 만들었는지 먼저 확인한다. 여기서
+        # `OperationalError`가 나오면 이 시험은 판별력이 없다.
+        probe = sqlite3.connect(db, timeout=1.0, isolation_level=None)
+        try:
+            with pytest.raises(sqlite3.DatabaseError) as caught:
+                probe.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            probe.close()
+        assert not isinstance(caught.value, sqlite3.OperationalError), (
+            f"픽스처가 만든 것은 좁은 예외였다: {caught.value!r}"
+        )
+
+        stats = anchor.cache_stats()
+
+    assert stats["disk_bytes"] > 0
 
 
 def test_a_failure_after_the_body_lookup_does_not_add_a_second_row(

@@ -46,6 +46,52 @@ def test_cli_full_workflow(fixture_server, tmp_path):
     assert "삭제 0개 버전" in gc.output
 
 
+def test_cli_cite_says_when_the_anchor_landed_on_an_archive_snapshot(
+    fixture_server, tmp_path
+):
+    """`cite`의 사람이 읽는 출력도 출처를 말한다 (D-218, SPEC §5.2·§7.2).
+
+    `verify`는 아카이브 대조를 노란 줄로 알리고 `fetch`는 출처를 한 줄로
+    적는데, `cite`만 `--json`·MCP에만 담고 사람에게는 말하지 않았다. 원본이
+    죽어 아카이브 스냅샷에 앵커를 달아도 CLI 사용자는 그 사실을 알 수 없다 —
+    D-093이 세운 "**항상** 알 수 있다"가 여기서만 비대칭이었다.
+    """
+    from anchor.config import Config
+    from anchor.service import Anchor
+
+    from .conftest import article_html
+
+    base_url, state = fixture_server
+    db = tmp_path / "cli_archive.db"
+    state.status_override = 404  # 원본 소멸
+    state.archive_html = article_html(nonce="arch")
+    config = Config(
+        db_path=db,
+        rate_limit_rps=1000.0,
+        archive_fallback_enabled=True,
+        archive_aggregator=base_url,
+    )
+    with Anchor(db_path=db, config=config) as anchor:
+        assert anchor.fetch(f"{base_url}/article").source == "archive"
+
+    cited = runner.invoke(app, ["cite", f"{base_url}/article", QUOTE, "--db", str(db)])
+    assert cited.exit_code == 0, cited.output
+    assert "archive" in cited.output, cited.output
+
+
+def test_cli_cite_stays_quiet_when_the_anchor_is_on_the_original(
+    fixture_server, tmp_path
+):
+    """원본에 단 앵커에는 그 줄이 없다 — `verify`와 같은 대칭이다 (D-218)."""
+    base_url, _state = fixture_server
+    db = str(tmp_path / "cli_live.db")
+    url = f"{base_url}/article"
+    assert runner.invoke(app, ["fetch", url, "--db", db]).exit_code == 0
+    cited = runner.invoke(app, ["cite", url, QUOTE, "--db", db])
+    assert cited.exit_code == 0, cited.output
+    assert "archive" not in cited.output, cited.output
+
+
 def test_cli_export_requires_format_flag(tmp_path):
     result = runner.invoke(app, ["export", "--db", str(tmp_path / "empty.db")])
     assert result.exit_code == 1

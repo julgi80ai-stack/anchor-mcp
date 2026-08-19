@@ -20,6 +20,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from anchor import __version__
 from anchor.errors import ConfigError
 
 DEFAULT_CONFIG_PATH = Path("~/.anchor/config.toml")
@@ -47,6 +48,12 @@ _MIN_DOCUMENT_BYTES = 1024
 # 허용하고 선두·말미 공백과 제어문자를 막는다 (D-139·D-145).
 _FIELD_VALUE_RE = re.compile(r"^[\x21-\x7e](?:[\x20-\x7e\t]*[\x21-\x7e])?$")
 
+# 기본 UA는 **릴리스 버전을 따라간다** (SPEC §5.4: `Anchor/<릴리스 버전>`).
+# 손으로 적어 두면 버전을 올릴 때마다 어긋나고, 사양이 약속한 것과 우리가
+# 실제로 밝히는 신원이 달라진다 — 정직한 클라이언트의 첫 조건은 자기를
+# 사실대로 말하는 것이다 (D-221).
+_DEFAULT_USER_AGENT = f"Anchor/{__version__} (+https://github.com/julgi80ai-stack/anchor-mcp)"
+
 _COMPRESSION_CODEC = "zstd"
 _ZSTD_MIN_LEVEL, _ZSTD_MAX_LEVEL = 1, 22
 
@@ -58,7 +65,7 @@ class Config:
     # 본문 압축 코덱과 레벨. zstd 프레임은 자기서술적이라 레벨을 바꿔도 이미
     # 저장된 버전은 그대로 읽힌다 — 마이그레이션이 필요 없다 (D-137).
     compression: str = "zstd:6"
-    user_agent: str = "Anchor/1.1 (+https://github.com/julgi80ai-stack/anchor-mcp)"
+    user_agent: str = _DEFAULT_USER_AGENT
     respect_robots: bool = True
     timeout_seconds: float = 30.0
     max_redirects: int = 5

@@ -96,6 +96,29 @@ def test_repository_wraps_storage_failures_for_library_callers(broken_db):
     assert isinstance(caught.value, AnchorError)
 
 
+def test_an_empty_db_path_is_reported_as_empty_not_as_a_directory():
+    """빈 `--db`는 "빈 경로"로 보고된다 (D-220).
+
+    "실패"만 재는 시험은 원인이 서로 뒤바뀌어도 초록이다. typer는 `--db ''`를
+    `Path('')`로 넘기고 `str(Path(''))`는 `"."`가 되므로, 저장소의 빈 경로
+    가드가 CLI에서는 영영 도달하지 않고 원인이 "디렉터리"로 오귀속됐다 —
+    환경변수가 비어 있는 흔한 호출(`--db "$ANCHOR_DB"`)이 정확히 이 모습이다.
+    """
+    result = runner.invoke(app, ["stats", "--db", ""])
+    assert result.exit_code == 1, result.output
+    assert "비어 있습니다" in result.output, result.output
+    assert "디렉터리" not in result.output, result.output
+
+
+def test_a_real_directory_is_still_reported_as_a_directory(tmp_path):
+    """판별력: 원인 구분이 살아 있어야 한다 — 둘 다 같은 문장이면 고친 게 아니다."""
+    directory = tmp_path / "a-directory"
+    directory.mkdir()
+    result = runner.invoke(app, ["stats", "--db", str(directory)])
+    assert result.exit_code == 1, result.output
+    assert "디렉터리" in result.output, result.output
+
+
 def test_healthy_db_path_still_opens(tmp_path):
     """판별력: 정상 경로는 그대로 열려야 한다."""
     repository = Repository(tmp_path / "nested" / "store.db")

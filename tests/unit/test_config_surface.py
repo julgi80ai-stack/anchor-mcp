@@ -23,6 +23,10 @@ import pytest
 from anchor.config import Config, load_config
 from anchor.errors import ConfigError
 
+# 기본 UA는 릴리스 버전을 따라가므로(D-221) 손으로 적지 않는다 — 적으면
+# 버전을 올릴 때마다 이 테스트가 거짓이 된다.
+DEFAULT_UA = Config().user_agent
+
 # 필드 → (TOML 경로, 환경변수 이름). SPEC §9가 문서화한 키 전부.
 # 세 경로를 같은 표로 돌리기 위한 유일한 사전이다 — 여기 없는 필드는
 # "설정할 수 없는 필드"라는 뜻이고, D-137이 바로 그 목록이었다.
@@ -215,7 +219,7 @@ def test_user_agent_is_rejected_at_load_time(path_kind, value, tmp_path, monkeyp
 @pytest.mark.parametrize(
     "value",
     [
-        "Anchor/1.1 (+https://github.com/julgi80ai-stack/anchor-mcp)",
+        DEFAULT_UA,
         "A",
         "Mozilla/5.0 (compatible; Bot/1.0; +http://e.invalid/bot)",
     ],
@@ -228,7 +232,7 @@ def test_accepted_user_agent_survives_httpx_header_encoding(tmp_path):
     """검증을 통과한 UA는 실제로 헤더가 되어야 한다 — 검증의 목적이 그것이다."""
     import httpx
 
-    config = load_config(write_toml(tmp_path, {"fetch.user_agent": "Anchor/1.1 (+https://x.invalid)"}))
+    config = load_config(write_toml(tmp_path, {"fetch.user_agent": DEFAULT_UA}))
     request = httpx.Client().build_request(
         "GET", "http://example.invalid/", headers={"User-Agent": config.user_agent}
     )
@@ -542,3 +546,17 @@ def test_edit_budget_never_exceeds_the_quote_length():
     assert result.found_text is None, result
     # 판별력: 편집거리가 인용문 길이에 도달하면 그것은 "닮음"이 아니다.
     assert result.edit_distance is None or result.edit_distance < len(selector.exact)
+
+
+def test_default_user_agent_carries_the_release_version():
+    """기본 UA는 릴리스 버전을 따라간다 (D-221, SPEC §5.4 `Anchor/<릴리스 버전>`).
+
+    손으로 적어 두면 버전을 올릴 때마다 어긋난다 — 실제로 패키지가 1.9.0일 때
+    UA는 `Anchor/1.1`이었다. 정직한 클라이언트의 첫 조건은 자기를 사실대로
+    말하는 것이고, 사양이 약속한 신원과 우리가 밝히는 신원이 달라선 안 된다.
+    """
+    from anchor import __version__
+
+    assert Config().user_agent == (
+        f"Anchor/{__version__} (+https://github.com/julgi80ai-stack/anchor-mcp)"
+    )

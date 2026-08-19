@@ -108,6 +108,14 @@ def cite(
     typer.secho("앵커 생성", fg=typer.colors.GREEN, bold=True, nl=False)
     typer.echo(f"  {result.anchor_id}")
     typer.echo(f"  버전   {result.version_id}  오프셋 {result.offset}  품질 {result.quality}")
+    if result.source == "archive":
+        # `verify`와 같은 대칭이다 — 아카이브 스냅샷에 앵커를 달았다는 사실은
+        # `--json`·MCP에만 있으면 안 된다. 사람이 읽는 출력에서만 빠지면
+        # "**항상** 알 수 있다"(D-093, SPEC §5.2)가 CLI에서 깨진다 (D-218).
+        typer.secho(
+            "  출처: archive — 원본이 아니라 아카이브 스냅샷에 앵커를 달았습니다",
+            fg=typer.colors.YELLOW,
+        )
     for warning in result.warnings:
         typer.secho(f"  경고: {warning}", fg=typer.colors.YELLOW)
 

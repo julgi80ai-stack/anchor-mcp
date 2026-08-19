@@ -96,6 +96,18 @@ class FixtureState:
         self.inflight: int = 0                  # 지금 응답 중인 문서 요청 수
         self.max_inflight: int = 0              # 그 최대치 — 겹침의 관측값
         self.inflight_lock = threading.Lock()
+        # -- "이미 받은 뒤 끊긴다" 축 (D-212~D-214) ---------------------------
+        # 기존 실패 픽스처는 전부 **응답을 끝까지 받은** 실패다(지연·상태코드·
+        # 크기 상한). 실제 웹에서 흔한 것은 그 반대다 — 헤더와 본문 일부가
+        # 이미 도착한 뒤에 연결이 끊기거나 멈춘다. 그 축이 없으면 "받은
+        # 바이트를 계상한다"는 회계 불변식이 어느 계층에서 깨져도 보이지
+        # 않는다. 경로 **접두사** → 실제로 흘려보낼 바이트 수.
+        self.cut_after: dict[str, int] = {}    # 그만큼 보낸 뒤 연결을 끊는다
+        self.stall_after: dict[str, int] = {}  # 그만큼 보낸 뒤 멈춘다(읽기 타임아웃)
+        self.stall_seconds: float = 3.0
+        # 접두사별 실제 송신량 — 축의 관측값이다. 기대치를 하드코딩하지 않고
+        # 여기서 읽어야 픽스처가 스스로 사실을 말한다.
+        self.sent_bytes: dict[str, int] = {}
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -119,6 +131,8 @@ class _Handler(BaseHTTPRequestHandler):
                 if state.robots_body_override is not None
                 else state.robots.encode("utf-8")
             )
+            if self._serve_partial(state, body, state.robots_content_type):
+                return
             self.send_response(200 if self.path != "/robots.txt" else state.robots_status)
             self.send_header("Content-Type", state.robots_content_type)
             self.send_header("Content-Length", str(len(body)))
@@ -153,6 +167,47 @@ class _Handler(BaseHTTPRequestHandler):
         finally:
             with state.inflight_lock:
                 state.inflight -= 1
+
+    def _serve_partial(self, state: FixtureState, body: bytes, content_type: str) -> bool:
+        """이 경로가 "보내다 끊긴다"로 설정돼 있으면 그렇게 응답하고 True.
+
+        선언한 Content-Length보다 **적게** 준 뒤 끊거나(연결 절단) 멈춘다
+        (읽기 타임아웃). 받는 쪽에서는 본문 도중에 실패한 것이고, 그때까지
+        도착한 바이트는 이미 우리 손에 있다 — 그 바이트가 회계에 남는가가
+        여기서 열리는 축이다 (D-212~D-214).
+        """
+        import time as _time
+
+        for prefix, count in state.cut_after.items():
+            if self.path.startswith(prefix):
+                mode, limit, key = "cut", count, prefix
+                break
+        else:
+            for prefix, count in state.stall_after.items():
+                if self.path.startswith(prefix):
+                    mode, limit, key = "stall", count, prefix
+                    break
+            else:
+                return False
+
+        sent = min(limit, len(body))
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        # 실제로 줄 것보다 크게 선언한다 — 그래야 클라이언트가 "본문 도중에
+        # 끝났다"로 읽는다. 0바이트로 끝나면 그냥 짧은 응답일 뿐이다.
+        self.send_header("Content-Length", str(len(body) + 1_000_000))
+        self.end_headers()
+        self.wfile.write(body[:sent])
+        self.wfile.flush()
+        state.sent_bytes[key] = state.sent_bytes.get(key, 0) + sent
+        if mode == "stall":
+            _time.sleep(state.stall_seconds)
+        self.close_connection = True
+        try:
+            self.connection.close()
+        except OSError:
+            pass
+        return True
 
     def _rendezvous(self, state: FixtureState) -> None:
         """요청들이 핸들러 안에서 만나는 지점 (D-128).
@@ -201,6 +256,8 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         body = state.bodies.get(self.path, state.html).encode("utf-8")
+        if self._serve_partial(state, body, "text/html; charset=utf-8"):
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -220,6 +277,8 @@ class _Handler(BaseHTTPRequestHandler):
             stamp = self.path[len("/web/"):].split("id_/", 1)[0]
             if stamp in state.archive_html_by_timestamp:
                 body = state.archive_html_by_timestamp[stamp].encode("utf-8")
+                if self._serve_partial(state, body, "text/html; charset=utf-8"):
+                    return
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -232,6 +291,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             body = state.archive_html.encode("utf-8")
+            if self._serve_partial(state, body, "text/html; charset=utf-8"):
+                return
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -263,6 +324,8 @@ class _Handler(BaseHTTPRequestHandler):
                         ["key", state.archive_timestamp, original, "text/html", "200", "D", "1"],
                     ]
                 ).encode("utf-8")
+            if self._serve_partial(state, payload, "application/json"):
+                return
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
@@ -273,6 +336,8 @@ class _Handler(BaseHTTPRequestHandler):
         # MemGator Time Travel 호환 API
         if state.archive_payload_override is not None:
             payload = state.archive_payload_override.encode("utf-8")
+            if self._serve_partial(state, payload, "application/json"):
+                return
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
@@ -293,6 +358,8 @@ class _Handler(BaseHTTPRequestHandler):
                 },
             }
         ).encode("utf-8")
+        if self._serve_partial(state, payload, "application/json"):
+            return
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
