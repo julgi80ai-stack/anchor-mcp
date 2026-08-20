@@ -80,6 +80,41 @@ def dump_public_api() -> None:
                 _emit(_stable(f"const {mod_name}.{attr} = {obj!r}"))
 
 
+def dump_namespaces() -> None:
+    """모듈마다 **살고 있는 이름 전부** — 사적 이름과 재수출까지.
+
+    `dump_public_api()`는 이것을 구조적으로 못 본다: `_`로 시작하는 속성을
+    건너뛰고, `__module__`이 다른 재수출도 건너뛴다. 그래서 9-가(호출 기제
+    분리)가 `anchor.service`에서 이름 8개를 없앴는데 지문은 **"삭제 0"을
+    찍었다** — 안 봐서 0이었다:
+
+        functools · sys · threading · Iterator · contextmanager
+        StorageError · approx · _UrlLockEntry
+
+    그때는 감사자가 손으로 `vars()`를 떠서 메웠고 전수 grep으로 아무도 그
+    이름들을 참조하지 않음을 확인해 무해로 끝났다. 그러나 **다음 정리가
+    사적 이름을 옮길 때 이 도구는 또 침묵한다.** 증명 도구가 못 보는 축이
+    있다는 것을 알고도 두면, 그 축에서 벌어지는 일은 영영 증거가 없다.
+
+    이름 목록만 찍는다(시그니처는 위에서 이미 본다). 임포트 한 줄만 옮겨도
+    diff가 뜨는데, 그것이 정확히 이 단계에서 원하는 것이다 — "아무것도 안
+    바뀌어야 한다"가 계약이므로 여기서는 **잡음이 곧 신호다**.
+    """
+    import anchor
+
+    targets = sorted(
+        {m.name for m in pkgutil.walk_packages(anchor.__path__, "anchor.")} | {"anchor"}
+    )
+    for mod_name in targets:
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception as error:
+            _emit(f"NAMESPACE-IMPORT-FAILED {mod_name}: {type(error).__name__}")
+            continue
+        names = sorted(n for n in vars(mod) if not n.startswith("__"))
+        _emit(f"namespace {mod_name} = {', '.join(names)}")
+
+
 def _type_name(t: object) -> str:
     return getattr(t, "__name__", str(t))
 
@@ -152,6 +187,8 @@ def main() -> int:
     dump_modules()
     _emit("### public api")
     dump_public_api()
+    _emit("### namespaces")
+    dump_namespaces()
     _emit("### mcp")
     dump_mcp_surface()
     _emit("### schema")
