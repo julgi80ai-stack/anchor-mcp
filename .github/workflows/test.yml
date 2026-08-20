@@ -1,7 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 # CI 매트릭스 (SPEC §10 이식성: Linux / macOS / Windows, Python 3.11+)
+#
+# 이 파일이 §10 "이식성"의 **측정 수단**이다 — 3개 OS에서 돈다는 주장의 근거가
+# 여기 있고, 7단계(D-222~226)가 Windows 결함 46건을 이것으로 잡았다.
+#
+# 다만 **코드가 바뀌지 않았으면 돌리지 않는다** (2026-08-20). 비공개 저장소의
+# Actions는 분으로 과금되고 배수가 붙는다(Linux ×1 · Windows ×2 · macOS ×10).
+# 실측: 이 매트릭스 1회 = 약 154 과금 분(그중 macOS가 72%). 문서만 고친 푸시가
+# 컴퓨터 9대를 켜는 것은 순수한 낭비다 — 검사할 코드가 한 줄도 안 바뀌었다.
+#
+# `paths-ignore`는 **바뀐 파일이 전부** 목록에 들면 건너뛴다. 문서와 코드가
+# 같이 바뀐 커밋은 정상적으로 돈다.
 name: test
-on: [push, pull_request]
+on:
+  push:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "LICENSE"
+      - "NOTICE"
+      - "CITATION.cff"
+      - ".gitignore"
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "LICENSE"
+      - "NOTICE"
+      - "CITATION.cff"
+      - ".gitignore"
 
 jobs:
   test:

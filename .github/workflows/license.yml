@@ -2,7 +2,25 @@
 # 라이선스 게이트 (SPEC §12.2, THIRD-PARTY.md §5). 사람의 기억으로 막을 수
 # 없는 것을 CI가 막는다 — 카피레프트 유입, trafilatura 하한.
 name: license-audit
-on: [push, pull_request]
+# 의존성이 바뀌지 않았으면 돌 이유가 없다 (2026-08-20). 리눅스 1대·25초라
+# 비용은 작지만, 문서 커밋에 라이선스를 다시 감사할 까닭은 없다.
+on:
+  push:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "LICENSE"
+      - "NOTICE"
+      - "CITATION.cff"
+      - ".gitignore"
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "LICENSE"
+      - "NOTICE"
+      - "CITATION.cff"
+      - ".gitignore"
 
 jobs:
   audit:
