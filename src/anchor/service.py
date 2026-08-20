@@ -8,6 +8,7 @@ v0.1 완료 기준: 같은 URL 두 번 호출 시 두 번째가 본문 0바이�
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import time
 from collections.abc import Callable
@@ -216,6 +217,43 @@ def _verify_cutoff(
             f"older_than은 유한한 0 이상의 초여야 합니다: {older_than!r}"
         )
     return iso_ago(older_than) if older_than is not None else None
+
+
+@dataclasses.dataclass
+class _VerifyTally:
+    """`verify` 한 번의 누산기.
+
+    아홉 개의 지역 변수가 하나의 이름을 갖는다. 묶은 이유는 미학이 아니라
+    **분할 가능성**이다 — `ambiguous`·`pipeline_changed`·`low_coverage`는
+    정수라 인자로 넘겨서는 증가시킬 수 없다. 이 셋이 지역 변수로 있는 한
+    실패 경로와 앵커 루프를 함수로 뗄 방법이 없었다 (2026-08-20).
+
+    필드마다의 근거는 `verify` 본문에 있던 주석을 그대로 옮겨 왔다.
+    """
+
+    summary: dict[str, int] = dataclasses.field(
+        default_factory=lambda: {state: 0 for state in matcher.ALL_STATES}
+    )
+    # 무엇과 대조했는가의 집계. attention에만 출처를 달면 전부 INTACT인
+    # 보고서에서 "원본은 404였고 아카이브만 봤다"가 사라진다 (D-093).
+    sources: dict[str, int] = dataclasses.field(
+        default_factory=lambda: {"live": 0, "archive": 0, "none": 0}
+    )
+    attention: list[AttentionItem] = dataclasses.field(default_factory=list)
+    # 앵커를 만든 판본의 조회 결과를 배치 안에서 재사용한다 (D-235).
+    created_versions: dict[str, Version | None] = dataclasses.field(default_factory=dict)
+    requests: int = 0
+    not_modified: int = 0
+    bytes_down: int = 0
+    # 모호한 앵커(인용문이 원문에 여러 번)와 파이프라인이 달라진 앵커의
+    # 수 (D-231·D-235). 둘 다 `attention`에만 달면 **INTACT로 끝난
+    # 앵커에서 사실이 사라진다** — sources(D-093)와 같은 판단이다.
+    ambiguous: int = 0
+    pipeline_changed: int = 0
+    # 대조 판본의 포착 범위가 경보 문턱 아래였던 앵커의 수 (D-241).
+    # 그런 문서에서 INTACT는 "본 범위 안에서 이상 없음"이라는 뜻으로
+    # 좁아진다 — **판정은 그대로 두고** 그 사실만 센다.
+    low_coverage: int = 0
 
 
 class Anchor:
@@ -659,25 +697,7 @@ class Anchor:
             anchor_ids=anchor_ids, document_ids=document_ids, not_verified_since=cutoff
         )
 
-        summary = {state: 0 for state in matcher.ALL_STATES}
-        # 무엇과 대조했는가의 집계. attention에만 출처를 달면 전부 INTACT인
-        # 보고서에서 "원본은 404였고 아카이브만 봤다"가 사라진다 (D-093).
-        sources = {"live": 0, "archive": 0, "none": 0}
-        attention: list[AttentionItem] = []
-        requests = 0
-        not_modified = 0
-        bytes_down = 0
-        # 모호한 앵커(인용문이 원문에 여러 번)와 파이프라인이 달라진 앵커의
-        # 수 (D-231·D-235). 둘 다 `attention`에만 달면 **INTACT로 끝난
-        # 앵커에서 사실이 사라진다** — sources(D-093)와 같은 판단이다.
-        ambiguous = 0
-        pipeline_changed = 0
-        # 대조 판본의 포착 범위가 경보 문턱 아래였던 앵커의 수 (D-241).
-        # 그런 문서에서 INTACT는 "본 범위 안에서 이상 없음"이라는 뜻으로
-        # 좁아진다 — **판정은 그대로 두고** 그 사실만 센다.
-        low_coverage = 0
-        # 앵커를 만든 판본의 조회 결과를 배치 안에서 재사용한다 (D-235).
-        created_versions: dict[str, Version | None] = {}
+        tally = _VerifyTally()
 
         by_document: dict[str, list[AnchorRecord]] = {}
         for anchor in anchors:
@@ -703,25 +723,25 @@ class Anchor:
             if document is None:
                 # 그래도 못 찾으면 이 묶음만 보류하고 배치는 계속 간다.
                 for record in document_anchors:
-                    summary[matcher.UNRESOLVED] += 1
-                    sources["none"] += 1
+                    tally.summary[matcher.UNRESOLVED] += 1
+                    tally.sources["none"] += 1
                 continue
 
             failure_state: str | None = None
             try:
                 fetch_result = self.fetch(document.url, max_age=0, include_content=False)
-                requests += 1
-                bytes_down += fetch_result.network.bytes_down
+                tally.requests += 1
+                tally.bytes_down += fetch_result.network.bytes_down
                 if fetch_result.outcome == "not_modified":
-                    not_modified += 1
+                    tally.not_modified += 1
             except FetchFailed as error:
-                requests += 1
+                tally.requests += 1
                 failure_state = (
                     matcher.GONE if error.http_status in (404, 410) else matcher.UNREACHABLE
                 )
             except AnchorError:
                 # robots 거부, 추출 실패 등 — 확인 불가이지 인용 무효가 아니다.
-                requests += 1
+                tally.requests += 1
                 failure_state = matcher.UNREACHABLE
 
             if failure_state is None:
@@ -748,40 +768,12 @@ class Anchor:
                     failure_state = matcher.UNRESOLVED
 
             if failure_state is not None:
-                for anchor in document_anchors:
-                    self._repository.insert_verification(
-                        anchor_id=anchor.id,
-                        checked_version=None,
-                        checked_at=utcnow_iso(),
-                        state=failure_state,
-                        match_score=None,
-                        edit_distance=None,
-                        found_offset=None,
-                        found_text=None,
-                        elapsed_ms=0,
-                    )
-                    summary[failure_state] += 1
-                    sources["none"] += 1  # 대조가 없었다 — 출처를 지어내지 않는다
-                    if anchor.occurrences is not None and anchor.occurrences > 1:
-                        ambiguous += 1
-                    # GONE만 담으면 **아무것도 검증하지 못한 배치가 빈
-                    # attention으로 보인다** — 도구 설명이 "attention에는
-                    # 조치가 필요한 항목만"이라고 안내하므로 사용자는 그것을
-                    # "이상 없음"으로 읽는다 (D-229). UNREACHABLE의 조치는
-                    # "재시도 예약"이고(SPEC §6.3), 조치가 있으면 목록에 있다.
-                    attention.append(
-                        AttentionItem(
-                            anchor_id=anchor.id,
-                            url=document.url,
-                            state=failure_state,
-                            before=anchor.exact,
-                            after=None,
-                            match_score=None,
-                            edit_distance=None,
-                            occurrences=anchor.occurrences,
-                            occurrences_capped=_occurrences_capped(anchor.occurrences),
-                        )
-                    )
+                self._record_unverifiable(
+                    document=document,
+                    document_anchors=document_anchors,
+                    failure_state=failure_state,
+                    tally=tally,
+                )
                 continue
 
             for anchor in document_anchors:
@@ -791,96 +783,167 @@ class Anchor:
                     # 13.8초) — 앵커 사이에서도 확인한다.
                     stopped_early = True
                     break
-                budget_ms = (
-                    time_budget_ms if time_budget_ms is not None else self._config.time_budget_ms
+                self._verify_anchor(
+                    anchor=anchor,
+                    document=document,
+                    text=text,
+                    latest=latest,
+                    time_budget_ms=time_budget_ms,
+                    tally=tally,
                 )
-                if anchor.quality == QUALITY_SHORT:
-                    budget_ms = budget_ms / 2
-                match_started = time.monotonic()
-                result = matcher.match_anchor(
-                    text,
-                    exact=anchor.exact,
-                    prefix=anchor.prefix,
-                    suffix=anchor.suffix,
-                    position_hint=anchor.position_hint,
-                    budget_ms=budget_ms,
-                    max_edit_ratio=self._config.max_edit_ratio,
-                    max_edit_distance=self._config.max_edit_distance,
-                    hint_radius=self._config.hint_radius,
-                    max_bytes=self._config.max_document_bytes,
-                )
-                elapsed_ms = int((time.monotonic() - match_started) * 1000)
-                self._repository.insert_verification(
-                    anchor_id=anchor.id,
-                    checked_version=latest.id,
-                    checked_at=utcnow_iso(),
-                    state=result.state,
-                    match_score=result.score,
-                    edit_distance=result.edit_distance,
-                    found_offset=result.found_offset,
-                    found_text=result.found_text,
-                    elapsed_ms=elapsed_ms,
-                )
-                summary[result.state] += 1
-                sources[latest.source] = sources.get(latest.source, 0) + 1
-                checked_ratio = latest.coverage.ratio
-                if checked_ratio is not None and checked_ratio < COVERAGE_WARN_RATIO:
-                    low_coverage += 1
-                if anchor.occurrences is not None and anchor.occurrences > 1:
-                    ambiguous += 1
-                # 앵커를 만든 판본과 대조 판본의 추출 파이프라인이 다르면,
-                # 원문이 한 글자도 안 바뀌었어도 경보가 쏟아진다 (실측: 앵커
-                # 40개 중 39개). **판정은 바꾸지 않고** 사실만 표시한다 —
-                # trafilatura 업그레이드 한 번이면 실현되는 상황이다 (D-235).
-                if anchor.created_version not in created_versions:
-                    created_versions[anchor.created_version] = (
-                        self._repository.get_version(anchor.created_version)
-                    )
-                origin_version = created_versions[anchor.created_version]
-                pipeline_moved = (
-                    origin_version is not None
-                    and origin_version.pipeline_version != latest.pipeline_version
-                )
-                if pipeline_moved:
-                    pipeline_changed += 1
-                if result.state in (matcher.ALTERED, matcher.MISSING, matcher.UNRESOLVED):
-                    attention.append(
-                        AttentionItem(
-                            anchor_id=anchor.id,
-                            url=document.url,
-                            state=result.state,
-                            before=anchor.exact,
-                            after=result.found_text if result.state == matcher.ALTERED else None,
-                            match_score=result.score,
-                            edit_distance=result.edit_distance,
-                            truncated=result.truncated,
-                            position_hint=anchor.position_hint,
-                            found_offset=result.found_offset,
-                            source=latest.source,
-                            occurrences=anchor.occurrences,
-                            occurrences_capped=_occurrences_capped(anchor.occurrences),
-                            pipeline_changed=pipeline_moved,
-                            coverage_ratio=checked_ratio,
-                        )
-                    )
             if stopped_early:
                 break
 
-        checked = sum(summary.values())
+        checked = sum(tally.summary.values())
         return VerifyReport(
             checked=checked,
-            summary=summary,
-            sources=sources,
-            attention=tuple(attention),
+            summary=tally.summary,
+            sources=tally.sources,
+            attention=tuple(tally.attention),
             anchor_ids=tuple(anchor.id for anchor in anchors),
             stopped_early=stopped_early,
-            requests=requests,
-            not_modified=not_modified,
-            bytes_down=bytes_down,
-            ambiguous=ambiguous,
-            pipeline_changed=pipeline_changed,
-            low_coverage=low_coverage,
+            requests=tally.requests,
+            not_modified=tally.not_modified,
+            bytes_down=tally.bytes_down,
+            ambiguous=tally.ambiguous,
+            pipeline_changed=tally.pipeline_changed,
+            low_coverage=tally.low_coverage,
         )
+
+    def _record_unverifiable(
+        self,
+        *,
+        document: Document,
+        document_anchors: list[AnchorRecord],
+        failure_state: str,
+        tally: _VerifyTally,
+    ) -> None:
+        """대조하지 못한 문서의 앵커들을 있는 그대로 적는다 (`verify`에서 분리).
+
+        페치가 실패했거나(GONE·UNREACHABLE) 대조할 본문을 읽지 못한 경우다.
+        판정을 지어내지 않고 그 사실만 기록한다.
+        """
+        for anchor in document_anchors:
+            self._repository.insert_verification(
+                anchor_id=anchor.id,
+                checked_version=None,
+                checked_at=utcnow_iso(),
+                state=failure_state,
+                match_score=None,
+                edit_distance=None,
+                found_offset=None,
+                found_text=None,
+                elapsed_ms=0,
+            )
+            tally.summary[failure_state] += 1
+            tally.sources["none"] += 1  # 대조가 없었다 — 출처를 지어내지 않는다
+            if anchor.occurrences is not None and anchor.occurrences > 1:
+                tally.ambiguous += 1
+            # GONE만 담으면 **아무것도 검증하지 못한 배치가 빈
+            # attention으로 보인다** — 도구 설명이 "attention에는
+            # 조치가 필요한 항목만"이라고 안내하므로 사용자는 그것을
+            # "이상 없음"으로 읽는다 (D-229). UNREACHABLE의 조치는
+            # "재시도 예약"이고(SPEC §6.3), 조치가 있으면 목록에 있다.
+            tally.attention.append(
+                AttentionItem(
+                    anchor_id=anchor.id,
+                    url=document.url,
+                    state=failure_state,
+                    before=anchor.exact,
+                    after=None,
+                    match_score=None,
+                    edit_distance=None,
+                    occurrences=anchor.occurrences,
+                    occurrences_capped=_occurrences_capped(anchor.occurrences),
+                )
+            )
+
+    def _verify_anchor(
+        self,
+        *,
+        anchor: AnchorRecord,
+        document: Document,
+        text: str,
+        latest: Version,
+        time_budget_ms: float | None,
+        tally: _VerifyTally,
+    ) -> None:
+        """앵커 하나를 대조 판본에 맞춰 재검증하고 결과를 적는다 (`verify`에서 분리).
+
+        옮긴 코드는 원문 그대로이고, 누산기 접근만 `tally.`를 거친다.
+        """
+        budget_ms = (
+            time_budget_ms if time_budget_ms is not None else self._config.time_budget_ms
+        )
+        if anchor.quality == QUALITY_SHORT:
+            budget_ms = budget_ms / 2
+        match_started = time.monotonic()
+        result = matcher.match_anchor(
+            text,
+            exact=anchor.exact,
+            prefix=anchor.prefix,
+            suffix=anchor.suffix,
+            position_hint=anchor.position_hint,
+            budget_ms=budget_ms,
+            max_edit_ratio=self._config.max_edit_ratio,
+            max_edit_distance=self._config.max_edit_distance,
+            hint_radius=self._config.hint_radius,
+            max_bytes=self._config.max_document_bytes,
+        )
+        elapsed_ms = int((time.monotonic() - match_started) * 1000)
+        self._repository.insert_verification(
+            anchor_id=anchor.id,
+            checked_version=latest.id,
+            checked_at=utcnow_iso(),
+            state=result.state,
+            match_score=result.score,
+            edit_distance=result.edit_distance,
+            found_offset=result.found_offset,
+            found_text=result.found_text,
+            elapsed_ms=elapsed_ms,
+        )
+        tally.summary[result.state] += 1
+        tally.sources[latest.source] = tally.sources.get(latest.source, 0) + 1
+        checked_ratio = latest.coverage.ratio
+        if checked_ratio is not None and checked_ratio < COVERAGE_WARN_RATIO:
+            tally.low_coverage += 1
+        if anchor.occurrences is not None and anchor.occurrences > 1:
+            tally.ambiguous += 1
+        # 앵커를 만든 판본과 대조 판본의 추출 파이프라인이 다르면,
+        # 원문이 한 글자도 안 바뀌었어도 경보가 쏟아진다 (실측: 앵커
+        # 40개 중 39개). **판정은 바꾸지 않고** 사실만 표시한다 —
+        # trafilatura 업그레이드 한 번이면 실현되는 상황이다 (D-235).
+        if anchor.created_version not in tally.created_versions:
+            tally.created_versions[anchor.created_version] = (
+                self._repository.get_version(anchor.created_version)
+            )
+        origin_version = tally.created_versions[anchor.created_version]
+        pipeline_moved = (
+            origin_version is not None
+            and origin_version.pipeline_version != latest.pipeline_version
+        )
+        if pipeline_moved:
+            tally.pipeline_changed += 1
+        if result.state in (matcher.ALTERED, matcher.MISSING, matcher.UNRESOLVED):
+            tally.attention.append(
+                AttentionItem(
+                    anchor_id=anchor.id,
+                    url=document.url,
+                    state=result.state,
+                    before=anchor.exact,
+                    after=result.found_text if result.state == matcher.ALTERED else None,
+                    match_score=result.score,
+                    edit_distance=result.edit_distance,
+                    truncated=result.truncated,
+                    position_hint=anchor.position_hint,
+                    found_offset=result.found_offset,
+                    source=latest.source,
+                    occurrences=anchor.occurrences,
+                    occurrences_capped=_occurrences_capped(anchor.occurrences),
+                    pipeline_changed=pipeline_moved,
+                    coverage_ratio=checked_ratio,
+                )
+            )
 
     @_foreground
     def list_documents(
