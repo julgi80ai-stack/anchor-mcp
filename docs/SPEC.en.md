@@ -228,6 +228,11 @@ CREATE TABLE versions (
     pipeline_version TEXT NOT NULL,               -- extractor + normalization rule version (v1.3, §5.3)
     captured_at      TEXT NOT NULL,               -- corresponds to Memento-Datetime
     byte_size        INTEGER NOT NULL,
+    -- how much of the document we saw when this version was made (v8, §5.5). NULL = never measured.
+    coverage_basis          TEXT,     -- html-prose | whole-document | no-prose | not-measurable | unknown
+    coverage_prose_chars    INTEGER,  -- total characters of prose units counted in the source
+    coverage_captured_chars INTEGER,  -- of those, characters found in the stored body
+    coverage_dropped        TEXT,     -- "aside:32 dd:554" — dropped blocks by structure
     char_count       INTEGER NOT NULL,
     content_blob     BLOB NOT NULL,               -- zstd(normalized_text)
     http_status      INTEGER NOT NULL,
@@ -306,6 +311,16 @@ CREATE INDEX idx_versions_observed ON versions(document_id, last_observed_seq DE
 CREATE INDEX idx_anchors_doc       ON anchors(document_id);
 CREATE INDEX idx_verif_anchor      ON verifications(anchor_id, checked_at DESC);
 CREATE INDEX idx_fetchlog_time     ON fetch_log(requested_at DESC);
+CREATE INDEX idx_aliases_document  ON document_aliases(document_id);
+-- Keeps gc from scanning the referencing tables when selecting and deleting
+-- reclaim candidates (v10, §4.2). Without them each candidate row full-scans
+-- three tables and the scan grows quadratically (measured at 18,000 versions:
+-- 6,882 ms → 24.6 ms, while other queries stalled for 6,967 ms).
+-- `verifications(checked_version)` is for the **delete**, not a lookup — without
+-- it, `ON DELETE SET NULL` full-scans the child table per version removed.
+CREATE INDEX idx_anchors_created_version   ON anchors(created_version);
+CREATE INDEX idx_documents_current_version ON documents(current_version);
+CREATE INDEX idx_verif_version             ON verifications(checked_version);
 ```
 
 ### 4.2 Storage Policy
@@ -406,7 +421,10 @@ To prevent duplicate registration of the same document, normalize in the followi
           have no way to block it. If the final URL differs from the input, the input
           URL is registered in `document_aliases`.
    402 → PaymentRequired (Cloudflare Pay Per Use, etc.) → step 6
-   403/429 → exponential backoff retry (up to 3 times) → on failure, step 6
+   403     → not retried (§5.4 "a 403 is reported as a 403") → step 6
+             unless the server carried a parsable `Retry-After`, which is an
+             invitation to retry — we wait exactly that long and ask again (v1.12)
+   429     → retried (up to 3). When `Retry-After` is present, **its value** is used → step 6 on failure
    404/410 → status = gone → step 6
 
 6. Archive fallback (enabled by configuration, on by default)
@@ -741,6 +759,17 @@ Fetches a document or returns it from the cache. **It aims to be a drop-in repla
   "text_hash": "b3:9a4f...",
   "char_count": 18432,
   "source": "live",                         // live | archive
+  "raw_changed": false,                     // the raw bytes differed while the extracted body did not (v1.12, §5.5)
+  "coverage": {                             // how much of the document we saw for this version (v1.13, §5.5)
+    "basis": "html-prose",                  // html-prose|whole-document|no-prose|not-measurable|unknown
+    "ratio": 0.94,                          // null when basis is no-prose, not-measurable, or unknown
+    "dropped": "aside:2"                    // dropped blocks by structure (omitted when none)
+  },
+  "notes": [],                              // facts to surface to the caller (coverage warnings etc., v1.13)
+  "redirect": {                             // only when a redirect was traversed (v1.14, §5.1)
+    "to": "https://example.com/2026/report",
+    "permanent": true
+  },
   "content": "# 2026 Report\n\n...",         // only when include_content=true
   "content_truncated": true,                // true if the chunk was truncated (v1.3)
   "next_start_index": 5000,                 // where to resume (only when truncated, v1.3)
@@ -760,6 +789,9 @@ Assigns an anchor to a quote.
 {
   "anchor_id": "018f...",
   "version_id": "018f...",
+  "captured_at": "2026-08-16T04:12:00Z",    // when this version was captured (v1.12)
+  "last_checked_at": "2026-08-19T02:10:00Z",// when it was last compared against the origin (v1.12)
+  "coverage": { "basis": "html-prose", "ratio": 0.94 },  // what the anchor was placed into (v1.13, §5.5)
   "source": "live",                         // live | archive (v1.10) — what the anchor was placed on
   "offset": 8214,
   "quality": "ok",
@@ -789,6 +821,9 @@ Re-verifies anchors against the current source. Processes in batch and observes 
     "MISSING": 1, "GONE": 0, "UNREACHABLE": 0, "UNRESOLVED": 1
   },
   "sources": { "live": 40, "archive": 2, "none": 0 },   // what each check compared against (v1.10; sums to checked)
+  "ambiguous": 1,                           // anchors whose quote occurs more than once (v1.12, §6.1)
+  "low_coverage": 2,                        // anchors compared against a narrowly captured document (v1.13, §5.5)
+  "pipeline_changed": 0,                    // anchors compared across a changed extraction pipeline (v1.12)
   "attention": [
     {
       "anchor_id": "018f...",
@@ -801,6 +836,9 @@ Re-verifies anchors against the current source. Processes in batch and observes 
       "position_hint": 4210,                // where the anchor was created (v1.7)
       "found_offset": 4198,                 // where it was found now (v1.7)
       "source": "live"                      // what this item compared against (v1.10; null if nothing was)
+      "occurrences": 2,                     // occurrences of this quote in the document (v1.12; null = unknown)
+      "coverage_ratio": 0.94,               // capture ratio of the version compared (v1.13; null = unmeasurable)
+      "pipeline_changed": false             // was the extraction pipeline different from cite time (v1.12)
     }
   ],
   "network": { "requests": 12, "not_modified": 9, "bytes_down": 48210 },
@@ -812,7 +850,7 @@ Re-verifies anchors against the current source. Processes in batch and observes 
 
 If `stopped_early` is true, `checked` and `summary` are **partial results**. The remaining anchors were not verified, so they must not be read as "nothing wrong."
 
-The `attention` array carries only the items that require action (`ALTERED`/`MISSING`/`GONE`/`UNRESOLVED`). It does not fill the context by listing all 36 `INTACT` entries.
+The `attention` array carries only the items that require action (`ALTERED`/`MISSING`/`GONE`/**`UNREACHABLE`**/`UNRESOLVED`). It does not fill the context by listing all 36 `INTACT` entries. `UNREACHABLE` was added in v1.12 (§6.3 defines its action as "schedule a retry"); while it was missing, **a batch that verified nothing appeared with an empty `attention`** and callers read it as "nothing wrong".
 
 `position_hint` and `found_offset` are provided together (v1.7). From edit distance alone the caller cannot tell whether this is **a revision in the same place** or **a lookalike paragraph from another section of the document**. If the two are far apart, the item is worth a human look even though it passed §6.2's context corroboration.
 
@@ -831,6 +869,8 @@ Why the parameters are not named `from`/`to`: they are Python keywords and canno
 ### 7.5 `get_version`
 
 Retrieves the content of a past version verbatim. Even after the source is gone, the text as it stood at citation time can be inspected.
+
+The response also carries that version's `source` (live | archive) and **`coverage`** — how much of the document was seen when it was made (§5.5, v1.13). Someone relying on this body after the original is gone needs to know **what we did not see at the time**. A `coverage.basis` of `unknown` means the version predates v8 and was never measured.
 
 ### 7.6 `list_documents`
 
@@ -987,6 +1027,8 @@ Values are validated **only against the final merged state** (v1.8). Validating 
 db_path        = "~/.anchor/store.db"
 keep_versions  = 20
 compression    = "zstd:6"
+verification_retention_days = 90    # the latest entry per anchor survives regardless of age (§4.2)
+fetch_log_retention_days    = 400   # floor is §7.7's 30-day reporting window
 
 [fetch]
 user_agent       = "Anchor/<release version> (+https://github.com/julgi80ai-stack/anchor-mcp)"
@@ -1071,6 +1113,7 @@ transport = "stdio"   # stdio | http
 | Memory | resident < 150 MB | Processing 100 consecutive 8 MB documents |
 | Concurrency | Safe for multiple clients in a single process | WAL mode + serialization in the store layer |
 | **Concurrency isolation** | **Work on one document must not block other documents or read-only tools** | **Per-URL lock (v1.5)** |
+| **Reclaim scan** | **gc candidate selection must not full-scan the referencing tables — linear in version count (v1.15)** | **Three indexes + an `EXPLAIN QUERY PLAN` structural test** |
 | **Failure response time** | **A failure is reported the moment it is known — no waiting is added except where retrying is the contract (v1.12)** | **Per-failure-kind response-time gate** |
 | Portability | Linux / macOS / Windows | CI matrix |
 
@@ -1089,13 +1132,15 @@ The reason the worst-case metric (row 4) was added in v1.1 is in §6.2. You have
 There is one rule. **Report a failure the moment it is known.** Additional waiting is permitted **only where retrying is the contract**, and even then **only for as long as the server asked**.
 
 - **Failures that are not retried** — 404, 410, 5xx, DNS failure, connection refused, an explicit robots denial, size-cap overflow, extraction failure. Asking again does not change the answer (4xx, robots), or retrying would be impolite (5xx is handled by the archive fallback). Measured baseline on local fixtures: 404 at 6 ms, 500 at 4 ms, robots denial at 15 ms, DNS failure at 10 ms, connection refused at 4 ms — **all within 20 ms**.
-- **403 is not retried** (v1.12). This has to agree with §5.4's "a 403 is reported as a 403" — having declared that we do not route around it, knocking three more times contradicts that declaration, and an anti-bot 403 is usually permanent, so retrying cannot change the answer. Measured before remediation: **7,010 ms** (3 retries × exponential backoff of 1+2+4 s).
+- **403 is not retried unless the server invites it with `Retry-After`** (v1.12). This has to agree with §5.4's "a 403 is reported as a 403" — having declared that we do not route around it, knocking three more times contradicts that declaration, and an anti-bot 403 is usually permanent, so retrying cannot change the answer. Measured before remediation: **7,010 ms** (3 retries × exponential backoff of 1+2+4 s).
 - **429 is retried** — that is the convention of rate limiting. But **when `Retry-After` is present, its value is used**: the server said "come back in 1 second" while our exponential backoff of 1, 2, and 4 seconds overrode it into a **total of 7,015 ms**, which ignores the server's instruction (an instruction is an instruction, even when we err on the polite side) and holds the caller for exactly that long. Our own backoff applies only when `Retry-After` is absent, and the ceiling of §5.4 still applies.
 - **The bound on how long a caller can be held is written down** — the product of the fetch timeout, hop limit, and retry count is the worst time a user is held, and it is also the reaction bound of `close()` and `tasks/cancel` (§7.0, §8).
 
 **The gate**: the benchmark measures response time per failure kind. It measures on local fixtures with no network, so it is robust to machine variance, and if a retry mechanism comes back only that kind turns red.
 
 > **Why this belongs in §10**: it sits in the same table as the accuracy metrics because, just as this project stopped accuracy regressions with CI, **regressions in adoptability must be stopped the same way**. A trust problem means giving a wrong answer; a latency problem means giving a right answer that goes unused. Both make this layer pointless.
+
+**Reclamation and concurrency (v1.15)**: `anchor gc` must not stall the store while it runs — this table's concurrency isolation applies to cleanup too. Two things enforce it. ① **Indexes on gc candidate selection** (§4.1's `idx_anchors_created_version`, `idx_documents_current_version`, `idx_verif_version`) — without them each candidate row full-scans `anchors`, `verifications`, and `documents`, and scan time grows **quadratically** (measured: 1.2 s at 4,500 versions → 6.1 s at 9,000 → **27.8 s** at 18,000). ② **Deletion is batched** (§4.2) — a single transaction stalls the store for its whole duration; before remediation, `get_version` in the same process was blocked from 0.2 ms to **28,699 ms** (about 140,000×) while gc ran. The gate measures the **query plan**, not the wall clock — a quadratic curve does not show up on the wall clock at fixture scale (§12's rule for tests that measure time).
 
 ---
 
@@ -1296,6 +1341,8 @@ This is not a formality. There are people in this field who have held on to this
 | 3 | **4.2** | **Retention periods written down** — `verifications` keeps the latest entry per anchor plus 90 days, `fetch_log` is trimmed outside `fetch_log_retention_days` (default 400; floor = the 30-day reporting window), `robots_cache` drops expired rows. `document_aliases` is not trimmed (it is a lookup key) | No table had a deletion path, so the store grew monotonically (24.7 KB per version blob; 60 documents re-verified daily ≈ 270 MB/year with nothing reclaimed) |
 | 4 | **4.2, 10** | Deletion is **batched** | A single transaction stalls the store for its duration and breaks §10's concurrency isolation — undoing what the indexes fixed |
 | 5 | **10** | Three indexes for the gc scan (`verifications.checked_version`, `anchors.created_version`, `documents.current_version`) | Each candidate row scanned three tables in full → a **quadratic curve** (1.2 s at 4,500 → 6.1 s at 9,000 → **27.8 s** at 18,000; extrapolating to 17 minutes for a year's data). Meanwhile `get_version` in the same process stalled from 0.2 ms to **28,699 ms**, about 140,000× |
+
+| 6 | **4.1, 9, 10, 7.1, 7.2, 7.3, 7.5** | **Doing what the specification claimed it had done** — §4.1 gains the v8 coverage columns and four indexes (5 listed vs 9 actual), §9's TOML example gains the two retention keys, §10 gains a reclaim-scan row and a "Reclamation and concurrency" note, the §7.1/§7.2/§7.3/§7.5 canonical I/O blocks gain every new field, §7.3's attention list gains `UNREACHABLE`, and §5.2 step 5 plus §10 gain the 403 retry condition | The second audit demonstrated six documentation-code mismatches: §4.1 reads as the authority on the schema yet lacked the coverage columns and four indexes (a later migration decision would rest on a wrong picture); §15 claimed "§10 was revised" while §10 contained no such thing; the canonical §7.x blocks carried **none** of the new fields from these three commits (`notes` appeared 0 times); §7.3 **contradicted itself** about the attention list; and §5.2 step 5 still held the pre-v1.11 sentence. **All of these are the specification's to fix** — the code was settled first and the specification failed to follow its own change (D-252, D-253, D-254, D-276, D-277, D-278) |
 
 ## 16. v1.13 → v1.14 Change History
 

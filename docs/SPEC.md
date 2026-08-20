@@ -223,6 +223,11 @@ CREATE TABLE versions (
     pipeline_version TEXT NOT NULL,               -- 추출기+정규화 규칙 버전 (v1.3, §5.3)
     captured_at      TEXT NOT NULL,               -- Memento-Datetime 대응
     byte_size        INTEGER NOT NULL,
+    -- 이 판본을 만들 때 문서의 얼마를 봤는가 (v8, §5.5). NULL = 잰 적 없음.
+    coverage_basis          TEXT,     -- html-prose | whole-document | no-prose | not-measurable | unknown
+    coverage_prose_chars    INTEGER,  -- 원본에서 센 산문 단위의 총 문자수
+    coverage_captured_chars INTEGER,  -- 그중 저장 본문에서 발견된 문자수
+    coverage_dropped        TEXT,     -- "aside:32 dd:554" — 미포착 블록의 구조별 개수
     char_count       INTEGER NOT NULL,
     content_blob     BLOB NOT NULL,               -- zstd(normalized_text)
     http_status      INTEGER NOT NULL,
@@ -300,6 +305,15 @@ CREATE INDEX idx_versions_observed ON versions(document_id, last_observed_seq DE
 CREATE INDEX idx_anchors_doc       ON anchors(document_id);
 CREATE INDEX idx_verif_anchor      ON verifications(anchor_id, checked_at DESC);
 CREATE INDEX idx_fetchlog_time     ON fetch_log(requested_at DESC);
+CREATE INDEX idx_aliases_document  ON document_aliases(document_id);
+-- gc가 회수 후보를 고르고 지울 때 참조 표를 훑지 않게 한다 (v10, §4.2).
+-- 없으면 후보 행마다 세 표를 전체 스캔해 스캔 시간이 2차로 는다
+-- (실측 18,000판본에서 6,882ms → 24.6ms, 그동안 다른 조회가 6,967ms 막혔다).
+-- `verifications(checked_version)`은 조회가 아니라 **삭제**를 위한 것이다 —
+-- 없으면 `ON DELETE SET NULL`이 지우는 판본마다 자식 표를 전체 훑는다.
+CREATE INDEX idx_anchors_created_version   ON anchors(created_version);
+CREATE INDEX idx_documents_current_version ON documents(current_version);
+CREATE INDEX idx_verif_version             ON verifications(checked_version);
 ```
 
 ### 4.2 저장 정책
@@ -394,7 +408,10 @@ CREATE INDEX idx_fetchlog_time     ON fetch_log(requested_at DESC);
           요청조차 없이 가져오게 된다 — 대상 호스트는 차단할 방법조차 없다.
           최종 URL이 입력과 다르면 입력 URL을 `document_aliases`에 등록한다.
    402 → PaymentRequired (Cloudflare Pay Per Use 등) → 6단계
-   403/429 → 지수 백오프 재시도 (최대 3회) → 실패 시 6단계
+   403     → 재시도하지 않는다 (§5.4 "403은 403으로 보고한다") → 6단계
+           단, 서버가 해석 가능한 `Retry-After`를 실었으면 재시도 **초대**이므로
+           그 값만큼 기다렸다 다시 묻는다 (v1.12)
+   429     → 재시도 (최대 3회). `Retry-After`가 있으면 **그 값**을 쓴다 → 실패 시 6단계
    404/410 → status = gone → 6단계
 
 6. 아카이브 폴백 (설정으로 명시적 활성화 — 기본 off. §9, 외부 서비스 무의존)
@@ -727,6 +744,17 @@ k = max(1, min(int(len(exact) * ratio), 64, len(exact) - 1))
   "text_hash": "b3:9a4f...",
   "char_count": 18432,
   "source": "live",                         // live | archive
+  "raw_changed": false,                     // 원본 바이트는 달라졌는데 추출 본문은 같다 (v1.12, §5.5)
+  "coverage": {                             // 이 판본을 만들 때 문서의 얼마를 봤는가 (v1.13, §5.5)
+    "basis": "html-prose",                  // html-prose|whole-document|no-prose|not-measurable|unknown
+    "ratio": 0.94,                          // basis가 no-prose·not-measurable·unknown이면 null
+    "dropped": "aside:2"                    // 미포착 블록의 구조별 개수 (없으면 생략)
+  },
+  "notes": [],                              // 사용자에게 알릴 사실 (포착 범위 경고 등, v1.13)
+  "redirect": {                             // 리다이렉트를 지났을 때만 (v1.14, §5.1)
+    "to": "https://example.com/2026/report",
+    "permanent": true
+  },
   "content": "# 2026 Report\n\n...",         // include_content=true일 때만
   "content_truncated": true,                // 청크가 잘렸으면 true (v1.3)
   "next_start_index": 5000,                 // 이어 읽을 시작점 (잘렸을 때만, v1.3)
@@ -746,6 +774,9 @@ k = max(1, min(int(len(exact) * ratio), 64, len(exact) - 1))
 {
   "anchor_id": "018f...",
   "version_id": "018f...",
+  "captured_at": "2026-08-16T04:12:00Z",    // 이 판본을 언제 캡처했는가 (v1.12)
+  "last_checked_at": "2026-08-19T02:10:00Z",// 원본과 마지막으로 대조한 때 (v1.12)
+  "coverage": { "basis": "html-prose", "ratio": 0.94 },  // 무엇에 닻을 내렸는가 (v1.13, §5.5)
   "source": "live",                         // live | archive (v1.10) — 무엇에 앵커를 달았는가
   "offset": 8214,
   "quality": "ok",
@@ -775,6 +806,9 @@ k = max(1, min(int(len(exact) * ratio), 64, len(exact) - 1))
     "MISSING": 1, "GONE": 0, "UNREACHABLE": 0, "UNRESOLVED": 1
   },
   "sources": { "live": 40, "archive": 2, "none": 0 },   // 무엇과 대조했는가 (v1.10, 합 = checked)
+  "ambiguous": 1,                           // 인용문이 문서에 여러 번 나오는 앵커 수 (v1.12, §6.1)
+  "low_coverage": 2,                        // 포착 범위가 좁은 문서와 대조한 앵커 수 (v1.13, §5.5)
+  "pipeline_changed": 0,                    // 추출 파이프라인이 달라진 채 대조한 앵커 수 (v1.12)
   "attention": [
     {
       "anchor_id": "018f...",
@@ -787,6 +821,9 @@ k = max(1, min(int(len(exact) * ratio), 64, len(exact) - 1))
       "position_hint": 4210,                // 앵커를 만든 자리 (v1.7)
       "found_offset": 4198,                 // 지금 찾은 자리 (v1.7)
       "source": "live"                      // 이 항목이 대조한 상대 (v1.10; 대조 없으면 null)
+      "occurrences": 2,                     // 이 인용문의 문서 내 출현 횟수 (v1.12; null = 모름)
+      "coverage_ratio": 0.94,               // 대조한 판본의 포착 범위 (v1.13; null = 못 잼)
+      "pipeline_changed": false             // 앵커 생성 때와 다른 파이프라인인가 (v1.12)
     }
   ],
   "network": { "requests": 12, "not_modified": 9, "bytes_down": 48210 },
@@ -798,7 +835,7 @@ k = max(1, min(int(len(exact) * ratio), 64, len(exact) - 1))
 
 `stopped_early`가 참이면 `checked`와 `summary`는 **부분 결과**다. 남은 앵커는 검증되지 않았으므로 "이상 없음"으로 읽어서는 안 된다.
 
-`attention` 배열에는 조치가 필요한 항목(`ALTERED`/`MISSING`/`GONE`/`UNRESOLVED`)만 담는다. `INTACT` 36건을 전부 나열해 컨텍스트를 채우지 않는다.
+`attention` 배열에는 조치가 필요한 항목(`ALTERED`/`MISSING`/`GONE`/**`UNREACHABLE`**/`UNRESOLVED`)만 담는다 — `UNREACHABLE`은 v1.12에서 들어왔다(§6.3이 그 조치를 "재시도 예약"으로 규정한다). 그것이 빠져 있던 동안 **아무것도 검증하지 못한 배치가 빈 `attention`으로 보였고** 호출자는 "이상 없음"으로 읽었다. `INTACT` 36건을 전부 나열해 컨텍스트를 채우지 않는다.
 
 `position_hint`와 `found_offset`을 함께 준다 (v1.7). 편집거리만으로는 그것이 **같은 자리의 개정**인지 **문서의 다른 절에서 온 닮은 문단**인지 호출자가 알 수 없다. 둘이 크게 벌어졌다면 §6.2의 문맥 뒷받침을 통과했더라도 사람이 한 번 볼 값어치가 있다.
 
@@ -817,6 +854,8 @@ k = max(1, min(int(len(exact) * ratio), 64, len(exact) - 1))
 ### 7.5 `get_version`
 
 과거 버전의 본문을 그대로 꺼낸다. 원문이 사라진 뒤에도 인용 당시의 텍스트를 확인할 수 있다.
+
+응답에는 그 판본의 `source`(live | archive)와 **`coverage`**(그 판본을 만들 때 문서의 얼마를 봤는가, §5.5)가 함께 실린다 (v1.13) — 원문이 사라진 뒤 이 본문을 근거로 삼는 사람이 **우리가 그때 무엇을 못 봤는지**까지 알아야 하기 때문이다. `coverage.basis`가 `unknown`이면 v8 이전에 만들어진 판본이라 잰 적이 없다는 뜻이다.
 
 ### 7.6 `list_documents`
 
@@ -973,6 +1012,8 @@ MCP 클라이언트 등록용 진입점은 콘솔 스크립트 `anchor-mcp`다 (
 db_path        = "~/.anchor/store.db"
 keep_versions  = 20
 compression    = "zstd:6"
+verification_retention_days = 90    # 앵커당 최신 1건은 나이와 무관하게 남는다 (§4.2)
+fetch_log_retention_days    = 400   # 하한은 §7.7의 보고 창 30일
 
 [fetch]
 user_agent       = "Anchor/<릴리스 버전> (+https://github.com/julgi80ai-stack/anchor-mcp)"
@@ -1057,6 +1098,7 @@ transport = "stdio"   # stdio | http
 | 메모리 | 상주 < 150 MB | 8MB 문서 100건 연속 처리 시 |
 | 동시성 | 단일 프로세스 다중 클라이언트 안전 | WAL 모드 + 저장소 계층 직렬화 |
 | **동시성 격리** | **한 문서의 작업이 다른 문서·읽기 전용 도구를 막지 않을 것** | **URL 단위 락 (v1.5)** |
+| **회수 스캔** | **gc 후보 선정이 참조 표를 전체 훑지 않을 것 — 판본 수에 선형 (v1.15)** | **인덱스 3종 + `EXPLAIN QUERY PLAN` 구조 시험** |
 | **실패 응답 시간** | **실패는 그것을 안 순간 보고한다 — 재시도가 계약인 경우를 빼고 추가 대기를 넣지 않는다 (v1.12)** | **실패 종류별 응답 시간 게이트** |
 | 이식성 | Linux / macOS / Windows | CI 매트릭스 |
 
@@ -1075,7 +1117,7 @@ transport = "stdio"   # stdio | http
 규칙은 하나다. **실패를 안 순간 보고한다.** 추가 대기는 **재시도가 계약인 경우에만** 허용되고, 그때도 **서버가 지정한 만큼만** 기다린다.
 
 - **재시도하지 않는 실패** — 404·410·5xx·DNS 실패·연결 거부·robots의 명시적 거부·크기 상한 초과·추출 실패. 이들은 다시 물어봐도 답이 달라지지 않거나(4xx·robots), 재시도가 정중함을 해친다(5xx는 아카이브 폴백이 받는다). 실측 기준선: 로컬 픽스처에서 404 6ms · 500 4ms · robots 거부 15ms · DNS 실패 10ms · 연결 거부 4ms — **전부 20ms 안**이다.
-- **403은 재시도하지 않는다** (v1.12). §5.4가 "403은 403으로 보고한다"고 정한 것과 정합해야 한다 — 우회하지 않기로 해 놓고 세 번 더 두드리는 것은 그 선언과 어긋나고, 안티봇의 403은 대개 항구적이라 재시도가 답을 바꾸지 못한다. 조치 전 실측 **7,010ms**(재시도 3회 × 지수 백오프 1+2+4초)였다.
+- **403은 재시도하지 않는다 — 서버가 `Retry-After`로 초대하지 않는 한** (v1.12). §5.4가 "403은 403으로 보고한다"고 정한 것과 정합해야 한다 — 우회하지 않기로 해 놓고 세 번 더 두드리는 것은 그 선언과 어긋나고, 안티봇의 403은 대개 항구적이라 재시도가 답을 바꾸지 못한다. 조치 전 실측 **7,010ms**(재시도 3회 × 지수 백오프 1+2+4초)였다.
 - **429는 재시도한다** — 그것이 레이트 제한의 규약이다. 단 **`Retry-After`가 있으면 그 값을 쓴다**: 서버가 "1초 뒤에 오라"고 했는데 우리 지수 백오프가 1·2·4초로 덮어써 **총 7,015ms**를 기다리는 것은 서버의 지시를 무시하는 것이고(더 정중한 방향이라도 지시는 지시다), 그만큼 호출자를 붙잡는다. `Retry-After`가 없을 때만 자체 백오프를 쓰고, 상한(§5.4)은 그대로 적용한다.
 - **호출자를 기다리게 하는 상한은 문서로 남긴다** — 페치 타임아웃·홉 한도·재시도 횟수의 곱이 곧 사용자가 붙잡히는 최악 시간이고, 그것이 `close()`·`tasks/cancel`의 반응 상한이기도 하다(§7.0, §8).
 
@@ -1205,7 +1247,7 @@ dependencies = [
 규칙은 하나다. **실패를 안 순간 보고한다.** 추가 대기는 **재시도가 계약인 경우에만** 허용되고, 그때도 **서버가 지정한 만큼만** 기다린다.
 
 - **재시도하지 않는 실패** — 404·410·5xx·DNS 실패·연결 거부·robots의 명시적 거부·크기 상한 초과·추출 실패. 이들은 다시 물어봐도 답이 달라지지 않거나(4xx·robots), 재시도가 정중함을 해친다(5xx는 아카이브 폴백이 받는다). 실측 기준선: 로컬 픽스처에서 404 6ms · 500 4ms · robots 거부 15ms · DNS 실패 10ms · 연결 거부 4ms — **전부 20ms 안**이다.
-- **403은 재시도하지 않는다** (v1.12). §5.4가 "403은 403으로 보고한다"고 정한 것과 정합해야 한다 — 우회하지 않기로 해 놓고 세 번 더 두드리는 것은 그 선언과 어긋나고, 안티봇의 403은 대개 항구적이라 재시도가 답을 바꾸지 못한다. 조치 전 실측 **7,010ms**(재시도 3회 × 지수 백오프 1+2+4초)였다.
+- **403은 재시도하지 않는다 — 서버가 `Retry-After`로 초대하지 않는 한** (v1.12). §5.4가 "403은 403으로 보고한다"고 정한 것과 정합해야 한다 — 우회하지 않기로 해 놓고 세 번 더 두드리는 것은 그 선언과 어긋나고, 안티봇의 403은 대개 항구적이라 재시도가 답을 바꾸지 못한다. 조치 전 실측 **7,010ms**(재시도 3회 × 지수 백오프 1+2+4초)였다.
 - **429는 재시도한다** — 그것이 레이트 제한의 규약이다. 단 **`Retry-After`가 있으면 그 값을 쓴다**: 서버가 "1초 뒤에 오라"고 했는데 우리 지수 백오프가 1·2·4초로 덮어써 **총 7,015ms**를 기다리는 것은 서버의 지시를 무시하는 것이고(더 정중한 방향이라도 지시는 지시다), 그만큼 호출자를 붙잡는다. `Retry-After`가 없을 때만 자체 백오프를 쓰고, 상한(§5.4)은 그대로 적용한다.
 - **호출자를 기다리게 하는 상한은 문서로 남긴다** — 페치 타임아웃·홉 한도·재시도 횟수의 곱이 곧 사용자가 붙잡히는 최악 시간이고, 그것이 `close()`·`tasks/cancel`의 반응 상한이기도 하다(§7.0, §8).
 
@@ -1213,7 +1255,9 @@ dependencies = [
 
 > **왜 이것이 §10에 있는가**: 정확성 지표들과 같은 표에 두는 이유는, 이 프로젝트가 정확성 회귀를 CI로 막았듯 **채택 가능성의 회귀도 같은 방식으로 막아야** 하기 때문이다. 신뢰의 문제는 틀린 답을 주는 것이고, 지연의 문제는 맞는 답을 줘도 안 쓰이게 되는 것이다. 둘 다 이 계층의 존재를 무의미하게 만든다.
 
-> **이식성 시험의 규칙 (v1.11)**: 어떤 조건이 특정 플랫폼에서 만들어지지 않으면(예: Windows에는 POSIX 권한 비트가 없어 "쓰기 불가 디렉터리"를 만들 수 없다) 그 파라미터만 건너뛰되, **같은 계약을 그 플랫폼에서도 검증하는 다른 조건을 반드시 남긴다.** 계약 하나가 한 플랫폼에서 통째로 무주공산이 되면 "3 OS 지원"은 검증되지 않은 주장이다. 건너뛴 것은 무엇이 어느 플랫폼에서 검증되지 않는지와 함께 기록한다.
+> **회수와 동시성 (v1.15)**: `anchor gc`는 저장소를 그동안 멈춰 세우면 안 된다 — 이 표의 동시성 격리는 정리 작업에도 적용된다. 두 가지로 지킨다. ①**gc 후보 선정에 인덱스**(§4.1의 `idx_anchors_created_version`·`idx_documents_current_version`·`idx_verif_version`) — 없으면 후보 행마다 `anchors`·`verifications`·`documents`를 전체 훑어 스캔 시간이 **2차로** 는다(실측 4,500판본 1.2s → 9,000 6.1s → 18,000 **27.8s**). ②**삭제는 배치로 나눈다**(§4.2) — 한 트랜잭션으로 묶으면 그 시간만큼 저장소가 멈춘다. 조치 전 실측으로 gc가 도는 동안 같은 프로세스의 `get_version`이 0.2ms → **28,699ms**(약 14만 배) 막혔다. 게이트는 벽시계가 아니라 **질의 계획**으로 잰다 — 작은 픽스처에서는 2차 곡선이 벽시계로 드러나지 않기 때문이다(§12의 시간 측정 규칙).
+
+**이식성 시험의 규칙 (v1.11)**: 어떤 조건이 특정 플랫폼에서 만들어지지 않으면(예: Windows에는 POSIX 권한 비트가 없어 "쓰기 불가 디렉터리"를 만들 수 없다) 그 파라미터만 건너뛰되, **같은 계약을 그 플랫폼에서도 검증하는 다른 조건을 반드시 남긴다.** 계약 하나가 한 플랫폼에서 통째로 무주공산이 되면 "3 OS 지원"은 검증되지 않은 주장이다. 건너뛴 것은 무엇이 어느 플랫폼에서 검증되지 않는지와 함께 기록한다.
 
 > **감사에서 배운 것 (v1.5)**: 위 층위를 다 갖추고 커버리지 목표를 채운 상태에서도 실증된 결함 52건이 나왔다. 공통점은 **정상 경로만 밟는 픽스처**였다 — 리다이렉트 없는 서버, 문단이 한 줄인 HTML, 한 줄짜리 PDF, 단일 스레드. 픽스처가 현실의 평범한 조건(리다이렉트·조판·중복 문단·동시 호출)을 포함하지 않으면 어떤 커버리지 수치도 그 구멍을 가리지 못한다.
 
@@ -1294,6 +1338,8 @@ Anchor는 다음 성과 위에 서 있다. README와 문서에 명시한다.
 | 3 | **4.2** | **보존 기간 명문화** — `verifications`는 앵커당 최신 1건 + 90일, `fetch_log`는 `fetch_log_retention_days`(기본 400일, 하한 = 보고 창 30일) 밖, `robots_cache`는 TTL 만료분. `document_aliases`는 정리하지 않는다(조회 키) | 어느 표에도 삭제 경로가 없어 저장소가 단조 증가했다(버전당 blob 24.7KB, 60문서 일일 재검증이면 ≈270MB/년·회수 0) |
 | 4 | **4.2, 10** | 삭제는 **배치로 나눈다** | 한 트랜잭션으로 묶으면 저장소가 그동안 멈춰 §10의 동시성 격리를 깬다 — 인덱스로 고친 것을 도로 만든다 |
 | 5 | **10** | gc 스캔에 인덱스 3종(`verifications.checked_version`·`anchors.created_version`·`documents.current_version`) | 후보 행마다 세 테이블 전체 훑기 → **2차 곡선**(4,500 1.2s → 9,000 6.1s → 18,000 **27.8s**, 1년치 외삽 17분). 그동안 같은 프로세스의 `get_version`이 0.2ms → **28,699ms**(약 14만 배) 막혔다 |
+
+| 6 | **4.1, 9, 10, 7.1, 7.2, 7.3, 7.5** | **사양이 "했다"고 적어 둔 것을 실제로 한다** — §4.1에 v8 coverage 4열과 인덱스 4종(5개 기재 → 실제 9개), §9 TOML 예시에 retention 2키, §10에 회수 스캔 행과 "회수와 동시성" 절, §7.1·§7.2·§7.3·§7.5 정본 입출력 블록에 신규 필드 전부, §7.3 attention 목록에 `UNREACHABLE`, §5.2 5단계·§10에 403 재시도 조건 | 감사 2기가 문서-코드 불일치 6건을 실증했다: §4.1이 스키마의 정본으로 읽히는데 coverage 4열과 인덱스 4종이 없었고(다음 라운드의 마이그레이션 판단이 틀린 그림 위에서 이뤄진다), §15가 "§10을 고쳤다"고 적었는데 §10에 그 내용이 없었고, §7.x 정본 블록에 이번 세 커밋의 신규 필드가 **하나도** 없었으며(`notes`는 KR 전체에서 0회), §7.3은 attention 목록을 두고 **내부 모순**이었고, §5.2 5단계는 v1.11 이전 문장이 그대로였다. **전부 SPEC 쪽을 고칠 일이다** — 코드가 먼저 정해졌고 사양이 스스로 도입한 변경을 못 따라온 경우다 (D-252·D-253·D-254·D-276·D-277·D-278) |
 
 ## 16. v1.13 → v1.14 변경 이력
 
