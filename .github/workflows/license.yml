@@ -1,26 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # 라이선스 게이트 (SPEC §12.2, THIRD-PARTY.md §5). 사람의 기억으로 막을 수
 # 없는 것을 CI가 막는다 — 카피레프트 유입, trafilatura 하한.
+#
+# **푸시할 때 돌지 않는다** (2026-08-20). 이 검사는 개발 기계에서 그대로 돈다:
+#   python tools/audit_licenses.py --all-installed --fail-on-copyleft --check-floors
+# 의존성이 바뀌는 순간은 드물고, 놓치면 안 되는 시점은 **배포 직전**이다.
+#
+# 수동 실행:  gh workflow run license-audit
 name: license-audit
-# 의존성이 바뀌지 않았으면 돌 이유가 없다 (2026-08-20). 리눅스 1대·25초라
-# 비용은 작지만, 문서 커밋에 라이선스를 다시 감사할 까닭은 없다.
 on:
+  workflow_dispatch:
   push:
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
-      - "LICENSE"
-      - "NOTICE"
-      - "CITATION.cff"
-      - ".gitignore"
-  pull_request:
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
-      - "LICENSE"
-      - "NOTICE"
-      - "CITATION.cff"
-      - ".gitignore"
+    tags: ["v*"]
 
 jobs:
   audit:
