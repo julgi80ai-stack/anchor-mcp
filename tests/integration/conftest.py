@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -58,8 +59,16 @@ class FixtureState:
         # 항구적 거부다. 이 축이 없으면 재시도 정책을 시험할 수 없다 (D-237).
         self.status_override_headers: dict[str, str] = {}
         self.requests: list[str] = []  # 수신한 경로 순서
+        # 요청이 **언제** 왔는가 (경로, monotonic 초). 횟수만으로는 예절을
+        # 관측할 수 없다 — "4번 두드렸다"와 "6ms 안에 4번 두드렸다"는 서로
+        # 다른 사실이고, 후자가 D-275다. 재시도 간격이라는 축은 시각 없이는
+        # 픽스처에 존재하지 않는다.
+        self.request_times: list[tuple[str, float]] = []
         # 아카이브 에뮬레이션: 설정 시 CDX·MemGator API·/web/ 재생이 살아난다.
         self.archive_html: str | None = None
+        # 재생 응답의 상태코드 축 (D-282). 변환 프록시 뒤에서는 아카이브
+        # 재생본도 203으로 온다 — 200만 있는 픽스처에는 그 축이 없다.
+        self.archive_replay_status: int = 200
         self.archive_timestamp: str = "20260801123456"
         self.response_delay: float = 0.0  # 문서 응답 지연(초) — 타임아웃 테스트용
         # 리다이렉트 맵: 요청 경로 → Location (상대·절대 모두 가능)
@@ -118,6 +127,7 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler 규약)
         state: FixtureState = self.server.state  # type: ignore[attr-defined]
         state.requests.append(self.path)
+        state.request_times.append((self.path, time.monotonic()))
 
         if self.path == "/robots.txt" or self.path.startswith("/robots-"):
             if state.robots_delay:
@@ -299,7 +309,7 @@ class _Handler(BaseHTTPRequestHandler):
             body = state.archive_html.encode("utf-8")
             if self._serve_partial(state, body, "text/html; charset=utf-8"):
                 return
-            self.send_response(200)
+            self.send_response(state.archive_replay_status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()

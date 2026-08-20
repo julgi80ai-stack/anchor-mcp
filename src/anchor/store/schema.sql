@@ -1,5 +1,5 @@
 -- SPDX-License-Identifier: Apache-2.0
--- Anchor 스키마 v10 — 신규 DB용 전체 스키마 (SPEC §4.1 + robots 캐시).
+-- Anchor 스키마 v11 — 신규 DB용 전체 스키마 (SPEC §4.1 + robots 캐시).
 -- 기존 DB는 migrations/ 아래의 증분 SQL로 따라온다.
 
 -- 논리적 문서 (Memento: Original Resource / URI-R). URL 정규화 후 유일.
@@ -50,6 +50,12 @@ CREATE TABLE versions (
     coverage_prose_chars    INTEGER,  -- 원본에서 센 산문 단위의 총 문자수
     coverage_captured_chars INTEGER,  -- 그중 저장 본문에서 발견된 문자수
     coverage_dropped        TEXT,     -- "aside:32 dd:554" — 미포착 블록의 구조별 개수
+    -- 그 마지막 관측에서 원본이 준 바이트의 해시 (v11, D-274). `raw_hash`는
+    -- 이 본문을 만든 바이트(그때)이고 이 열은 마지막으로 본 바이트(지금)다.
+    -- `raw_changed`는 이 열과 비교한다 — `raw_hash`와 비교하면 바이트가 한 번
+    -- 달라진 뒤로는 변한 적 없는 재확인에서도 영영 참이 된다. NULL은 v11
+    -- 이전 행이라 **모른다**는 뜻이다.
+    last_observed_raw_hash  TEXT,
     -- 같은 본문이라도 출처가 다르면 별개의 memento다 (v5).
     UNIQUE (document_id, text_hash, source)
 );

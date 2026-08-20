@@ -697,3 +697,90 @@ def test_pruning_uses_timestamps_written_by_the_production_writers(tmp_path):
     assert result["pruned_verifications"] == 1
     assert result["pruned_fetch_log"] == 1
     assert result["pruned_robots_cache"] == 1
+
+
+def test_pruning_keeps_the_newest_verification_even_when_one_lands_mid_flight(repo):
+    """D-255: 삭제 시점 재확인(`_VERIFICATION_IS_SUPERSEDED`)이 **도달 불가**인
+    근거를 시험으로 고정한다.
+
+    그 재확인은 "선정과 삭제 사이에 이 행이 최신이 되면 지우지 않는다"를 지킨다.
+    그런 일이 일어나려면 **그 앵커의 더 최근 검증이 전부 사라져야** 하는데,
+    검증 행을 지우는 경로는 (1) 이 프루닝과 (2) 앵커 삭제의 CASCADE 둘뿐이고,
+    (1)은 앵커당 최신 1건을 결코 지우지 않으며 (2)는 그 행 자신도 함께 지운다
+    (`merge_document`는 앵커를 **옮긴 뒤** 문서를 지우므로 앵커는 삭제되지
+    않는다). 검증 행이 **늘어나는** 것은 순위를 올릴 뿐 내리지 못한다.
+
+    그래서 회귀선을 그 재확인 자체에 걸 수는 없다. 대신 재확인을 불필요하게
+    만드는 **전제**에 건다 — 선정과 삭제 사이에 새 검증이 끼어들어도 앵커의
+    최신 1건은 남는다. 이 전제가 깨지면 재확인은 그때부터 도달 가능해진다.
+    """
+    document_id = make_document(repo)
+    version = add_version(repo, document_id, "v0", day=1, serve=True)
+    anchor = repo.insert_anchor(
+        document_id=document_id, created_version=version.id,
+        exact="같은 문장이 반복되는 본문이다.", prefix="", suffix="", position_hint=0,
+        exact_hash="b3:x", quality="ok", note=None, created_at=ago(days=300),
+        cited_url="https://example.test/doc-0",
+    )
+    for age in (500, 400, 300, 200):
+        repo.insert_verification(
+            anchor_id=anchor.id, checked_version=version.id, checked_at=ago(days=age),
+            state="INTACT", match_score=1.0, edit_distance=0, found_offset=0,
+            found_text=None, elapsed_ms=1,
+        )
+
+    original = repo._delete_in_batches
+
+    def racing_delete(ids, sql_template, *, trailing=()):
+        # 선정과 삭제 **사이**에 새 검증이 도착한다. 순위는 올라갈 뿐이다.
+        repo.insert_verification(
+            anchor_id=anchor.id, checked_version=version.id, checked_at=ago(days=1),
+            state="INTACT", match_score=1.0, edit_distance=0, found_offset=0,
+            found_text=None, elapsed_ms=1,
+        )
+        return original(ids, sql_template, trailing=trailing)
+
+    repo._delete_in_batches = racing_delete
+    try:
+        repo.prune_verifications(before=ago(days=90))
+    finally:
+        repo._delete_in_batches = original
+
+    survivors = sorted(
+        row[0] for row in repo._connection.execute(
+            "SELECT checked_at FROM verifications WHERE anchor_id = ?", (anchor.id,)
+        ).fetchall()
+    )
+    assert survivors == sorted([ago(days=200), ago(days=1)]), survivors
+    assert repo.latest_verified_version(anchor.id) is not None
+
+
+def test_no_path_other_than_pruning_deletes_verification_rows(repo):
+    """위 근거의 나머지 절반 — 검증 행을 지우는 다른 경로가 생기면 빨개진다.
+
+    `merge_document`는 앵커를 옮긴 뒤 문서를 지우므로 CASCADE가 앵커에 닿지
+    않는다. 버전 회수는 `checked_version`을 NULL로 만들 뿐 행을 지우지 않는다.
+    """
+    source = make_document(repo, index=1)
+    target = make_document(repo, index=2)
+    source_version = add_version(repo, source, "s0", day=1, serve=True)
+    add_version(repo, target, "t0", day=1, serve=True)
+    anchor = repo.insert_anchor(
+        document_id=source, created_version=source_version.id,
+        exact="합쳐지는 문서의 인용문이다.", prefix="", suffix="", position_hint=0,
+        exact_hash="b3:m", quality="ok", note=None, created_at=ago(days=10),
+        cited_url="https://example.test/doc-1",
+    )
+    repo.insert_verification(
+        anchor_id=anchor.id, checked_version=source_version.id, checked_at=ago(days=5),
+        state="INTACT", match_score=1.0, edit_distance=0, found_offset=0,
+        found_text=None, elapsed_ms=1,
+    )
+
+    repo.merge_document(source, target)
+    repo.collect_garbage(keep=0)
+
+    (remaining,) = repo._connection.execute(
+        "SELECT COUNT(*) FROM verifications WHERE anchor_id = ?", (anchor.id,)
+    ).fetchone()
+    assert remaining == 1, "프루닝 밖에서 검증 행이 사라졌다 — D-255의 근거가 무너진다"

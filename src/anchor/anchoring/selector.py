@@ -206,13 +206,23 @@ def build_selector(
     )
 
 
-def _count_occurrences(text: str, exact: str, limit: int = 8) -> int:
+# 출현 횟수를 세는 상한. 모호성을 알리는 데 필요한 것은 "여럿인가"이지
+# 정확한 개수가 아니므로, 42만 자 본문에서 전수를 세지 않는다. **이 값이
+# 나왔다는 것은 "이 값 이상"이라는 뜻이다** — 그 사실은 값과 함께 나가야
+# 한다(D-279). 공개 상수인 이유는 응답을 읽는 쪽이 포화 여부를 판정하려면
+# 상한을 알아야 하기 때문이다.
+OCCURRENCE_COUNT_LIMIT = 8
+
+
+def _count_occurrences(text: str, exact: str, limit: int = OCCURRENCE_COUNT_LIMIT) -> int:
     """인용문이 원문에 몇 번 나오는지 센다 (limit에서 멈춘다).
 
     중복 출현은 앵커가 어느 인스턴스를 가리키는지 모호하게 만든다. SPEC
     §6.2의 1·2단계는 단순 완전 일치라 첫 출현을 잡으므로, 사용자가 인용한
     인스턴스가 삭제돼도 다른 인스턴스 때문에 INTACT가 될 수 있다 (D-047).
     호출자에게 경고할 수 있도록 개수를 남긴다.
+
+    돌려주는 값이 `limit`이면 **그 이상**이라는 뜻이다 (D-279).
     """
     count = 0
     start = 0

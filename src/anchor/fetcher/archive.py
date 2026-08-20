@@ -24,6 +24,8 @@ from datetime import datetime, timezone
 
 import httpx
 
+from anchor.fetcher.client import REPRESENTATION_STATUSES
+
 WAYBACK_BASE = "https://web.archive.org"
 
 
@@ -124,7 +126,11 @@ class ArchiveFallback:
                     return None
 
             response = self._get(uri_m, on_bytes)
-            if response.status_code != 200 or not response.content:
+            # 재생 응답도 200만이 아니다 (D-282) — 변환 프록시 뒤에서는
+            # 아카이브 재생본이 203으로 온다. 206(부분)·204(본문 없음)는
+            # 여기 없다: 요청하지도 않은 조각을 memento로 저장하면 인용
+            # 근거가 잘린 본문이 된다.
+            if response.status_code not in REPRESENTATION_STATUSES or not response.content:
                 return None
             return ArchiveHit(
                 uri_m=uri_m,
@@ -145,7 +151,7 @@ class ArchiveFallback:
     def _query_memgator(self, url: str, on_bytes=None) -> tuple[str, str, int] | None:
         """MemGator Time Travel 호환 API: GET <aggregator>/api/json/<URI-R>."""
         response = self._get(f"{self._aggregator}/api/json/{url}", on_bytes)
-        if response.status_code != 200:
+        if response.status_code not in REPRESENTATION_STATUSES:
             return None
         try:
             mementos = json.loads(response.content).get("mementos", {})
@@ -168,7 +174,10 @@ class ArchiveFallback:
                 "limit": "-1",  # 최신 1건
             },
         )
-        if response.status_code != 200 or not response.content.strip():
+        if (
+            response.status_code not in REPRESENTATION_STATUSES
+            or not response.content.strip()
+        ):
             return None
         try:
             rows = json.loads(response.content)

@@ -200,3 +200,19 @@ def test_occurrences_counts_repeats_for_the_cite_warning():
     body = "같은 문장이 두 번 나온다. 사이 문장이다. 같은 문장이 두 번 나온다."
     selector = build_selector(body, "같은 문장이 두 번 나온다.")
     assert selector.occurrences == 2
+
+
+def test_occurrence_count_saturates_and_says_so(tmp_path):
+    """세는 것은 상한에서 멈춘다 — 그 사실이 값과 함께 나가야 한다 (D-279).
+
+    50번 나오는 인용문도 저장되는 값은 상한이다. 그 값을 정수로만 내보내면
+    받는 쪽은 "정확히 8번"으로 읽는다.
+    """
+    from anchor.anchoring.selector import OCCURRENCE_COUNT_LIMIT, _count_occurrences
+
+    sentence = "같은 문장이 반복된다."
+    body = " ".join([sentence] * (OCCURRENCE_COUNT_LIMIT * 6))
+    assert _count_occurrences(body, sentence) == OCCURRENCE_COUNT_LIMIT
+
+    few = " ".join([sentence] * 3)
+    assert _count_occurrences(few, sentence) == 3

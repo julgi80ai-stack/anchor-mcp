@@ -81,6 +81,55 @@ def test_retry_after_wins_over_backoff():
     assert fetcher._retry_delay(_Response(None), 2) == 4.0
 
 
+def test_a_zero_or_stale_retry_after_still_has_a_floor():
+    """지정을 존중하는 것과 예절을 버리는 것은 다르다 (D-275).
+
+    축은 `Retry-After` **값**이다: 0 / 음수 / 과거 HTTP-date / 해석 불가 /
+    지정 없음 / 정상값 / 상한 초과. 조치 전에는 앞의 셋이 전부 대기 0이 되어
+    429를 준 서버를 6ms 안에 네 번 두드렸다(실측 4회/7.3ms).
+    """
+    from email.utils import format_datetime
+    from datetime import datetime, timedelta, timezone
+
+    from anchor.fetcher.client import ConditionalFetcher
+
+    stale = format_datetime(
+        datetime.now(timezone.utc) - timedelta(days=3650), usegmt=True
+    )
+    # 바닥은 설정에서 온다 — 백오프 기준값과 호스트 간격 중 큰 쪽.
+    fetcher = ConditionalFetcher(
+        client=None,
+        user_agent="t",
+        max_content_bytes=1024,
+        retry_backoff_base=0.01,
+        min_retry_delay=0.5,
+    )
+    for raw in ("0", "-5", stale, "0.001"):
+        assert fetcher._retry_delay(_Response(raw), 0) == 0.5, raw
+    # 해석 불가·지정 없음도 바닥 아래로 내려가지 않는다.
+    assert fetcher._retry_delay(_Response("곧"), 0) == 0.5
+    assert fetcher._retry_delay(_Response(None), 0) == 0.5
+    # 바닥은 덮개가 아니다 — 지정이 더 길면 지정을 지킨다.
+    assert fetcher._retry_delay(_Response("5"), 0) == 5.0
+    # 상한 초과는 여전히 재시도하지 않는다.
+    assert fetcher._retry_delay(_Response("3600"), 0) is None
+
+
+def test_a_floor_beyond_the_ceiling_stops_retrying_rather_than_sleeping_forever():
+    """설정이 아주 느린 호스트(0.005 rps → 200초)를 지시해도 상한이 이긴다."""
+    from anchor.fetcher.client import ConditionalFetcher
+
+    fetcher = ConditionalFetcher(
+        client=None,
+        user_agent="t",
+        max_content_bytes=1024,
+        retry_backoff_base=1.0,
+        min_retry_delay=200.0,
+    )
+    assert fetcher._retry_delay(_Response("1"), 0) is None
+    assert fetcher._retry_delay(_Response(None), 0) is None
+
+
 # -- D-009 / D-010 레이트 제한 ----------------------------------------------
 
 

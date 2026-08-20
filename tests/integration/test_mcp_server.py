@@ -378,3 +378,41 @@ async def test_export_robust_links_names_the_url_the_caller_cited(
             "get_timemap", {"document_id": fetched.structured_content["document_id"]}
         )
         assert f'<{base_url}/moved>; rel="original"' in timemap.structured_content["body"]
+
+
+async def test_fetch_document_describes_the_facts_it_returns(mcp_server):
+    """우리 소비자는 사람이 아니라 에이전트다 (D-281).
+
+    `coverage`·`notes`·`raw_changed`·`redirect`는 "우리가 무엇을 모르는가"의
+    고지인데, 그 값을 읽을 에이전트에게 도구 설명문이 한 마디도 하지 않았다.
+    설명문에 없는 필드는 없는 것과 같다 — 에이전트는 스키마를 읽고 쓴다.
+    """
+    async with Client(mcp_server) as client:
+        result = await client.list_tools()
+    (tool,) = [t for t in result.tools if t.name == "fetch_document"]
+    text = tool.description or ""
+    for field in ("coverage", "notes", "raw_changed", "redirect"):
+        assert field in text, f"{field}를 설명문이 말하지 않는다"
+
+
+async def test_attention_items_disclose_a_saturated_occurrence_count(
+    fixture_server, mcp_server
+):
+    """D-279: 8에서 멈춘 세기를 정수로만 내보내면 "정확히 8회"로 읽힌다."""
+    base_url, state = fixture_server
+    repeated = "이 문장은 문서 안에서 여러 번 되풀이되는 문장이며 그 사실이 중요하다."
+    state.html = article_html().replace(
+        "</article>", "".join(f"<p>{repeated}</p>" for _ in range(40)) + "</article>"
+    )
+    async with Client(mcp_server) as client:
+        await client.call_tool("fetch_document", {"url": f"{base_url}/article"})
+        cited = await client.call_tool(
+            "cite", {"document_id": f"{base_url}/article", "quote": repeated}
+        )
+        state.status_override = 404
+        report = await client.call_tool(
+            "verify_citations", {"anchor_ids": [cited.structured_content["anchor_id"]]}
+        )
+    (item,) = report.structured_content["attention"]
+    assert item["occurrences"] == 8
+    assert item["occurrences_capped"] is True

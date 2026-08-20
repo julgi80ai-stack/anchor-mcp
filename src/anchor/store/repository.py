@@ -16,7 +16,7 @@ import zstandard
 from anchor.errors import DocumentNotFound, StorageError, VersionNotFound
 from anchor.models import AnchorRecord, Coverage, Document, Version, uuid7
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 ZSTD_LEVEL = 6
 
 
@@ -184,6 +184,7 @@ MIGRATION_FILES: dict[int, str] = {
     8: "migrations/0008_version_coverage.sql",
     9: "migrations/0009_anchor_cited_url.sql",
     10: "migrations/0010_reclaimable_versions.sql",
+    11: "migrations/0011_version_observed_raw.sql",
 }
 
 
@@ -268,6 +269,24 @@ _VERSION_IS_UNREFERENCED = """
 # 이 검증 행보다 **더 최근의** 검증이 같은 앵커에 있는가. 앵커당 최신 1건은
 # 나이와 무관하게 남기므로(D-084가 읽는 사실이다), 프루닝은 이 조건이 참인
 # 행만 지운다. gc와 같은 규율로 **삭제 시점에 다시 확인**한다.
+#
+# **이 재확인은 현재 코드에서 도달 불가다** (D-255). 그래서 회귀선을 여기
+# 직접 걸 수 없고, 대신 도달 불가를 성립시키는 전제에 걸어 두었다
+# (`test_pruning_keeps_the_newest_verification_even_when_one_lands_mid_flight`,
+# `test_no_path_other_than_pruning_deletes_verification_rows`). 근거:
+#
+#   선정 시점에 참이던 이 조건이 삭제 시점에 거짓이 되려면, 그 사이에 이
+#   앵커의 **더 최근 검증이 하나도 남지 않아야** 한다. 검증 행이 사라지는
+#   경로는 둘뿐이다 — (1) 이 프루닝, (2) `anchors` 삭제의 CASCADE. (1)은
+#   앵커당 최신 1건을 결코 뽑지 않으므로 그 한 행은 언제나 남는다. (2)는
+#   그 앵커의 행 전체를 함께 지우므로 이 DELETE가 맞출 행 자체가 없어진다
+#   (그리고 `anchors`를 지우는 문장은 코드에 없다: `merge_document`는 앵커를
+#   target으로 **옮긴 뒤** documents 행을 지운다). 검증 행이 **늘어나는**
+#   것은 순위를 올릴 뿐 내리지 못한다.
+#
+# 그럼에도 남겨 둔다: 지우는 것은 되돌릴 수 없고, 위 전제 중 하나라도
+# 바뀌는 순간(검증 행을 지우는 새 경로, 앵커 삭제 API) 이 조건은 곧바로
+# 도달 가능해진다. 그때 이 주석이 거짓이 되면 위 두 시험이 먼저 빨개진다.
 _VERIFICATION_IS_SUPERSEDED = """
     EXISTS (
       SELECT 1 FROM verifications later
@@ -937,14 +956,15 @@ class Repository:
             self._connection.execute(
                 """INSERT INTO versions
                    (id, document_id, text_hash, raw_hash, pipeline_version, captured_at,
-                    last_observed_at, last_observed_seq, byte_size, char_count,
+                    last_observed_at, last_observed_seq, last_observed_raw_hash,
+                    byte_size, char_count,
                     content_blob, http_status, source, source_uri,
                     coverage_basis, coverage_prose_chars, coverage_captured_chars,
                     coverage_dropped)
                    VALUES (?, ?, ?, ?, ?, ?, ?,
                            (SELECT COALESCE(MAX(last_observed_seq), 0) + 1 FROM versions
                             WHERE document_id = ?),
-                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(document_id, text_hash, source) DO NOTHING""",
                 (
                     version_id,
@@ -955,6 +975,8 @@ class Repository:
                     captured_at,
                     captured_at,
                     document_id,
+                    # 만든 순간의 관측 바이트는 만든 바이트다 (D-274).
+                    raw_hash,
                     byte_size,
                     len(normalized_text),
                     blob,
@@ -979,24 +1001,23 @@ class Repository:
                 )
         return self._to_version(row)
 
-    def update_version_coverage(self, version_id: str, coverage: Coverage) -> None:
-        """다시 관측한 판본의 포착 범위를 갱신한다 (D-239).
+    def observe_raw_hash(self, version_id: str, raw_hash: str) -> None:
+        """이 판본을 **방금 관측했을 때** 원본이 준 바이트를 기록한다 (D-274).
 
-        본문이 같아도(`unchanged`) 원본 HTML은 달라질 수 있다 — 정정 고지가
-        새로 붙으면 산문 총량이 늘고 포착률이 떨어진다. 그 값은 **지금**의
-        사실이므로 최신 관측으로 덮는다. `captured_at`과 달리 이 열은
-        Memento의 좌표가 아니라 관측의 성질이다 (`last_observed_at`과 같은
-        갈래). 재지 못한 관측(304·캐시 히트)은 여기 오지 않는다 — 모르는
-        것으로 아는 것을 지우지 않는다.
+        `raw_hash` 열은 건드리지 않는다 — 그것은 이 본문이 어느 바이트에서
+        나왔는가라는 출처 사실이고 `renormalized` 판정이 읽는 값이다. 여기
+        기록하는 것은 관측의 성질이며(`last_observed_at`과 같은 갈래),
+        `raw_changed`가 **직전 관측 대비**로 답할 수 있게 하는 유일한 좌표다.
+
+        원본 바이트를 실제로 받은 경로에서만 부른다 — 304·캐시 히트는 바이트를
+        받지 않았으므로 여기 오지 않는다(모르는 것으로 아는 것을 덮지 않는다).
         """
-        if coverage.basis == "unknown":
-            return
-        with self._connection:
-            self._connection.execute(
-                """UPDATE versions SET coverage_basis = ?, coverage_prose_chars = ?,
-                       coverage_captured_chars = ?, coverage_dropped = ?
-                   WHERE id = ?""",
-                (*_coverage_columns(coverage), version_id),
+        with self._connection as connection:
+            connection.execute(
+                """UPDATE versions SET last_observed_raw_hash = ?
+                   WHERE id = ? AND (last_observed_raw_hash IS NULL
+                                     OR last_observed_raw_hash != ?)""",
+                (raw_hash, version_id, raw_hash),
             )
 
     def get_version_text(self, version_id: str) -> str:
@@ -1557,6 +1578,7 @@ class Repository:
             captured_at=row["captured_at"],
             last_observed_at=row["last_observed_at"],
             last_observed_seq=row["last_observed_seq"],
+            last_observed_raw_hash=row["last_observed_raw_hash"],
             byte_size=row["byte_size"],
             char_count=row["char_count"],
             http_status=row["http_status"],

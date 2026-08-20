@@ -30,6 +30,17 @@ def _is_unavailable(status: int) -> bool:
     return status >= 500
 
 
+def _is_successful(status: int) -> bool:
+    """RFC 9309 §2.3.1.1 "Successful access" — **2xx 전부**다 (D-282).
+
+    `status == 200`만 성공으로 보면, 변환 프록시가 `203`으로 내려준 robots.txt가
+    "규칙 없음"이 되어 **사이트 소유자의 규칙을 통째로 무시**한다. 4xx를
+    "제한 없음"으로 읽는 것(§2.3.1.3)은 규약이지만 2xx를 그렇게 읽는 것은
+    규약 위반이고, 우리 쪽에서는 정체성 위반이다.
+    """
+    return 200 <= status < 300
+
+
 @dataclass(frozen=True)
 class RobotsVerdict:
     allowed: bool
@@ -139,7 +150,7 @@ class RobotsGate:
                     truncated = False
                 content = b"".join(chunks)
                 status = response.status_code
-                if status == 200:
+                if _is_successful(status):
                     # 선언된 charset을 존중한다. utf-8 하드코딩은 UTF-16 문서를
                     # 전부 U+FFFD로 만들어 규칙이 통째로 사라진다 (D-190).
                     encoding = response.charset_encoding or "utf-8"
@@ -176,7 +187,7 @@ class RobotsGate:
         )
         if cached is not None and age_seconds(cached.fetched_at) <= ttl:
             return (
-                (cached.body if cached.fetch_status == 200 else None),
+                (cached.body if _is_successful(cached.fetch_status) else None),
                 0,
                 _is_unavailable(cached.fetch_status),
             )
@@ -202,4 +213,4 @@ class RobotsGate:
         # 5xx는 짧게만 캐시한다 — 일시 장애로 하루 동안 막히면 안 된다.
         self._repository.set_robots(origin, body, status, utcnow_iso())
         # RFC 9309 §2.3.1.3: 4xx는 "제한 없음"으로 취급한다.
-        return (body if status == 200 else None), received, _is_unavailable(status)
+        return (body if _is_successful(status) else None), received, _is_unavailable(status)

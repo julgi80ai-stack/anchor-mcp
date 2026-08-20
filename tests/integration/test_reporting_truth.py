@@ -472,3 +472,85 @@ def test_stale_warning_does_not_degenerate_when_max_age_is_zero(tmp_path, fixtur
         )
         stale = anchor.cite(f"{base}/article", QUOTE + " 조사되었다.")
     assert any("오래" in warning for warning in stale.warnings), stale.warnings
+
+
+# -- D-274: `raw_changed`는 무엇과 비교한 사실인가 ---------------------------
+
+
+def test_raw_change_is_measured_against_the_previous_observation(tmp_path, fixture_server):
+    """축: 바이트가 바뀐 관측 / 바뀌지 않은 재관측 / 다시 바뀐 관측.
+
+    한 발현(첫 변경)만 재현하면 결함이 살아남는다 — 문제는 **그 다음
+    관측들**이다. 판본 행의 `raw_hash`는 그 본문을 만든 바이트의 좌표라
+    갱신되지 않으므로, 비교 상대를 그것으로 두면 바이트가 한 번 달라진
+    뒤에는 **바이트가 전혀 변하지 않은 재확인에서도** 영원히 참이 된다.
+    D-242의 사각지대 문장이 그 위에 얹혀 매번 반복되면 신호가 노이즈에 죽는다.
+    """
+    base, state = fixture_server
+    state.etag = None  # 매번 200으로 다시 받아 실제 바이트를 비교하게 한다
+    with _anchor(tmp_path) as anchor:
+        state.html = article_html(nonce="n1")
+        first = anchor.fetch(f"{base}/article")
+        state.html = article_html(nonce="n2")  # <script> 안만 다르다
+        moved = anchor.fetch(f"{base}/article", max_age=0)
+        same_again = [anchor.fetch(f"{base}/article", max_age=0) for _ in range(3)]
+        state.html = article_html(nonce="n3")
+        moved_again = anchor.fetch(f"{base}/article", max_age=0)
+
+    assert first.raw_changed is False
+    assert moved.outcome == "unchanged" and moved.raw_changed is True
+    for index, result in enumerate(same_again, start=3):
+        assert result.outcome == "unchanged"
+        assert result.raw_changed is False, (
+            f"{index}회차: 바이트가 한 글자도 변하지 않았는데 변했다고 말한다 "
+            "— 사각지대 경보가 영구히 반복된다"
+        )
+    assert moved_again.raw_changed is True, "다시 달라진 사실까지 잃으면 안 된다"
+
+
+def test_the_stored_version_keeps_the_bytes_it_was_made_from(tmp_path, fixture_server):
+    """비교 상대를 옮기더라도 판본의 `raw_hash`는 그 판본의 좌표로 남는다."""
+    base, state = fixture_server
+    state.etag = None
+    with _anchor(tmp_path) as anchor:
+        state.html = article_html(nonce="n1")
+        first = anchor.fetch(f"{base}/article")
+        origin = anchor._repository.get_version(first.version_id).raw_hash
+        state.html = article_html(nonce="n2")
+        anchor.fetch(f"{base}/article", max_age=0)
+        after = anchor._repository.get_version(first.version_id).raw_hash
+
+    assert after == origin, "판본이 어느 바이트에서 나왔는지가 덮였다"
+
+
+# -- D-279: 8에서 포화한 출현 횟수를 정수로만 내보내지 않는다 ----------------
+
+
+def _repeated_document(sentence: str, times: int) -> str:
+    return article_html().replace(
+        "</article>", "".join(f"<p>{sentence}</p>" for _ in range(times)) + "</article>"
+    )
+
+
+@pytest.mark.parametrize("times,capped", [(3, False), (40, True)])
+def test_attention_says_whether_the_occurrence_count_saturated(
+    tmp_path, fixture_server, times, capped
+):
+    """축: 상한 아래(정확한 수) / 상한 이상(포화). 한쪽만 재현하면 결함이 산다."""
+    from anchor.anchoring.selector import OCCURRENCE_COUNT_LIMIT
+
+    base, state = fixture_server
+    repeated = "이 문장은 문서 안에서 여러 번 되풀이되는 문장이며 그 사실이 중요하다."
+    state.html = _repeated_document(repeated, times)
+    with _anchor(tmp_path) as anchor:
+        anchor.fetch(f"{base}/article")
+        cited = anchor.cite(f"{base}/article", repeated)
+        state.status_override = 404  # 대조가 불가능해야 attention에 담긴다
+        report = anchor.verify(anchor_ids=[cited.anchor_id])
+
+    (item,) = report.attention
+    expected = min(times, OCCURRENCE_COUNT_LIMIT)
+    assert item.occurrences == expected
+    assert item.occurrences_capped is capped, (
+        "세기를 상한에서 멈춘 사실이 응답에 없다 — 받는 쪽은 정확한 수로 읽는다"
+    )

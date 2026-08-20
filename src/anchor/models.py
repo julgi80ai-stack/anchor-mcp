@@ -200,6 +200,10 @@ class Version:
     http_status: int
     source: str  # live | archive
     source_uri: str | None
+    # 그 마지막 관측에서 원본이 준 바이트의 해시 (v11, D-274). `raw_hash`는
+    # 이 본문을 **만든** 바이트이고 이것은 마지막으로 **본** 바이트다.
+    # `None`은 v11 이전 행이라 모른다는 뜻이다.
+    last_observed_raw_hash: str | None = None
     # 이 본문이 원본 문서의 얼마를 담고 있는가 (v8, D-239). `cite`는 어떤
     # 경우에도 네트워크에 나가지 않으므로, 저장해 두지 않으면 인용을 거는
     # 순간에 그 사실을 말할 수 없다. v8 이전 행은 basis="unknown"이다.
@@ -223,6 +227,7 @@ class AnchorRecord:
     # 출현에 묶이므로(D-047) 2 이상이면 어느 인스턴스가 "그" 인용인지 모호
     # 하다. `cite` 응답 문자열로만 두면 다른 세션에서 재검증하는 사용자는
     # 그 모호성을 알 길이 없다. `None`은 v7 이전에 만들어져 **모르는** 것이다.
+    # 세기는 `OCCURRENCE_COUNT_LIMIT`에서 멈추므로 그 값은 "그 이상"이다.
     occurrences: int | None = None
     # 이 앵커가 **인용한 URL** (v9, D-246). 생성 시점 문서의 `original_url`이다.
     # 문서를 경유해 답할 수 없는 이유는 문서가 사라질 수 있기 때문이다 —
@@ -281,6 +286,11 @@ class AttentionItem:
     # 이 인용문이 생성 시점에 원문에서 몇 번 나왔는가 (D-231). 2 이상이면
     # 앵커가 어느 인스턴스를 가리키는지 모호하다. None은 모른다는 뜻이다.
     occurrences: int | None = None
+    # 그 세기가 상한에서 멈췄는가 (D-279). 참이면 `occurrences`는 "정확히
+    # 그만큼"이 아니라 "그 이상"이다 — 50번 나오는 인용문도 8로 저장된다.
+    # CLI·`cite` 경고 문자열은 "회 이상"을 붙여 이 한정을 말해 왔지만 MCP
+    # JSON에는 그 말이 없었고, 우리 소비자는 사람이 아니라 에이전트다.
+    occurrences_capped: bool = False
     # 앵커를 만든 판본과 대조 판본의 추출 파이프라인이 다른가 (D-235).
     # 참이면 원문이 그대로여도 경보가 날 수 있다 — **판정은 바꾸지 않고**
     # 사실만 표시한다.

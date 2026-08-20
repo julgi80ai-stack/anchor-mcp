@@ -21,7 +21,11 @@ from types import TracebackType
 import httpx
 
 from anchor.anchoring import approx, matcher
-from anchor.anchoring.selector import QUALITY_SHORT, build_selector
+from anchor.anchoring.selector import (
+    OCCURRENCE_COUNT_LIMIT,
+    QUALITY_SHORT,
+    build_selector,
+)
 from anchor.config import Config, load_config
 from anchor.errors import (
     AnchorError,
@@ -32,7 +36,11 @@ from anchor.errors import (
     VersionNotFound,
 )
 from anchor.fetcher.archive import ArchiveFallback, ArchiveHit
-from anchor.fetcher.client import ConditionalFetcher, FetchResponse
+from anchor.fetcher.client import (
+    REPRESENTATION_STATUSES,
+    ConditionalFetcher,
+    FetchResponse,
+)
 from anchor.fetcher.ratelimit import HostRateLimiter
 from anchor.fetcher.robots import RobotsGate
 from anchor.fetcher.urlnorm import normalize_url
@@ -62,6 +70,31 @@ from anchor.normalize.coverage import (
 )
 from anchor.normalize.hashing import hash_bytes, hash_text
 from anchor.store.repository import Repository
+
+def _occurrences_capped(occurrences: int | None) -> bool:
+    """세기가 상한에서 멈췄는가 (D-279).
+
+    `occurrences == LIMIT`은 "정확히 그만큼"이 아니라 "그 이상"이다. 값만
+    내보내면 받는 쪽은 정확한 수로 읽는다 — 우리 소비자는 사람이 아니라
+    에이전트이고, 에이전트는 스키마에 있는 것만 안다.
+    """
+    return occurrences is not None and occurrences >= OCCURRENCE_COUNT_LIMIT
+
+
+# 표현을 담고 오는 응답의 목록은 페처가 안다 (`REPRESENTATION_STATUSES`).
+# 203을 실패로 처리하면 본문 바이트를 다 받아 회계에 계상한 뒤 버리고
+# `error` 한 행을 쓰게 되고, 404·410이 아니므로 `verify`는 그 문서를 **영구히
+# UNREACHABLE**로 본다 — 변환 프록시 뒤의 사용자는 자기 인용을 영영 재검증하지
+# 못한다. 상태코드는 그대로 `versions.http_status`에 남으므로 "변형된 표현"
+# 이라는 사실은 잃지 않는다 (D-282).
+#
+# 상태코드만으로는 사실을 흐리는 실패에 붙이는 한 마디 (D-282). `202`는
+# "서버가 아직 그 표현을 주지 않았다"이지 오류가 아니다 — `error` 버킷의
+# 다른 행들과 같은 문장으로 보이면 사용자가 사이트가 죽은 것으로 읽는다.
+_STATUS_EXPLANATION = {
+    202: " Accepted (the server has not produced a representation yet — "
+    "서버가 요청을 접수만 했고 아직 표현을 주지 않았습니다)",
+}
 
 _STATUS_BY_HTTP = {402: "paywalled", 403: "forbidden", 404: "gone", 410: "gone"}
 _DOCUMENT_STATUSES = ("live", "gone", "forbidden", "paywalled")
@@ -386,6 +419,10 @@ class Anchor:
             max_content_bytes=self._config.max_content_bytes,
             retry_backoff_base=self._config.retry_backoff_base,
             max_redirects=self._config.max_redirects,
+            # 재시도도 그 호스트로 나가는 요청이다 — 우리가 스스로 약속한
+            # 간격보다 촘촘히 두드리지 않는다 (D-275). 레이트 제한은 홉
+            # 단위로만 걸려 재시도 홉이 통째로 빠져 있었다.
+            min_retry_delay=1.0 / self._config.rate_limit_rps,
         )
         self._robots = RobotsGate(
             self._repository,
@@ -607,8 +644,8 @@ class Anchor:
                 redirect=_observed_redirect(norm_url, response),
             )
 
-        if response.status == 200:
-            return self._ingest_200(
+        if response.status in REPRESENTATION_STATUSES:
+            return self._ingest_representation(
                 norm_url, document, response, traffic.bytes_down, started, include_content
             )
 
@@ -639,7 +676,7 @@ class Anchor:
         # 문서가 아직 없어도 실패는 회계에 남긴다 (D-014) — 기록은
         # `_fetch_locked`의 한 곳에서 한다 (D-130·D-133).
         raise FetchFailed(
-            f"HTTP {response.status}: {norm_url}"
+            f"HTTP {response.status}{_STATUS_EXPLANATION.get(response.status, '')}: {norm_url}"
             + (_ARCHIVE_TRIED_NOTE if tried_archive else ""),
             http_status=response.status,
         )
@@ -940,6 +977,7 @@ class Anchor:
                             match_score=None,
                             edit_distance=None,
                             occurrences=anchor.occurrences,
+                            occurrences_capped=_occurrences_capped(anchor.occurrences),
                         )
                     )
                 continue
@@ -1018,6 +1056,7 @@ class Anchor:
                             found_offset=result.found_offset,
                             source=latest.source,
                             occurrences=anchor.occurrences,
+                            occurrences_capped=_occurrences_capped(anchor.occurrences),
                             pipeline_changed=pipeline_moved,
                             coverage_ratio=checked_ratio,
                         )
@@ -1343,7 +1382,7 @@ class Anchor:
 
     # -- internals ---------------------------------------------------------
 
-    def _ingest_200(
+    def _ingest_representation(
         self,
         norm_url: str,
         document: Document | None,
@@ -1427,7 +1466,7 @@ class Anchor:
                 document,
                 version,
                 "created",
-                200,
+                response.status,
                 bytes_down,
                 started,
                 include_content,
@@ -1464,7 +1503,14 @@ class Anchor:
             # 유일한 저비용 단서다 — 정적 문서에서는 노이즈가 아니다(위키·
             # python docs·MDN은 재요청해도 바이트가 동일하다). **판정은
             # 그대로 unchanged다**: 사실 하나를 더할 뿐이다.
-            raw_changed = raw_hash != latest.raw_hash
+            #
+            # 비교 상대는 **직전 관측의 바이트**다 (D-274). 판본을 만든 바이트
+            # (`raw_hash`)와 비교하면, 광고 nonce 하나로 바이트가 한 번 달라진
+            # 뒤에는 바이트가 한 글자도 변하지 않은 재확인에서도 영영 참이 되어
+            # 사각지대 경고가 매번 반복된다 — 신호가 노이즈에 죽는다. v11 이전
+            # 행은 마지막 관측 바이트를 모르므로 그때만 `raw_hash`로 물러선다
+            # (관측 한 번 뒤 스스로 바로잡힌다).
+            raw_changed = raw_hash != (latest.last_observed_raw_hash or latest.raw_hash)
         elif text_hash == latest.text_hash:
             # 본문은 같지만 지금 가리키는 것은 **아카이브 판본**이다. 그대로
             # 재사용하면 살아 있는 원문의 인용에 아카이브 URI-M과 과거 날짜가
@@ -1484,11 +1530,15 @@ class Anchor:
             outcome = "changed"
             version = self._insert_or_reuse(document, response, raw_hash, text_hash, normalized, now)
 
+        # 이번에 실제로 받은 바이트를 그 판본의 **관측** 좌표로 남긴다
+        # (D-274). 새로 넣은 행은 이미 같은 값이라 쓰기가 없고, 되돌림으로
+        # 옛 판본을 재사용한 경로에서는 여기서 갱신된다.
+        self._repository.observe_raw_hash(version.id, raw_hash)
         return self._finish(
             document,
             version,
             outcome,
-            200,
+            response.status,
             bytes_down,
             started,
             include_content,
@@ -1649,20 +1699,21 @@ class Anchor:
         # "직전에 서빙되던 판본"을 이 시간축으로만 알 수 있다 (D-083).
         if outcome != "cache_hit":
             self._repository.observe_version(document.id, version.id, utcnow_iso())
-        # 이번 관측에서 실제로 잰 값이 있으면 그 판본의 기록을 갱신한다 —
-        # 본문이 같아도(`unchanged`) 원본에 정정 고지가 붙으면 포착률이
-        # 떨어지고, 그것이 지금의 사실이다 (D-239). 재지 못한 경로(캐시
-        # 히트·304)는 저장된 값을 그대로 읽어 싣는다 — 모르는 것으로 아는
-        # 것을 덮지 않는다.
-        if coverage is not None and coverage.basis != "unknown" and outcome != "cache_hit":
-            # 이미 같은 값이면 쓰지 않는다 — 정적 문서를 재확인할 때마다
-            # 같은 행에 같은 값을 다시 쓰는 것은 낭비다.
-            if coverage != version.coverage:
-                self._repository.update_version_coverage(version.id, coverage)
-        else:
-            # 재지 못한 경로(캐시 히트·304)이거나 계측이 실패했다. 그 판본에
-            # 저장된 값이 그 본문에 대해 우리가 아는 전부다 — 모르는 것으로
-            # 아는 것을 덮지 않는다.
+        # 이번 관측에서 실제로 잰 값이 있으면 **응답**이 그 값을 싣는다
+        # (D-239). 재지 못한 경로(캐시 히트·304)는 판본에 저장된 값을 읽어
+        # 싣는다 — 모르는 것으로 아는 것을 덮지 않는다.
+        #
+        # **판본 행은 갱신하지 않는다** (D-280). 판본의 커버리지는 그 판본을
+        # 만들 때 우리가 무엇을 못 봤는가이고, SPEC §7.5가 그 값을 저장하는
+        # 이유로 든 것이 바로 "원문이 사라진 뒤 이 본문을 근거로 삼는 사람이
+        # **우리가 그때 무엇을 못 봤는지**까지 알아야 하기 때문"이다. 나중
+        # 관측으로 덮으면 그 문장을 배반한다 — 실측: v1이 ratio 1.0으로
+        # 저장됐다가 원본에 `<aside>` 40개가 붙자 **같은 v1 행이 0.043**이
+        # 됐다. 재지 못한 관측(`no-prose`)이 이전 실측을 지우는 경로도 같이
+        # 닫힌다. 응답 필드는 "지금"을, 판본 행은 "그때"를 말한다 —
+        # `captured_at`/`last_observed_at`(v6), `raw_hash`/
+        # `last_observed_raw_hash`(v11)와 같은 규칙이다.
+        if coverage is None or coverage.basis == "unknown" or outcome == "cache_hit":
             coverage = version.coverage
         # 본문을 **기록 전에** 꺼낸다. gc가 방금 그 버전을 지우는 창에서
         # 여기가 `DocumentNotFound`를 던지면, 성공 1행을 남긴 채 실패 경로의

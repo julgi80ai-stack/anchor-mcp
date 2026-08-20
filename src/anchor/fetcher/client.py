@@ -32,6 +32,15 @@ RETRYABLE_STATUSES = frozenset({429})
 # 초대이고, 그 말을 무시하는 것도 정직한 클라이언트가 아니다 — 해석 가능한
 # 값이 실렸을 때만 재시도한다(값이 없거나 못 읽으면 초대가 아니다).
 INVITED_RETRY_STATUSES = frozenset({403})
+# 요청한 리소스의 **표현**을 담고 오는 응답 (RFC 9110 §15.3, D-282). 200만이
+# 아니다 — `203 Non-Authoritative Information`의 페이로드는 원 서버의 200
+# 응답을 변환 프록시가 변형한 표현 그 자체이며 캐시 가능하다(§15.3.4).
+# 회사 게이트웨이·통신사 압축 프록시·일부 CDN 미들박스 뒤에서는 그것이 그
+# 문서의 평범한 응답이다.
+#
+# 201·202·204·206은 여기 없다. 그 본문은 요청한 리소스가 아니다 — 생성 결과·
+# 처리 상태 모니터·본문 없음·요청하지도 않은 부분 바이트다.
+REPRESENTATION_STATUSES = frozenset({200, 203})
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 # 301·308만 "영구히 옮겼다"이다. 302·307은 지금만 다른 곳을 보라는 뜻이고,
 # 303은 다른 리소스를 보라는 뜻이라 정본 URL을 바꿀 근거가 아니다 (D-102).
@@ -67,12 +76,18 @@ class ConditionalFetcher:
         max_content_bytes: int,
         retry_backoff_base: float = 1.0,
         max_redirects: int = 5,
+        min_retry_delay: float = 0.0,
     ) -> None:
         self._client = client
         self._user_agent = user_agent
         self._max_content_bytes = max_content_bytes
         self._retry_backoff_base = retry_backoff_base
         self._max_redirects = max_redirects
+        # 재시도 사이의 **바닥** (D-275). 호출자가 그 호스트에 스스로 약속한
+        # 간격(1/rate_limit_rps)을 넘겨준다 — 재시도도 그 호스트로 나가는
+        # 요청이기 때문이다. 레이트 제한은 홉 단위로만 걸려서 재시도 홉은
+        # 통째로 빠져 있었다.
+        self._min_retry_delay = min_retry_delay
 
     def get(
         self,
@@ -210,23 +225,36 @@ class ConditionalFetcher:
         )
 
     def _retry_delay(self, response: FetchResponse, attempt: int) -> float | None:
-        """다음 재시도까지의 대기. 서버가 상한보다 긴 대기를 지정하면 None."""
+        """다음 재시도까지의 대기. 대기가 상한을 넘으면 None(재시도 없음).
+
+        규칙은 둘이다.
+
+        1. **서버가 지정했으면 그 값을 쓴다** (D-238, SPEC §10 "실패는 빨라야
+           한다"). `max(requested, backoff)`는 더 정중한 방향이지만 서버의
+           지시를 덮어쓰는 것이고, 그만큼 호출자를 붙잡는다 — `Retry-After: 1`을
+           준 서버에게 우리 백오프(1·2·4초)가 총 7초를 기다리게 했다.
+        2. **바닥은 있다** (D-275). 1만 남기면 `Retry-After: 0`·음수·과거
+           HTTP-date에서 대기가 0이 되어, 429를 준 서버를 6ms 안에 네 번
+           두드린다(실측). 그건 지시를 존중한 것이 아니라 지시를 핑계로 예절을
+           버린 것이다. 바닥은 우리가 그 호스트에 이미 약속한 간격
+           (`1/rate_limit_rps`)과 백오프 기준값 중 큰 쪽이다 — 새 상수를
+           만들지 않는 이유는 예절의 크기를 정하는 곳이 이미 설정에 있기
+           때문이다.
+
+        바닥이 상한을 넘으면 재시도하지 않는다. 몰래 일찍 두드리는 것보다
+        "확인 불가"가 정직하다 (SPEC §5.4).
+        """
+        floor = max(self._retry_backoff_base, self._min_retry_delay)
         backoff = self._retry_backoff_base * (2**attempt)
         raw = response.retry_after
-        if raw is None:
-            return backoff
-        requested = _parse_retry_after(raw)
-        if requested is None:  # 해석 불가 — 우리 백오프로 물러선다
-            return backoff
-        if requested > MAX_RETRY_AFTER_SECONDS:
+        requested = None if raw is None else _parse_retry_after(raw)
+        # 해석 불가(None)는 지정이 없는 것과 같다 — 우리 백오프로 물러선다.
+        delay = backoff if requested is None else requested
+        delay = max(delay, floor)
+        if delay > MAX_RETRY_AFTER_SECONDS:
             # 지정 시각보다 일찍 두드리지 않는다 (SPEC §5.4 "항상 존중").
             return None
-        # 서버가 지정했으면 **그 값을 쓴다** (D-238, SPEC §10 "실패는 빨라야
-        # 한다"). `max(requested, backoff)`는 더 정중한 방향이지만 서버의
-        # 지시를 덮어쓰는 것이고, 그만큼 호출자를 붙잡는다 — `Retry-After: 1`을
-        # 준 서버에게 우리 백오프(1·2·4초)가 총 7초를 기다리게 했다. 지시가
-        # 있으면 그것이 답이고, 없을 때만 우리가 물러설 시간을 정한다.
-        return requested
+        return delay
 
     def _request(
         self,

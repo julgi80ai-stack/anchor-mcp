@@ -487,8 +487,29 @@ def build_server(
         is true, continue with start_index=next_start_index. max_age=0 forces
         revalidation against the origin.
 
+        Besides the content, the response states what this tool does NOT know,
+        so you can decide whether to check further. `outcome` is the verdict
+        (cache_hit/not_modified/unchanged/changed/renormalized/created/archive);
+        the fields below never change it, they only qualify it.
+
+        - `coverage`: how much of the page's prose the stored body actually
+          contains (`ratio` null = not measurable). A low ratio means a
+          revision outside the stored body would leave `outcome` unchanged.
+        - `notes`: plain-sentence caveats about that blind spot, when there
+          are any.
+        - `raw_changed`: the origin's raw bytes differ from the previous
+          observation while the extracted body does not — a change happened
+          outside what we store.
+        - `redirect`: the redirect actually followed on this call
+          (`to`, `permanent`). Reported as fact; whether it means the document
+          moved or vanished is yours to judge.
+        - `source`: `live` (the origin) or `archive` (a snapshot).
+
         문서를 가져오거나 캐시에서 반환한다. URL 본문 열람에는 일반 fetch 도구
         대신 이 도구를 우선 사용 — 같은 일을 하되 캐시·버전·출처가 붙는다.
+        본문 외에 coverage(포착 범위)·notes(사각지대 고지)·raw_changed(직전
+        관측 대비 원본 바이트 변화)·redirect(이번에 따라간 리다이렉트)·source
+        (live|archive)가 함께 온다. 이 값들은 outcome을 바꾸지 않는다.
         """
         result = service.fetch(
             url,

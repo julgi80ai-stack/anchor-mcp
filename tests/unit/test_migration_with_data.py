@@ -806,22 +806,22 @@ def test_new_versions_carry_their_coverage_after_migration(tmp_path):
         repository.close()
 
 
-def test_reobservation_fills_in_coverage_for_an_old_version(tmp_path):
-    """v8 이전 판본도 다시 관측되면 그때의 사실을 얻는다 (모름 → 잰 값)."""
-    from anchor.models import Coverage
+def test_an_old_versions_coverage_is_never_invented_after_the_fact(tmp_path):
+    """v8 이전 판본의 커버리지는 **모른다**로 남는다 (D-280).
 
+    판본 행의 커버리지는 그 판본을 만들 때 우리가 무엇을 못 봤는가이고
+    (SPEC §7.5), v8 이전 행에는 그런 값이 존재한 적이 없다. 나중 관측으로
+    채우면 오늘 잰 값이 그때의 사실로 둔갑한다 — v7의 `occurrences`, v8의
+    `coverage`를 NULL로 둔 것과 같은 판단이다. 지금의 값은 응답이 말한다.
+    """
     path = tmp_path / "cov-fill.db"
     build_old_db(path, 7)
     repository = Repository(path)
     try:
         assert repository.get_version("ver-1").coverage.basis == "unknown"
-        repository.update_version_coverage(
-            "ver-1", Coverage(basis="html-prose", prose_chars=200, captured_chars=180)
+        assert not hasattr(repository, "update_version_coverage"), (
+            "판본의 커버리지를 나중에 덮는 경로가 되살아났다"
         )
-        assert repository.get_version("ver-1").coverage.ratio == 0.9
-        # 모르는 것으로 아는 것을 덮지 않는다 (304·캐시 히트 경로).
-        repository.update_version_coverage("ver-1", Coverage.unknown())
-        assert repository.get_version("ver-1").coverage.ratio == 0.9
     finally:
         repository.close()
 

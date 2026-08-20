@@ -119,8 +119,11 @@ def test_raw_change_and_narrow_coverage_are_reported_together(tmp_path, fixture_
 def test_coverage_is_remeasured_when_the_invisible_region_grows(tmp_path, fixture_server):
     """정정 고지가 새로 붙으면 산문 총량이 늘고 포착률이 떨어진다.
 
-    본문이 같다고(`unchanged`) 옛 측정값을 그대로 두면 **지금의 사실**을
-    말하지 못한다.
+    본문이 같다고(`unchanged`) 옛 측정값을 그대로 응답에 실으면 **지금의
+    사실**을 말하지 못한다. 다만 그 값을 **판본 행에 덮어쓰는 것**은 다른
+    일이다 — 판본의 커버리지는 그 판본을 만들 때 우리가 무엇을 못 봤는가이고
+    (SPEC §7.5), 원문이 사라진 뒤 그 본문을 근거로 삼는 사람이 읽는 값이다.
+    응답 필드는 "지금"을, 판본 행은 "그때"를 말한다 (D-280).
     """
     base, state = fixture_server
     state.html = SPEC_HTML
@@ -141,9 +144,45 @@ def test_coverage_is_remeasured_when_the_invisible_region_grows(tmp_path, fixtur
     assert again.version_id == first.version_id, "같은 본문이므로 같은 판본이다"
     assert again.coverage.prose_chars > first.coverage.prose_chars
     assert again.coverage.ratio < first.coverage.ratio
-    assert stored.coverage.prose_chars == again.coverage.prose_chars, (
-        "다시 잰 값이 판본에 남지 않았다 — 다음 cite는 옛 사실을 말한다"
+    assert stored.coverage.prose_chars == first.coverage.prose_chars, (
+        "판본 행의 커버리지가 나중 관측으로 덮였다 — 그 판본을 만들 때 무엇을 "
+        "못 봤는지가 사라진다 (SPEC §7.5)"
     )
+    assert stored.coverage.ratio == first.coverage.ratio
+
+
+def test_a_later_unmeasurable_page_does_not_erase_an_earlier_measurement(
+    tmp_path, fixture_server
+):
+    """같은 본문을 다시 봤는데 이번엔 비율을 말할 수 없다 — 그때도 판본의
+    옛 실측을 지우지 않는다 (D-280).
+
+    원본에 거대한 링크 색인이 붙으면 산문 단위가 가시 텍스트의 한 줌이 되어
+    계측이 `no-prose`로 물러선다(D-273). 그 "모른다"가 판본에 저장된
+    `html-prose` 실측을 덮으면, **모르는 것으로 아는 것을 덮는** 것이 된다.
+    """
+    base, state = fixture_server
+    state.html = SPEC_HTML
+    index = "".join(
+        f'<li><a href="/doc/{n}">Reference document number {n} in the archive index</a></li>'
+        for n in range(700)
+    )
+    with _anchor(tmp_path) as anchor:
+        first = anchor.fetch(f"{base}/article")
+        state.html = SPEC_HTML.replace(
+            "</body>", f'<div id="comments"><ul>{index}</ul></div></body>'
+        )
+        state.etag = '"v2"'
+        again = anchor.fetch(f"{base}/article", max_age=0)
+        stored, _ = anchor.get_version(again.version_id)
+
+    assert first.coverage.basis == "html-prose"
+    assert again.outcome == "unchanged" and again.version_id == first.version_id
+    assert again.coverage.basis == "no-prose", "이 픽스처가 열려던 축이 열리지 않았다"
+    assert stored.coverage.basis == "html-prose", (
+        "재지 못한 관측이 판본의 실측을 덮었다"
+    )
+    assert stored.coverage.captured_chars == first.coverage.captured_chars
 
 
 # -- 거짓 경보 검증 ----------------------------------------------------------

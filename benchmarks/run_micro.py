@@ -390,12 +390,14 @@ def bench_failure_is_fast() -> None:
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     state = {"status": 404, "robots": "User-agent: *\nAllow: /\n", "retry_after": None}
+    hits: list[tuple[str, float]] = []  # (경로, 시각) — 정중함 게이트가 읽는다
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):  # 벤치 출력에 섞이지 않게
             pass
 
         def do_GET(self):
+            hits.append((self.path, time.perf_counter()))
             if self.path == "/robots.txt":
                 body = state["robots"].encode()
                 self.send_response(200)
@@ -422,6 +424,12 @@ def bench_failure_is_fast() -> None:
         ("403(맨몸)", 403, "User-agent: *\nAllow: /\n", None, 500.0),
         ("robots 거부", 200, "User-agent: *\nDisallow: /\n", None, 500.0),
         ("429(Retry-After:1)", 429, "User-agent: *\nAllow: /\n", "1", 4000.0),
+        # 403은 `Retry-After`가 실렸을 때만 재시도한다 (D-237). 맨몸 403과
+        # 갈리는 유일한 축인데 아무도 재지 않았다 — SPEC §10과 코드가 어긋난
+        # 자리가 정확히 여기였다 (D-276).
+        ("403(Retry-After:1)", 403, "User-agent: *\nAllow: /\n", "1", 4000.0),
+        # 상한(60s)보다 긴 대기를 지정하면 재시도하지 않고 즉시 보고한다.
+        ("403(Retry-After:3600)", 403, "User-agent: *\nAllow: /\n", "3600", 500.0),
     ]
     try:
         with tempfile.TemporaryDirectory() as tmp:
@@ -446,6 +454,34 @@ def bench_failure_is_fast() -> None:
                     elapsed < ceiling and outcome != "성공(예상 밖)",
                     f"{elapsed:.0f}ms ({outcome}) — 재시도가 되살아나면 이 종류만 빨개진다",
                 )
+        # --- 정중함: 지정값이 0이어도 바닥은 지킨다 (D-275) ---
+        #
+        # 위 게이트는 전부 "얼마나 빠른가"만 잰다. 그 반대편 — **얼마나
+        # 정중한가** — 은 아무도 재지 않았고, 그래서 D-238이 `Retry-After`를
+        # 존중하게 고치며 백오프 바닥을 없앤 것이 6ms 안에 4연발로 나타났는데도
+        # 게이트가 침묵했다. 상한만 재는 게이트는 이 방향의 회귀를 원리적으로
+        # 못 잡는다 — 더 빨라지는 것이 곧 위반이기 때문이다.
+        state.update(status=429, robots="User-agent: *\nAllow: /\n", retry_after="0")
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "polite.db"
+            hits.clear()
+            with Anchor(db_path=db, config=Config(db_path=db)) as ax:
+                try:
+                    ax.fetch(f"{base}/polite", max_age=0)
+                except AnchorError:
+                    pass
+            times = [t for path, t in hits if path == "/polite"]
+            gaps = [b - a for a, b in zip(times, times[1:])]
+            # 기본 설정의 하한 = max(retry_backoff_base 1.0, 1/rate_limit_rps 1.0)
+            floor = 1.0
+            worst = min(gaps) if gaps else float("inf")
+            gate(
+                f"정중함: Retry-After:0에도 재시도 간격 >= {floor:.1f}s",
+                len(gaps) >= 1 and worst >= floor * 0.9,
+                f"요청 {len(times)}회, 최소 간격 "
+                f"{'-' if not gaps else format(worst, '.2f') + 's'} — 바닥이 사라지면 "
+                f"6ms 안에 4연발이 된다 (D-275)",
+            )
     finally:
         server.shutdown()
         server.server_close()
