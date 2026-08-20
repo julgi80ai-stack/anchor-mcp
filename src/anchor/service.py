@@ -187,6 +187,37 @@ def _may_consult_archive(error: AnchorError) -> bool:
     return False
 
 
+def _verify_cutoff(
+    *, time_budget_ms: float | None, older_than: str | float | None
+) -> str | None:
+    """`verify`의 인자 검증 — 세 호출 경로(MCP·CLI·라이브러리)의 공통 길목.
+
+    `verify` 본문에서 갈라냈다 (2026-08-20). 이 구간은 누산기를 하나도
+    건드리지 않는 유일한 곳이라, 옮겨도 상태 결합이 인자로 새지 않는다.
+    반환값은 `older_than`을 해석한 컷오프(없으면 None).
+    """
+    if time_budget_ms is not None and time_budget_ms <= 0:
+        # 0·음수 예산은 매칭 3·4단계를 조용히 건너뛰어 실제 개정 인용문을
+        # ALTERED 대신 UNRESOLVED로 만든다 (D-122). 설정 파일 경로는
+        # ConfigError로 거부하면서 런타임 인자만 통과시키면 세 경로 중
+        # 하나만 검증하는 셈이다 — 공통 길목인 여기서 거부한다.
+        raise ValueError(
+            f"time_budget_ms must be positive — 앵커당 시간 예산은 양수여야 "
+            f"합니다: {time_budget_ms}"
+        )
+    if isinstance(older_than, str):
+        older_than = parse_iso_duration(older_than)
+    if older_than is not None and not (math.isfinite(older_than) and older_than >= 0):
+        # `nan`·`inf`·음수는 `iso_ago`의 `timedelta`에서 ValueError/
+        # OverflowError로 죽는다. CLI만 막으면(D-149) MCP 도구와 라이브러리
+        # 직접 호출이 그대로 남는다 — 공통 길목인 여기서도 거부한다.
+        raise ValueError(
+            f"older_than must be a finite, non-negative number of seconds — "
+            f"older_than은 유한한 0 이상의 초여야 합니다: {older_than!r}"
+        )
+    return iso_ago(older_than) if older_than is not None else None
+
+
 class Anchor:
     """SQLite 연결과 HTTP 세션을 함께 관리하는 컨텍스트 매니저 (SPEC §8)."""
 
@@ -623,28 +654,7 @@ class Anchor:
         하나의 예산 + 진행 중인 한 문서의 페치 전체(robots·홉·재시도·폴백,
         D-206)다 (D-197).
         """
-        if time_budget_ms is not None and time_budget_ms <= 0:
-            # 0·음수 예산은 매칭 3·4단계를 조용히 건너뛰어 실제 개정 인용문을
-            # ALTERED 대신 UNRESOLVED로 만든다 (D-122). 설정 파일 경로는
-            # ConfigError로 거부하면서 런타임 인자만 통과시키면 세 경로 중
-            # 하나만 검증하는 셈이다 — 공통 길목인 여기서 거부한다.
-            raise ValueError(
-                f"time_budget_ms must be positive — 앵커당 시간 예산은 양수여야 "
-                f"합니다: {time_budget_ms}"
-            )
-        if isinstance(older_than, str):
-            older_than = parse_iso_duration(older_than)
-        if older_than is not None and not (
-            math.isfinite(older_than) and older_than >= 0
-        ):
-            # `nan`·`inf`·음수는 `iso_ago`의 `timedelta`에서 ValueError/
-            # OverflowError로 죽는다. CLI만 막으면(D-149) MCP 도구와 라이브러리
-            # 직접 호출이 그대로 남는다 — 공통 길목인 여기서도 거부한다.
-            raise ValueError(
-                f"older_than must be a finite, non-negative number of seconds — "
-                f"older_than은 유한한 0 이상의 초여야 합니다: {older_than!r}"
-            )
-        cutoff = iso_ago(older_than) if older_than is not None else None
+        cutoff = _verify_cutoff(time_budget_ms=time_budget_ms, older_than=older_than)
         anchors = self._repository.select_anchors(
             anchor_ids=anchor_ids, document_ids=document_ids, not_verified_since=cutoff
         )
