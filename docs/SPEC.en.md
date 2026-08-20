@@ -1,6 +1,6 @@
 # Anchor — A Provenance-Tracking Fetch Cache (EN)
 
-**Technical Specification v1.14 (as of completion)**
+**Technical Specification v1.15 (as of completion)**
 
 > **Translation note**: This is an English translation of `SPEC.md`. The Korean
 > version is normative — if the two ever disagree, the Korean text governs.
@@ -18,33 +18,35 @@
 | Governing specs | RFC 7089, RFC 9110 (conditional requests), W3C Web Annotation Data Model, MCP 2026-07-28 |
 | Design rationale | `docs/decisions/0001` (prior art and positioning), `docs/decisions/0002` (licensing and reuse) |
 
-> **v1.13 → v1.14 change summary**: **A citation's identity is now separated from the fetch target** (§5.1, §7.8, §7.9). A single `documents.url` served as both "where it was cited from" and "where to go for the body now", so on a post-deletion 301 (soft-404) or a 301 into a single-use session-token URL, **exports emitted a URL the user never cited** (2 of 46 documents in the live store). `url` stays the fetch target, preserving the conditional-request savings, while identity is carried by `original_url` and the new `anchors.cited_url` (schema **v9**). **soft-404 is not decided in code** — every ordinary revision also changes the hash, so it cannot be told apart, and a similarity threshold is itself a judgment. Instead the redirect is disclosed as a fact (§7.1 `redirect`). See §15 for the full list.
+> **v1.14 → v1.15 change summary**: **§4.2's retention policy was unreachable, and that is now fixed.** Verification history pinned versions through a foreign key, so the moment a version was re-verified — the workflow this tool recommends — it was pinned forever and `anchor gc` **deleted nothing, ever**; the specification described something it did not do. What pinned versions mixed **contract with history**: cited versions and the currently served version are contracts, but a verification log is an observation. `verifications.checked_version` becomes `ON DELETE SET NULL`, keeping the record while releasing the pin. Retention periods are now written down (verification history: **the latest entry per anchor plus 90 days**). Three indexes linearize gc's quadratic scan (27.8 s at 18,000 versions, during which other queries stalled for 28.7 s). See §15 for the full list.
 >
-> **v1.12 → v1.13 change summary**: **The tool now states how much of a document it saw before speaking** (new §5.5). A revision outside what the extractor accepts as body text comes back `unchanged` and `INTACT` — only **1.4% of RFC 9110's prose is captured**, and in that state flipping 50 normative requirements left the verdict identical — yet the tool neither measured nor mentioned this. **The silence was fixed, not the extraction.** The metric is the **prose-block capture ratio**, not character retention (retention also catches ordinary news articles and was rejected — 9 false positives out of 22 real pages versus 2 true ones). Schema **v8** stores the measurement so `cite` (which never goes to the network) and `verify` (on the 304 path) can speak too. See §16 for the full list.
+> **v1.13 → v1.14 change summary**: **A citation's identity is now separated from the fetch target** (§5.1, §7.8, §7.9). A single `documents.url` served as both "where it was cited from" and "where to go for the body now", so on a post-deletion 301 (soft-404) or a 301 into a single-use session-token URL, **exports emitted a URL the user never cited** (2 of 46 documents in the live store). `url` stays the fetch target, preserving the conditional-request savings, while identity is carried by `original_url` and the new `anchors.cited_url` (schema **v9**). **soft-404 is not decided in code** — every ordinary revision also changes the hash, so it cannot be told apart, and a similarity threshold is itself a judgment. Instead the redirect is disclosed as a fact (§7.1 `redirect`). See §16 for the full list.
 >
-> **v1.11 → v1.12 change summary**: **"Failure must be fast" is now a written contract** (§10). This tool sits in an AI agent's tool-call path, so our latency is passed straight to the person waiting — a correct answer that arrives late goes unused, and an integrity layer nobody uses protects nothing. Measurement is the basis: every failure path is already within 20 ms (404 at 6 ms, 500 at 4 ms, robots denial at 15 ms, DNS failure at 10 ms, connection refused at 4 ms) while **the two that retry spend 7 seconds** (403 at 7,010 ms; 429 with `Retry-After: 1` at 7,015 ms). 403 is removed from the retry set (agreeing with §5.4's "a 403 is reported as a 403"), and 429 waits only as long as the server asked. Response time per failure kind is gated. See §17 for the full list.
+> **v1.12 → v1.13 change summary**: **The tool now states how much of a document it saw before speaking** (new §5.5). A revision outside what the extractor accepts as body text comes back `unchanged` and `INTACT` — only **1.4% of RFC 9110's prose is captured**, and in that state flipping 50 normative requirements left the verdict identical — yet the tool neither measured nor mentioned this. **The silence was fixed, not the extraction.** The metric is the **prose-block capture ratio**, not character retention (retention also catches ordinary news articles and was rejected — 9 false positives out of 22 real pages versus 2 true ones). Schema **v8** stores the measurement so `cite` (which never goes to the network) and `verify` (on the 304 path) can speak too. See §17 for the full list.
 >
-> **v1.10 → v1.11 change summary**: **The measurement instrument the specification requires has been restored.** §10 names the CI matrix as the way portability (Linux/macOS/Windows) is measured, and that matrix had been red for some time (46 failures on each of three Windows jobs, intermittent ones on macOS). Every cause was a platform dependency in the tests and fixtures, not the product. §12 gains a **portability layer** and two rules — a test that measures time never judges a mechanism by a wall-clock ceiling, and a portability test that skips a condition must leave another that verifies the same contract on that platform. Opening the axis exposed one product defect, fixed alongside (a failure while *asking about* a path is a domain exception too — §8). See §18 for the full list.
+> **v1.11 → v1.12 change summary**: **"Failure must be fast" is now a written contract** (§10). This tool sits in an AI agent's tool-call path, so our latency is passed straight to the person waiting — a correct answer that arrives late goes unused, and an integrity layer nobody uses protects nothing. Measurement is the basis: every failure path is already within 20 ms (404 at 6 ms, 500 at 4 ms, robots denial at 15 ms, DNS failure at 10 ms, connection refused at 4 ms) while **the two that retry spend 7 seconds** (403 at 7,010 ms; 429 with `Retry-After: 1` at 7,015 ms). 403 is removed from the retry set (agreeing with §5.4's "a 403 is reported as a 403"), and 429 waits only as long as the server asked. Response time per failure kind is gated. See §18 for the full list.
 >
-> **v1.9 → v1.10 change summary**: Reflects stage 6 (accounting, configuration, CLI — clusters 9–11) of the remediation. Two accounting invariants were established — one user call = one `fetch_log` row whose outcome is the final result, and every byte actually downloaded is counted even when the call ends in failure (§7.7). `bytes_saved_estimate` was corrected to measure against the currently served body, `disk_bytes` was defined as actual occupancy after WAL reclamation, and an `archive` bucket was added so the breakdown sums to the total again (§7.7, §13). The contention gate's verdict was replaced: instead of the UNRESOLVED increment over the foreground baseline it now gates **credit actually granted** (§10). Configuration opens all 26 documented keys through all three paths (TOML, environment, library) with an authoritative validation table, and unknown keys are warned about and ignored (§9). `max_document_bytes` is measured in UTF-8 bytes as its name says, and k is clamped below the quote length (§6.2). Every CLI command carries a traceback-free error surface, and store-open failures are domain-typed as `StorageError` (§8). The per-URL lock became genuinely per-URL rather than an approximation, and a `close()` contract was established (§10, §8). The archive CDX `statuscode` is re-checked and the attribution, reason, and recovery of robots records were corrected (§5.2); `cite` and `verify_citations` disclose provenance (§7.2, §7.3); `tasks/list` gained cursor pagination (§7.0); and the forms of version references and diff arguments were settled (§7.4). See §19 for the full list.
+> **v1.10 → v1.11 change summary**: **The measurement instrument the specification requires has been restored.** §10 names the CI matrix as the way portability (Linux/macOS/Windows) is measured, and that matrix had been red for some time (46 failures on each of three Windows jobs, intermittent ones on macOS). Every cause was a platform dependency in the tests and fixtures, not the product. §12 gains a **portability layer** and two rules — a test that measures time never judges a mechanism by a wall-clock ceiling, and a portability test that skips a condition must leave another that verifies the same contract on that platform. Opening the axis exposed one product defect, fixed alongside (a failure while *asking about* a path is a domain exception too — §8). See §19 for the full list.
 >
-> **v1.8 → v1.9 change summary**: Reflects stage 5 of the remediation (Tasks and the server, cluster 8). A Task **ttl policy** was established (a call that omits ttl gets a server default of 30 minutes; zero and negative values are rejected; oversized requests are clamped to 24 hours with the actual value reported; the ttl key is never omitted from any response — §7.0); the retention period is counted from creation as the protocol defines, but is updated at termination to the actual retention so a long-running task's result does not vanish the moment it finishes (§7.0); server shutdown now **actually guarantees worker termination** before the store is closed (§7.0); and cancellation reacts at anchor granularity (§7.0). The cache-hit gate was strengthened to hold **while background matching is running**, with a loaded scenario added to the benchmark (§10). `list_documents`' status and `verify_citations`' time_budget_ms are validated once for all three call paths (§7.6, §7.3). See §20 for the full list.
+> **v1.9 → v1.10 change summary**: Reflects stage 6 (accounting, configuration, CLI — clusters 9–11) of the remediation. Two accounting invariants were established — one user call = one `fetch_log` row whose outcome is the final result, and every byte actually downloaded is counted even when the call ends in failure (§7.7). `bytes_saved_estimate` was corrected to measure against the currently served body, `disk_bytes` was defined as actual occupancy after WAL reclamation, and an `archive` bucket was added so the breakdown sums to the total again (§7.7, §13). The contention gate's verdict was replaced: instead of the UNRESOLVED increment over the foreground baseline it now gates **credit actually granted** (§10). Configuration opens all 26 documented keys through all three paths (TOML, environment, library) with an authoritative validation table, and unknown keys are warned about and ignored (§9). `max_document_bytes` is measured in UTF-8 bytes as its name says, and k is clamped below the quote length (§6.2). Every CLI command carries a traceback-free error surface, and store-open failures are domain-typed as `StorageError` (§8). The per-URL lock became genuinely per-URL rather than an approximation, and a `close()` contract was established (§10, §8). The archive CDX `statuscode` is re-checked and the attribution, reason, and recovery of robots records were corrected (§5.2); `cite` and `verify_citations` disclose provenance (§7.2, §7.3); `tasks/list` gained cursor pagination (§7.0); and the forms of version references and diff arguments were settled (§7.4). See §20 for the full list.
 >
-> **v1.7 → v1.8 change summary**: Reflects stage 4 of the remediation (the honest-client contract, cluster 2) plus the audit of that stage's own remediation code. robots.txt redirects are now followed, a leading BOM is ignored, and the size cap, timeout, and declared charset apply to robots.txt as well (§5.2, §5.4); a blank User-Agent is rejected at configuration time and validation moved to `Config` construction over the final merged state (§5.4, §9); the URI-M an aggregator points at also gets a robots verdict (§5.2). **So that redirects cannot corrupt a document's identity**, permanent and temporary redirects are distinguished, rules were established for alias retirement, document merging (earliest-capture keeper, observation renumbering, accounting transfer), registered-document moves, and idempotent creation (§5.1); validators ride only on the canonical hop, compared in normalized form, and `https → http` downgrades and unfollowable `Location` values are refused (§5.4, §5.2). URL normalization gained RFC 3986 equivalence and input validation with a domain exception (§5.1). See §21 for the full list.
+> **v1.8 → v1.9 change summary**: Reflects stage 5 of the remediation (Tasks and the server, cluster 8). A Task **ttl policy** was established (a call that omits ttl gets a server default of 30 minutes; zero and negative values are rejected; oversized requests are clamped to 24 hours with the actual value reported; the ttl key is never omitted from any response — §7.0); the retention period is counted from creation as the protocol defines, but is updated at termination to the actual retention so a long-running task's result does not vanish the moment it finishes (§7.0); server shutdown now **actually guarantees worker termination** before the store is closed (§7.0); and cancellation reacts at anchor granularity (§7.0). The cache-hit gate was strengthened to hold **while background matching is running**, with a loaded scenario added to the benchmark (§10). `list_documents`' status and `verify_citations`' time_budget_ms are validated once for all three call paths (§7.6, §7.3). See §21 for the full list.
 >
-> **v1.6 → v1.7 change summary**: Reflects stage 3 of the remediation (judgment accuracy, cluster 5). The approximate search now takes **every position within distance k** as a candidate per core (§6.2); when stage 3 hits its candidate cap it defers to stage 4 instead of committing (§6.2); stage 4 results pass a **context-corroboration gate** so a sibling paragraph from another section is never presented as "the current form of your quote" (§6.2); the writing-system factor on the edit-distance cap became a continuous function (§6.2); the budget check period is measured in DP cells (§6.2); and truncation now holds `ALTERED` back too (§6.3). The effective document-length limit of stage 4 was made explicit (§6.2, §10). **The schema was raised to v6 to introduce the observation timeline** (§4.1) and `latest~N` was defined on that axis (§7.4). See §22 for the full list.
+> **v1.7 → v1.8 change summary**: Reflects stage 4 of the remediation (the honest-client contract, cluster 2) plus the audit of that stage's own remediation code. robots.txt redirects are now followed, a leading BOM is ignored, and the size cap, timeout, and declared charset apply to robots.txt as well (§5.2, §5.4); a blank User-Agent is rejected at configuration time and validation moved to `Config` construction over the final merged state (§5.4, §9); the URI-M an aggregator points at also gets a robots verdict (§5.2). **So that redirects cannot corrupt a document's identity**, permanent and temporary redirects are distinguished, rules were established for alias retirement, document merging (earliest-capture keeper, observation renumbering, accounting transfer), registered-document moves, and idempotent creation (§5.1); validators ride only on the canonical hop, compared in normalized form, and `https → http` downgrades and unfollowable `Location` values are refused (§5.4, §5.2). URL normalization gained RFC 3986 equivalence and input validation with a domain exception (§5.1). See §22 for the full list.
 >
-> **v1.5 → v1.6 change summary**: Reflects stage 1 (normalization) of the remediation for the 101 defects demonstrated in the second parallel audit. **The normalization rules were redesigned and NORM_VERSION was raised to 3** (§5.3) — lines and blocks are recognized first, and rules that delete anything apply only inside prose lines. Quote lookup was made tolerant of block separators (§6.1), the golden corpus is now required to actually exercise the normalization rules (§12), and migrating an older database *that contains rows* was made an explicit test target (§12). See §23 for the full list.
+> **v1.6 → v1.7 change summary**: Reflects stage 3 of the remediation (judgment accuracy, cluster 5). The approximate search now takes **every position within distance k** as a candidate per core (§6.2); when stage 3 hits its candidate cap it defers to stage 4 instead of committing (§6.2); stage 4 results pass a **context-corroboration gate** so a sibling paragraph from another section is never presented as "the current form of your quote" (§6.2); the writing-system factor on the edit-distance cap became a continuous function (§6.2); the budget check period is measured in DP cells (§6.2); and truncation now holds `ALTERED` back too (§6.3). The effective document-length limit of stage 4 was made explicit (§6.2, §10). **The schema was raised to v6 to introduce the observation timeline** (§4.1) and `latest~N` was defined on that axis (§7.4). See §23 for the full list.
 >
-> **v1.4 → v1.5 change summary**: Reflects the remediation of 52 defects demonstrated in a parallel audit. The schema was raised to v5 to introduce a "current live version" pointer, redirect aliases, and per-source version uniqueness (§4.1); the normalization rules were revised so that quotes copied off the screen actually resolve (§5.3, NORM_VERSION 2); robots is now evaluated at every redirect hop and a robots 5xx became a denial (§5.2); anchor thresholds and the edit-distance ratio now account for the writing system (§6.1, §6.2); the budget is enforced inside the matching stages (§6.2); and the global lock was narrowed to per-URL scope (§10). See §24 for the full list.
+> **v1.5 → v1.6 change summary**: Reflects stage 1 (normalization) of the remediation for the 101 defects demonstrated in the second parallel audit. **The normalization rules were redesigned and NORM_VERSION was raised to 3** (§5.3) — lines and blocks are recognized first, and rules that delete anything apply only inside prose lines. Quote lookup was made tolerant of block separators (§6.1), the golden corpus is now required to actually exercise the normalization rules (§12), and migrating an older database *that contains rows* was made an explicit test target (§12). See §24 for the full list.
 >
-> **v1.3 → v1.4 change summary**: Cleanup at the v1.0 release point. Configuration loading was settled on the standard library and `pydantic-settings` was removed from the dependencies (§9, §11); the conditions for optionally running the anchor benchmark were made explicit (§12); and the development-dependency policy was delegated to the ledger (§11.2). See §25 for the full list.
+> **v1.4 → v1.5 change summary**: Reflects the remediation of 52 defects demonstrated in a parallel audit. The schema was raised to v5 to introduce a "current live version" pointer, redirect aliases, and per-source version uniqueness (§4.1); the normalization rules were revised so that quotes copied off the screen actually resolve (§5.3, NORM_VERSION 2); robots is now evaluated at every redirect hop and a robots 5xx became a denial (§5.2); anchor thresholds and the edit-distance ratio now account for the writing system (§6.1, §6.2); the budget is enforced inside the matching stages (§6.2); and the global lock was narrowed to per-URL scope (§10). See §25 for the full list.
 >
-> **v1.2 → v1.3 change summary**: Reflects what was settled during the v0.1–v0.4 implementation. The `versions.pipeline_version` column and the `renormalized` and `unchanged` outcomes were formalized (§4.1, §5.2, §5.3, §7.1); the tracking-parameter removal list in URL normalization was narrowed (§5.1); robots cache persistence and the request order were clarified (§4.1, §5.2); `mcp-server-fetch`-compatible chunked reading was added (§7.1); and the SDK constraint on the Tasks wire format was recorded (§7.0). See §26 for the full list.
+> **v1.3 → v1.4 change summary**: Cleanup at the v1.0 release point. Configuration loading was settled on the standard library and `pydantic-settings` was removed from the dependencies (§9, §11); the conditions for optionally running the anchor benchmark were made explicit (§12); and the development-dependency policy was delegated to the ledger (§11.2). See §26 for the full list.
 >
-> **v1.1 → v1.2 change summary**: Reflects the results of the license audit. The `trafilatura>=1.8.0` lower bound was made mandatory (§11); MemGator operating guidance was made explicit (§5.2, §9); the provenance policy for test fixtures was split into three grades (§12); and a license gate was added to CI (§12). See §27 for the full list.
+> **v1.2 → v1.3 change summary**: Reflects what was settled during the v0.1–v0.4 implementation. The `versions.pipeline_version` column and the `renormalized` and `unchanged` outcomes were formalized (§4.1, §5.2, §5.3, §7.1); the tracking-parameter removal list in URL normalization was narrowed (§5.1); robots cache persistence and the request order were clarified (§4.1, §5.2); `mcp-server-fetch`-compatible chunked reading was added (§7.1); and the SDK constraint on the Tasks wire format was recorded (§7.0). See §27 for the full list.
 >
-> **v1.0 → v1.1 change summary**: Reflects the results of the prior-art survey by introducing Memento compatibility (§2, §5.2, §7.8), replacing the anchor matching algorithm with a performance-safe approach (§6.2), expanding the verification states to seven (§6.3), and adopting the Tasks extension of the latest MCP spec (§7.0). See §28 for the full list.
+> **v1.1 → v1.2 change summary**: Reflects the results of the license audit. The `trafilatura>=1.8.0` lower bound was made mandatory (§11); MemGator operating guidance was made explicit (§5.2, §9); the provenance policy for test fixtures was split into three grades (§12); and a license gate was added to CI (§12). See §28 for the full list.
+>
+> **v1.0 → v1.1 change summary**: Reflects the results of the prior-art survey by introducing Memento compatibility (§2, §5.2, §7.8), replacing the anchor matching algorithm with a performance-safe approach (§6.2), expanding the verification states to seven (§6.3), and adopting the Tasks extension of the latest MCP spec (§7.0). See §29 for the full list.
 
 ---
 
@@ -268,7 +270,7 @@ CREATE TABLE anchors (
 CREATE TABLE verifications (
     id                TEXT PRIMARY KEY,
     anchor_id         TEXT NOT NULL REFERENCES anchors(id) ON DELETE CASCADE,
-    checked_version   TEXT REFERENCES versions(id),
+    checked_version   TEXT REFERENCES versions(id) ON DELETE SET NULL,  -- NULL = that version was reclaimed (v10)
     checked_at        TEXT NOT NULL,
     state             TEXT NOT NULL,           -- see §6.3 (7 states)
     match_score       REAL,                    -- 0.0 ~ 1.0
@@ -309,7 +311,12 @@ CREATE INDEX idx_fetchlog_time     ON fetch_log(requested_at DESC);
 ### 4.2 Storage Policy
 
 - Version blobs are compressed with zstd level 6. For a typical article, 25–30% of the original.
-- Default retention policy: the most recent 20 versions per document plus every version referenced by an anchor. **A version an anchor points at is never deleted.** Versions referenced by verification history (`verifications.checked_version`) are also retained for the audit trail — retaining more broadly than the minimum retention rule is the safe direction (v1.3).
+- Default retention policy: the most recent `keep_versions` (default 20) per document, plus **cited versions** (`anchors.created_version`) and the **currently served version** (`documents.current_version`). **A version an anchor points at is never deleted** — that is the storage-layer form of §1.2's promise to bring back the source as it was when you cited it.
+- **Verification history does not pin versions** (v1.15). v1.3 also retained versions referenced by `verifications.checked_version`, reasoning that "retaining more broadly is the safe direction". That is what made **this entire section unreachable**: re-verification is the workflow this tool recommends, so the moment a version is checked it is pinned forever and `anchor gc` **deletes nothing, ever** (measured: 41 versions re-verified each round → `deleted_versions: 0`; also 0 on an 18,000-version store). The specification was describing something it did not do.
+  What pinned versions mixed **contract with history.** `created_version` is the source as cited and `current_version` is the body being served now — both are contracts. `checked_version` is an **observation log** ("at time T, anchor A was compared against version V"), and what we promised is restoring the source *as cited*, not archiving every version we passed through. That foreign key is therefore **`ON DELETE SET NULL`** — the observation ("when it was checked and what came back") survives; only the reference to the version seen then disappears.
+  A NULL `checked_version` means **"we do not know which version was checked"**, so that anchor falls **conservatively to "needs re-verification"** in §7.6's pending determination (D-084). We never read what we do not know as "verified".
+- **Retention periods** (v1.15): `verifications` keeps **the latest entry per anchor plus `verification_retention_days` (default 90)**. The latest is kept regardless of age — D-084's "which version was checked" depends on it. The rationale: questions like "when did this first turn `ALTERED`" are answered within months, and after that only the present state matters. `fetch_log` is trimmed outside `fetch_log_retention_days` (default **400** — a year, plus one window, plus leap-day slack), and **that value may never be shorter than §7.7's reporting window of 30 days** (a shorter one would have the tool truncate its own measurements — `cache_stats` would be counting a span it deleted itself), and `robots_cache` drops rows past their TTL. `document_aliases` is **not** trimmed — it is a lookup key, and dropping it breaks the cache hit for a document that has moved.
+- Deletion is **batched** — a single transaction would stall the store for its duration and break §10's concurrency isolation.
 - The `anchor gc` command cleans up orphaned versions. **`keep` must be at least 1** — zero or negative would delete even the latest content of documents with no anchors, leaving nothing but empty shells, so it is rejected (v1.5).
 
 ---
@@ -969,7 +976,7 @@ The entry point for registration with MCP clients is the console script `anchor-
 | `max_content_mb = 0.5` | Accept fractional values. Truncating to an integer makes the ceiling 0 bytes and every fetch fails |
 | `requests_per_second = 0` | Zero is not "unlimited"; it is a division by zero. Accept only positive values |
 
-All 26 documented keys are settable through **all three paths** — the TOML file, environment variables, and direct library use (`Config(...)`) — and receive the same validation (v1.10). Implementing only two of them while writing "always take precedence" is a mismatch between specification and implementation. The table below is the authority on keys, environment variables, and allowed ranges.
+All 28 documented keys are settable through **all three paths** — the TOML file, environment variables, and direct library use (`Config(...)`) — and receive the same validation (v1.10). Implementing only two of them while writing "always take precedence" is a mismatch between specification and implementation. The table below is the authority on keys, environment variables, and allowed ranges.
 
 Values are validated **only against the final merged state** (v1.8). Validating the intermediate state after the file layer is applied means that, in a deployment where an environment variable is meant to override a bad file value, the server refuses to start at all — "always take precedence" collapses at the validation point. The validation itself runs at `Config` construction (including §5.4's UA rule), so direct library use receives the same guarantee.
 
@@ -1017,12 +1024,14 @@ max_document_bytes  = 2097152
 transport = "stdio"   # stdio | http
 ```
 
-**Keys, environment variables, allowed ranges** (v1.10 — this table is the authority; "the documented keys" means these 26):
+**Keys, environment variables, allowed ranges** (v1.10 — this table is the authority; "the documented keys" means these 28):
 
 | Key | Environment variable | Allowed range |
 |---|---|---|
 | `storage.db_path` | `ANCHOR_DB_PATH` | non-empty file path (`""` and `.` refused) |
 | `storage.keep_versions` | `ANCHOR_KEEP_VERSIONS` | 1 – 2⁶³−1 (SQLite integer range) |
+| `storage.verification_retention_days` | `ANCHOR_VERIFICATION_RETENTION_DAYS` | 1 – 2⁶³−1 (default 90). The latest entry per anchor survives regardless of age (§4.2) |
+| `storage.fetch_log_retention_days` | `ANCHOR_FETCH_LOG_RETENTION_DAYS` | **30** – 2⁶³−1 (default 400). The floor is §7.7's reporting window — anything shorter has the tool truncate its own measurements |
 | `storage.compression` | `ANCHOR_COMPRESSION` | `zstd:N`, N in 1–22 (`none` and other codecs unsupported — one storage format) |
 | `fetch.user_agent` | `ANCHOR_USER_AGENT` | RFC 9110 field-value: visible ASCII (+ inner SP/HTAB); leading/trailing whitespace, control characters, newlines, non-ASCII refused |
 | `fetch.respect_robots` | `ANCHOR_RESPECT_ROBOTS` | bool |
@@ -1123,7 +1132,7 @@ anchor-mcp/
 │   │   ├── robustlinks.py # Robust Links serialization
 │   │   └── diff.py
 │   ├── store/
-│   │   ├── schema.sql     # full schema for new DBs (currently v9)
+│   │   ├── schema.sql     # full schema for new DBs (currently v10)
 │   │   ├── migrations/    # incremental SQL. Existing DBs catch up through these
 │   │   └── repository.py  # the sole SQL access point (includes internal serialization)
 │   ├── service.py         # public facade (the Anchor class)
@@ -1276,7 +1285,19 @@ This is not a formality. There are people in this field who have held on to this
 
 ---
 
-## 15. v1.13 → v1.14 Change History
+## 15. v1.14 → v1.15 Change History
+
+**The specification described something it did not do.** This section fixes §4.2's retention policy having been made unreachable by its own foreign key. It is a round where the third question of the identity block — **can this be taken away?** — applied directly.
+
+| # | Section | Change | Underlying defect |
+|---|---|---|---|
+| 1 | **4.2** | **Verification history no longer pins versions.** `verifications.checked_version` becomes `ON DELETE SET NULL`. What is protected: cited versions, the currently served version, and the most recent `keep_versions` per document | v1.3 also retained versions referenced by verification history, reasoning that "retaining more broadly is safe" — but **re-verification is the recommended workflow**, so checking a version pinned it forever and `gc` **deleted nothing, ever** (measured: 0 on both a 41-version and an 18,000-version store). What pinned versions mixed contract (the source as cited, the body served now) with history (an observation log) |
+| 2 | **4.2** | A NULL `checked_version` means **"unknown"** — the anchor falls conservatively to "needs re-verification" in §7.6 | Reading what we do not know as "verified" would resurrect the defect D-084 fixed |
+| 3 | **4.2** | **Retention periods written down** — `verifications` keeps the latest entry per anchor plus 90 days, `fetch_log` is trimmed outside `fetch_log_retention_days` (default 400; floor = the 30-day reporting window), `robots_cache` drops expired rows. `document_aliases` is not trimmed (it is a lookup key) | No table had a deletion path, so the store grew monotonically (24.7 KB per version blob; 60 documents re-verified daily ≈ 270 MB/year with nothing reclaimed) |
+| 4 | **4.2, 10** | Deletion is **batched** | A single transaction stalls the store for its duration and breaks §10's concurrency isolation — undoing what the indexes fixed |
+| 5 | **10** | Three indexes for the gc scan (`verifications.checked_version`, `anchors.created_version`, `documents.current_version`) | Each candidate row scanned three tables in full → a **quadratic curve** (1.2 s at 4,500 → 6.1 s at 9,000 → **27.8 s** at 18,000; extrapolating to 17 minutes for a year's data). Meanwhile `get_version` in the same process stalled from 0.2 ms to **28,699 ms**, about 140,000× |
+
+## 16. v1.13 → v1.14 Change History
 
 **We do not judge — not even the identity of a URL.** This section corrects a place where the rule that keeps us from interpreting what `ALTERED` means was never applied to URL sameness.
 
@@ -1288,7 +1309,7 @@ This is not a formality. There are people in this field who have held on to this
 | 4 | **4.1** | Schema **v9**: `anchors.cited_url` (the document's `original_url` at cite time; NULL = unknown). A merge pins the source's `original_url` onto anchors whose `cited_url IS NULL` **immediately before moving them** | `merge_document` keeps only the source's `url` as an alias, discards `original_url`, and deletes the row — the sole path that deletes a `documents` row. Left alone, the moved anchors **inherit the target's identity**. This does not invent a new fact; it catches the fallback value the exports use today before it disappears (D-246). (Also reconciled: the v7 `occurrences` and v8 coverage columns now appear in §4.1's SQL block) |
 | 5 | **7.1** | The response carries `redirect: {to, permanent}` — only when a redirect was traversed. **No judgment is made** | soft-404 cannot be decided in code: every ordinary revision also changes the hash, so hashes cannot tell them apart, and a similarity threshold is itself a judgment (MANIFESTO §6). Connecting the **two signals that already exist** — "a permanent redirect, and then every anchor in that document comes back `MISSING`" — is left to the caller (D-247) |
 
-## 16. v1.12 → v1.13 Change History
+## 17. v1.12 → v1.13 Change History
 
 **We say what we do not know.** This section is the remediation for the largest defect the risk audit found — the tool speaking about a document it had seen 1% of with the same confidence as any other. What was fixed is not the extraction but the **silence**.
 
@@ -1300,7 +1321,7 @@ This is not a formality. There are people in this field who have held on to this
 | 4 | **7.1** | `raw_changed` (v1.12) and coverage are reported **in combination** — a sentence that appears only when both hold | Either signal alone is weak. "The raw bytes changed and this is all we see" is the strongest indicator of a blind spot (D-242) |
 | 5 | **5.5** | PDF is `not-measurable` and a prose-less index is `no-prose` — **the ratio is never invented** | Using pypdf's own output as the denominator always yields 1.0, which is **false confidence**. A two-column PDF loses no characters, only their order (D-075). And 0% for a page with zero prose units is not a fact either (D-243) |
 
-## 17. v1.11 → v1.12 Change History
+## 18. v1.11 → v1.12 Change History
 
 **Adoptability regresses too.** This section covers what the risk audit (three teams: false INTACT / fatal and unbounded / false alarms and perceived performance) found in the batch the user classified as "small things, one pass", plus what was promoted to a contract along the way. Just as accuracy regressions are stopped by CI, latency regressions are stopped the same way.
 
@@ -1320,7 +1341,7 @@ This is not a formality. There are people in this field who have held on to this
 | 12 | **7.8** | `rel="last memento"` is **the version the origin serves now** (ordering stays on `captured_at`); the json form gains `rel` and `last_observed_at` | After a rollback A→B→A, `last` pointed at B, which is no longer served. The export layer never used the observation timeline schema v6 introduced — since RFC 7089's axis is Memento-Datetime, **the ordering stays and only the meaning of `last`** is corrected (D-236) |
 | 13 | 7.3, 8 | Provenance is marked on each CLI attention line, and the `verify_citations` description is corrected to "the live origin, or an archive snapshot" | Only the summary line carried the archive notice, so in a mixed batch there was no telling which item was compared against an archive, and the tool description said only "against the current **live** sources", hiding the possibility (D-234) |
 
-## 18. v1.10 → v1.11 Change History
+## 19. v1.10 → v1.11 Change History
 
 Restores a **measurement instrument** the specification had written down as a requirement (§10 portability → the CI matrix) but which was not actually working. The items in this section concern not the product but **the tools we measure the product with** — recording "satisfied" on an instrument that cannot measure is precisely the failure class this campaign keeps catching.
 
@@ -1332,7 +1353,7 @@ Restores a **measurement instrument** the specification had written down as a re
 | 4 | **8** | The store contract's reach now covers the **act of asking about a path** — a failure in `Path.is_dir()` itself is also a `StorageError` | Python 3.12's `is_dir()` swallows only ENOENT, ENOTDIR, EBADF, and ELOOP and **raises ENAMETOOLONG**. With an over-long `--db`, a direct library caller got a bare `OSError` outside D-138's guarantee. The CLI catches it in D-033's net and prints a sentence, so **CLI tests alone can never reveal it** — it surfaced because §8 binds both entry points to the same contract (D-225) |
 | 5 | 12 | Subprocess tests pin their I/O encoding to UTF-8 | `text=True` alone uses the **locale** encoding. Since the error messages are Korean, on a Windows runner (cp1252) the child dies with `UnicodeEncodeError` and the diagnostics the parent reads are mangled — the cause of failure becomes the helper rather than the code under test (D-226) |
 
-## 19. v1.9 → v1.10 Change History
+## 20. v1.9 → v1.10 Change History
 
 Reflects stage 6 (accounting, configuration, CLI — clusters 9–11) of the remediation for the defects demonstrated in the second parallel audit, plus what was found along the way. Most items in this section are places where **the numbers the tool reports about itself** had drifted from the truth.
 
@@ -1361,7 +1382,7 @@ Reflects stage 6 (accounting, configuration, CLI — clusters 9–11) of the rem
 | 21 | **7.7** | Invariant 2 is now honoured on the **transfer-interrupted** path as well — across all three layers (document body, robots.txt, archive lookup), bytes are spilled the moment they arrive | The preceding remediation (D-134, D-135) applied it only to the success and size-cap branches, so bytes already received were lost wholesale when the connection broke: document 152,023B→23B, robots 60,026B→0B, archive 80,000B→23B. The implementation honoured only half of the contract the specification required (D-212, D-213, D-214) |
 | 22 | **13** | The v0.1 completion criterion is actually revised to **0 body bytes** (cache_hit and direct 304) — in **both** it and §10's table | The first v1.10 revision changed only §10 while §15 claimed §13, so **the specification asserted a change it had not made**. §13's criterion stayed in contradiction with the very regression test corrected in the same flow (D-216) |
 
-## 20. v1.8 → v1.9 Change History
+## 21. v1.8 → v1.9 Change History
 
 Reflects stage 5 (Tasks and the server, cluster 8) of the remediation for the defects demonstrated in the second parallel audit. Every item in this section is a place where **what the protocol promises and what the server actually does** had drifted apart — the default call broke, shutdown lost data, or cancellation did not cancel.
 
@@ -1380,7 +1401,7 @@ Reflects stage 5 (Tasks and the server, cluster 8) of the remediation for the de
 | 11 | **10** | The credit (refund of slept time) is **capped at 15% of the budget** | An uncapped refund makes "one anchor's budget" elastic in proportion to contention: measured up to 971 ms per anchor (4.9×), service-layer p99 345/478 ms — violating the 250 ms p99 bound. The trade — verdict path-independence (D-196) bought by giving up bounded time — was written down nowhere (D-203) |
 | 12 | 10 | New **foreground-contention bench** for the matching gates: foreground validity, contention p99, and the UNRESOLVED increment over the foreground baseline | The "polite-mode gates" never opened a foreground section, making them byte-identical to the foreground run (0 sleeps across 52,800 checkpoints) — a tautology. The failure mode of D-120 ("measuring in a batch that is not the real one") recurred inside the gate itself (D-202) |
 
-## 21. v1.7 → v1.8 Change History
+## 22. v1.7 → v1.8 Change History
 
 Reflects the robots and redirect-identity portion of **stage 4 (the honest-client contract, cluster 2)** of the second parallel audit's remediation, plus the audit of that stage's own remediation code. Every item in this section is a place where **the declaration and the reality had drifted apart** — because a document said we never bypass anything, nobody checked, and so nobody noticed for a long time that ordinary configurations made the rules vanish wholesale.
 
@@ -1408,7 +1429,7 @@ Reflects the robots and redirect-identity portion of **stage 4 (the honest-clien
 | 20 | 5.2 | An unfollowable Location (`mailto:` etc.) is that document's `FetchFailed` | `httpx.InvalidURL` is not a subclass of HTTPError, so it escaped the hierarchy and killed the whole re-verification batch (D-106) |
 | 21 | **9** | Configuration is validated **only in its final state** — one construction after layering | Mid-state validation broke "environment variables always win": with a bad file value that env was deployed to override, the server refused to start (D-188) |
 
-## 22. v1.6 → v1.7 Change History
+## 23. v1.6 → v1.7 Change History
 
 Reflects **stage 3 (judgment accuracy, cluster 5)** of the remediation for the defects demonstrated in the second parallel audit (10 Opus auditors, 2026-08-18). Every item in this section belongs to the "silently wrong judgment" family — a false MISSING declares a living quote dead, and a false ALTERED presents a lookalike from another section as "the current form of your quote". The user has no way to check either.
 
@@ -1434,7 +1455,7 @@ Reflects **stage 3 (judgment accuracy, cluster 5)** of the remediation for the d
 
 Many of this section's fixes complete what an earlier fix did **only by half** (1 follows D-042, 2 and 4 follow D-044, 7 follows D-045, 6 follows D-049). The §12 lesson — one passing reproduction script is not completion — repeated itself verbatim.
 
-## 23. v1.5 → v1.6 Change History
+## 24. v1.5 → v1.6 Change History
 
 Reflects **stage 1 (normalization, cluster 1)** of the remediation for the 101 defects demonstrated in the second parallel audit (10 Opus auditors, 2026-08-18). These came out of code written during the first round of remediation, so each entry also records what was broken while fixing something else.
 
@@ -1457,7 +1478,7 @@ Reflects **stage 1 (normalization, cluster 1)** of the remediation for the 101 d
 
 ---
 
-## 24. v1.4 → v1.5 Change History
+## 25. v1.4 → v1.5 Change History
 
 Reflects the remediation of **52 defects demonstrated with reproduction scripts** in a parallel audit (10 Opus instances, 2026-08-17). They emerged in a state where all 198 existing tests passed, so each item is also a blind spot in the specification.
 
@@ -1491,7 +1512,7 @@ Reflects the remediation of **52 defects demonstrated with reproduction scripts*
 
 ---
 
-## 25. v1.3 → v1.4 Change History
+## 26. v1.3 → v1.4 Change History
 
 Cleanup at the v1.0 release (2026-08-17).
 
@@ -1504,7 +1525,7 @@ Cleanup at the v1.0 release (2026-08-17).
 
 ---
 
-## 26. v1.2 → v1.3 Change History
+## 27. v1.2 → v1.3 Change History
 
 Reflects what was settled during the v0.1–v0.4 implementation (2026-08-17). These were found with the implementation running ahead of the specification, so the grounds for each item are in the code and the tests.
 
@@ -1524,7 +1545,7 @@ Reflects what was settled during the v0.1–v0.4 implementation (2026-08-17). Th
 
 ---
 
-## 27. v1.1 → v1.2 Change History
+## 28. v1.1 → v1.2 Change History
 
 Reflects the results of the license audit (2026-08-16). All 16 unverified items were checked and reduced to zero, and in the process one substantive conflict was found.
 
@@ -1554,7 +1575,7 @@ See `THIRD-PARTY.md` for details.
 
 ---
 
-## 28. v1.0 → v1.1 Change History
+## 29. v1.0 → v1.1 Change History
 
 | # | Section | Change | Rationale |
 |---|---|---|---|

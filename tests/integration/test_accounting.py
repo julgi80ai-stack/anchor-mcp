@@ -463,20 +463,20 @@ def test_cli_stats_shows_every_bucket(tmp_path, fixture_server):
 # -- D-132: disk_bytes는 저장소의 크기다 ----------------------------------
 
 
-def _grow(anchor: Anchor, versions: int) -> str:
+def _grow(anchor: Anchor, versions: int, tag: str = "") -> str:
     document = anchor._repository.create_document(
-        url="https://example.com/big",
-        original_url="https://example.com/big",
+        url=f"https://example.com/big{tag}",
+        original_url=f"https://example.com/big{tag}",
         title=None,
         now="2026-08-01T00:00:00Z",
     )
     for index in range(versions):
         # 압축되지 않는 본문이어야 WAL이 실제로 커진다.
-        body = "".join(f"{index}-{n}-{n * index % 977} 문단 " for n in range(2000))
+        body = "".join(f"{tag}{index}-{n}-{n * index % 977} 문단 " for n in range(2000))
         anchor._repository.insert_version(
             document_id=document.id,
-            text_hash=f"b3:text-{index:04d}",
-            raw_hash=f"b3:raw-{index:04d}",
+            text_hash=f"b3:text-{tag}{index:04d}",
+            raw_hash=f"b3:raw-{tag}{index:04d}",
             pipeline_version="trafilatura/2.2.0+norm/3",
             captured_at=f"2026-08-01T{index // 60:02d}:{index % 60:02d}:00Z",
             byte_size=len(body),
@@ -536,31 +536,48 @@ def test_a_corrupt_write_ahead_log_does_not_leak_a_raw_sqlite_error(tmp_path):
     import sqlite3
 
     db = tmp_path / "store.db"
+    wal = Path(str(db) + "-wal")
     with _anchor(tmp_path) as anchor:
         # 자동 체크포인트 문턱(기본 1000쪽 ≈ 4MB)을 넘겨야 새 커넥션이
         # WAL 복구를 시도하고, 그때 비로소 헤더를 읽는다. 작은 WAL로는
         # 손상이 조용히 무시돼 이 시험이 헛돈다.
-        _grow(anchor, 120)
-        wal = Path(str(db) + "-wal")
-        (page_size,) = anchor._repository._connection.execute(
-            "PRAGMA page_size"
-        ).fetchone()
-        assert wal.stat().st_size > 1000 * page_size, (
-            f"픽스처가 복구를 요구할 만큼 WAL을 키우지 못했다 ({wal.stat().st_size:,}B)"
-        )
-        with open(wal, "r+b") as handle:
-            handle.write(b"\x00" * 64)  # 헤더 파괴 — 잘라내기와는 다른 손상이다
+        #
+        # **키우는 양을 고정값으로 적지 않는다.** 넓은 예외가 나오는지는 손상
+        # 지점이 WAL 프레임 경계의 어디에 떨어지느냐에 달렸고, 그 배치는 DB
+        # 전체 크기에 따라 움직인다 — 스키마에 인덱스 하나가 늘어난 것만으로
+        # 조용히 판별력을 잃었다(8단계-라에서 실제로 그랬다). 픽스처가 **자기
+        # 조건이 성립했음을 스스로 확인할 때까지** 키운다 (조치 절차 4).
+        caught: sqlite3.DatabaseError | None = None
+        for attempt in range(6):
+            _grow(anchor, 120, tag=f"-{attempt}")
+            (page_size,) = anchor._repository._connection.execute(
+                "PRAGMA page_size"
+            ).fetchone()
+            if wal.stat().st_size <= 1000 * page_size:
+                continue
+            # WAL을 통째로 0으로 만든다 — 헤더도, 프레임도. 앞 64바이트만
+            # 부수면 그 손상이 **아직 되쓰이지 않은 프레임**에 걸리는지가
+            # 자동 체크포인트의 진행 상태에 달려, DB 크기가 몇 KB 달라지는
+            # 것만으로 조용히 판별력을 잃는다 (8단계-라에서 실제로 그랬다).
+            size = wal.stat().st_size
+            with open(wal, "r+b") as handle:
+                handle.write(b"\x00" * size)  # 잘라내기와는 다른 손상이다
 
-        # 픽스처가 실제로 결함 조건을 만들었는지 먼저 확인한다. 여기서
-        # `OperationalError`가 나오면 이 시험은 판별력이 없다.
-        probe = sqlite3.connect(db, timeout=1.0, isolation_level=None)
-        try:
-            with pytest.raises(sqlite3.DatabaseError) as caught:
+            # 픽스처가 실제로 결함 조건을 만들었는지 확인한다. `OperationalError`
+            # 거나 아무것도 안 나오면 이 시험은 판별력이 없다.
+            probe = sqlite3.connect(db, timeout=1.0, isolation_level=None)
+            try:
                 probe.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        finally:
-            probe.close()
-        assert not isinstance(caught.value, sqlite3.OperationalError), (
-            f"픽스처가 만든 것은 좁은 예외였다: {caught.value!r}"
+            except sqlite3.DatabaseError as error:
+                caught = error
+            finally:
+                probe.close()
+            if caught is not None and not isinstance(caught, sqlite3.OperationalError):
+                break
+            caught = None
+        assert caught is not None, "픽스처가 넓은 손상을 만들지 못했다 — 시험이 헛돈다"
+        assert not isinstance(caught, sqlite3.OperationalError), (
+            f"픽스처가 만든 것은 좁은 예외였다: {caught!r}"
         )
 
         stats = anchor.cache_stats()

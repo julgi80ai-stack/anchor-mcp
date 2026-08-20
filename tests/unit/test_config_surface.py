@@ -34,6 +34,14 @@ DOCUMENTED_KEYS: dict[str, tuple[str, str]] = {
     "db_path": ("storage.db_path", "ANCHOR_DB_PATH"),
     "keep_versions": ("storage.keep_versions", "ANCHOR_KEEP_VERSIONS"),
     "compression": ("storage.compression", "ANCHOR_COMPRESSION"),
+    "verification_retention_days": (
+        "storage.verification_retention_days",
+        "ANCHOR_VERIFICATION_RETENTION_DAYS",
+    ),
+    "fetch_log_retention_days": (
+        "storage.fetch_log_retention_days",
+        "ANCHOR_FETCH_LOG_RETENTION_DAYS",
+    ),
     "user_agent": ("fetch.user_agent", "ANCHOR_USER_AGENT"),
     "respect_robots": ("fetch.respect_robots", "ANCHOR_RESPECT_ROBOTS"),
     "timeout_seconds": ("fetch.timeout_seconds", "ANCHOR_TIMEOUT_SECONDS"),
@@ -144,6 +152,10 @@ def test_env_names_match_the_documented_table():
 
 # 이전에는 TOML로도 환경변수로도 바꿀 수 없던 4개 (D-137).
 NEWLY_SETTABLE = [
+    # 8단계-라에서 열린 보존 기간 2종 (D-250). 지운 것은 되돌릴 수 없으므로
+    # 정책 숫자를 코드에 묻어 두지 않는다.
+    ("verification_retention_days", 365, 365),
+    ("fetch_log_retention_days", 45, 45),
     ("retry_backoff_base", 2.5, 2.5),
     ("robots_ttl_seconds", 3600, 3600),
     ("max_edit_distance", 32, 32),
@@ -560,3 +572,40 @@ def test_default_user_agent_carries_the_release_version():
     assert Config().user_agent == (
         f"Anchor/{__version__} (+https://github.com/julgi80ai-stack/anchor-mcp)"
     )
+
+
+# -- D-250: 보존 기간은 보고하는 창을 잘라먹지 못한다 -------------------------
+
+
+@pytest.mark.parametrize("path_kind", PATHS)
+@pytest.mark.parametrize("bad", (0, -1))
+def test_verification_retention_must_be_at_least_a_day(path_kind, bad, tmp_path, monkeypatch):
+    """0·음수는 "전부 지운다"이고, 관측 로그가 통째로 사라진다."""
+    with pytest.raises(ConfigError) as error:
+        load_via(path_kind, tmp_path, monkeypatch, "verification_retention_days", bad)
+    assert "verification_retention_days" in str(error.value)
+
+
+@pytest.mark.parametrize("path_kind", PATHS)
+@pytest.mark.parametrize("bad", (0, 29))
+def test_fetch_log_retention_may_not_be_shorter_than_the_reported_window(
+    path_kind, bad, tmp_path, monkeypatch
+):
+    """§7.7이 30일 창을 보고한다 — 그보다 짧게 지우면 도구가 자기 측정치를 깎는다."""
+    with pytest.raises(ConfigError) as error:
+        load_via(path_kind, tmp_path, monkeypatch, "fetch_log_retention_days", bad)
+    assert "fetch_log_retention_days" in str(error.value)
+
+
+@pytest.mark.parametrize("path_kind", PATHS)
+def test_fetch_log_retention_accepts_the_window_itself(path_kind, tmp_path, monkeypatch):
+    config = load_via(path_kind, tmp_path, monkeypatch, "fetch_log_retention_days", 30)
+    assert config.fetch_log_retention_days == 30
+
+
+def test_retention_defaults_are_generous_about_the_reported_window():
+    """기본값의 근거: 보고 창 30일 < 회계 보존 400일(1년 + 창 하나 + 윤일 여유)."""
+    config = Config()
+    assert config.fetch_log_retention_days == 400
+    assert config.fetch_log_retention_days > 365
+    assert config.verification_retention_days == 90

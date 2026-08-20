@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""gc 보존 규칙 (SPEC §4.2): 최근 keep개 + 앵커·검증 참조 버전은 남는다."""
+"""gc 보존 규칙 (SPEC §4.2): 최근 keep개 + **계약**이 붙잡는 버전은 남는다.
+
+보호 대상은 인용된 버전(`anchors.created_version`)과 지금 서빙되는
+버전(`documents.current_version`)이다. 검증 이력은 관측 로그이므로
+버전을 붙잡지 않는다 (D-249) — 붙잡게 두면 회수가 영원히 0건이 된다.
+"""
 
 from __future__ import annotations
 
@@ -57,7 +62,14 @@ def test_gc_deletes_only_orphans_beyond_keep(repo):
     assert len(remaining) == 21
 
 
-def test_gc_preserves_verification_referenced_versions(repo):
+def test_gc_reclaims_versions_that_only_a_verification_log_points_at(repo):
+    """검증 이력은 버전을 붙잡지 않는다 (D-249).
+
+    이 시험은 전에 반대를 단언했다("검증 이력이 참조 → 보존"). 그 규칙 때문에
+    **재검증하는 순간 그 버전이 영구 회수 불가**가 됐고, 정기적으로 verify하는
+    권장 워크플로에서 gc가 영원히 0건을 지웠다. 관측 기록은 남고 그때 본
+    버전 참조만 NULL이 된다.
+    """
     document_id, version_ids = seed_document(repo, 25)
     anchor = repo.insert_anchor(
         document_id=document_id, created_version=version_ids[24],
@@ -73,8 +85,15 @@ def test_gc_preserves_verification_referenced_versions(repo):
     deleted, _ = repo.collect_garbage_versions(keep=20)
 
     remaining = {v.id for v in repo.list_versions(document_id)}
-    assert version_ids[2] in remaining  # 검증 이력이 참조 → 보존
-    assert deleted == 4  # 0,1,3,4
+    assert version_ids[2] not in remaining, "관측 로그가 아직 버전을 붙잡는다"
+    assert deleted == 5  # 0~4 전부
+    # 인용된 버전은 그대로다 — 이것이 계약이다.
+    assert anchor.created_version in remaining
+    # "T에 검증했다·결과는 무엇"은 남는다.
+    row = repo._connection.execute(
+        "SELECT checked_at, state, checked_version FROM verifications"
+    ).fetchone()
+    assert (row[0], row[1], row[2]) == ("2026-08-02T00:00:00Z", "INTACT", None)
 
 
 def test_gc_noop_when_under_keep(repo):

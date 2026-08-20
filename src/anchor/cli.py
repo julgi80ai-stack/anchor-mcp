@@ -391,7 +391,7 @@ def gc(
     keep: Optional[int] = typer.Option(None, "--keep", help="문서당 보존할 최근 버전 수 (기본 20)"),
     db: Optional[Path] = typer.Option(None, "--db", help="SQLite 경로"),
 ) -> None:
-    """고아 버전을 정리한다. 앵커가 가리키는 버전은 절대 삭제하지 않는다."""
+    """저장소를 정리한다. **인용된 버전은 절대 삭제하지 않는다.**"""
     try:
         with Anchor(db_path=db) as anchor:
             result = anchor.collect_garbage(keep=keep)
@@ -400,7 +400,12 @@ def gc(
         raise typer.Exit(code=1)
     typer.echo(
         f"삭제 {result['deleted_versions']}개 버전, 회수 추정 {result['freed_bytes_estimate']:,} bytes"
-        f" (문서당 최근 {result['keep']}개 + 앵커·검증 참조 버전 보존)"
+        f" (문서당 최근 {result['keep']}개 + 인용된 버전 + 서빙 중인 버전 보존)"
+    )
+    typer.echo(
+        f"정리: 검증 이력 {result['pruned_verifications']}건"
+        f" (앵커당 최신 1건은 남긴다), 회계 {result['pruned_fetch_log']}건,"
+        f" robots 캐시 {result['pruned_robots_cache']}건"
     )
 
 

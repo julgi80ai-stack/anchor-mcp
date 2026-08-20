@@ -1,5 +1,5 @@
 -- SPDX-License-Identifier: Apache-2.0
--- Anchor 스키마 v9 — 신규 DB용 전체 스키마 (SPEC §4.1 + robots 캐시).
+-- Anchor 스키마 v10 — 신규 DB용 전체 스키마 (SPEC §4.1 + robots 캐시).
 -- 기존 DB는 migrations/ 아래의 증분 SQL로 따라온다.
 
 -- 논리적 문서 (Memento: Original Resource / URI-R). URL 정규화 후 유일.
@@ -109,7 +109,15 @@ CREATE TABLE anchors (
 CREATE TABLE verifications (
     id                TEXT PRIMARY KEY,
     anchor_id         TEXT NOT NULL REFERENCES anchors(id) ON DELETE CASCADE,
-    checked_version   TEXT REFERENCES versions(id),  -- GONE/UNREACHABLE이면 NULL
+    -- 이 검증이 **대조한 버전**. GONE/UNREACHABLE이면 처음부터 NULL이고,
+    -- 그 버전이 회수되면 NULL이 된다 (v10, D-249). 이 열이 버전을 붙잡으면
+    -- 재검증하는 순간 그 버전은 영구 회수 불가가 되어, 정기적으로 verify하는
+    -- 권장 워크플로에서 gc가 영원히 0건을 지운다. 우리가 약속한 것은 **인용
+    -- 당시**의 원문을 되살리는 것이지(§1.2) 지나가며 본 모든 판본의 영구
+    -- 보관이 아니다. 관측 기록("T에 검증했다·결과는 무엇")은 남고 그때 본
+    -- 버전 참조만 사라진다 — NULL은 "어느 버전을 봤는지 모른다"이므로
+    -- D-084는 보수적으로 "재검증 필요"로 읽는다.
+    checked_version   TEXT REFERENCES versions(id) ON DELETE SET NULL,
     checked_at        TEXT NOT NULL,
     state             TEXT NOT NULL,           -- SPEC §6.3의 7종
     match_score       REAL,                    -- 0.0 ~ 1.0
@@ -125,3 +133,11 @@ CREATE INDEX idx_fetchlog_time ON fetch_log(requested_at DESC);
 CREATE INDEX idx_anchors_doc   ON anchors(document_id);
 CREATE INDEX idx_verif_anchor  ON verifications(anchor_id, checked_at DESC);
 CREATE INDEX idx_aliases_document ON document_aliases(document_id);
+
+-- 버전을 붙잡는 **계약**을 후보마다 되묻는다 (v10, D-248). 없으면 gc의 후보
+-- 선정이 후보 행마다 이 표들을 전체 훑어 2차 곡선이 된다(18,000버전 27.8초
+-- 실측). `verifications(checked_version)`은 조회가 아니라 삭제를 위한 것이다 —
+-- 인덱스가 없으면 SQLite가 `ON DELETE SET NULL`을 자식 표 전체 훑기로 처리한다.
+CREATE INDEX idx_anchors_created_version   ON anchors(created_version);
+CREATE INDEX idx_documents_current_version ON documents(current_version);
+CREATE INDEX idx_verif_version             ON verifications(checked_version);

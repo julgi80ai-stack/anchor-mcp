@@ -38,6 +38,8 @@ _SQLITE_MAX_INT = 2**63 - 1
 _MAX_CONTENT_CEILING = 2**40  # 1 TiB
 # RFC 9309 §2.4: robots.txt 캐시는 24시간을 넘기지 않는다.
 _ROBOTS_TTL_CEILING = 86_400
+# `cache_stats`가 보고하는 창 (SPEC §7.7). 회계 보존 기간의 바닥이다.
+_STATS_WINDOW_DAYS = 30
 # 매처 3단계가 문맥을 표지로 쓸 때의 최소 폭. matcher._context_supports의
 # `slack = max(8, …)`과 같은 바닥이다 — 이보다 짧은 문맥은 표지가 못 된다.
 _MIN_CONTEXT_CHARS = 8
@@ -62,6 +64,19 @@ _ZSTD_MIN_LEVEL, _ZSTD_MAX_LEVEL = 1, 22
 class Config:
     db_path: Path = DEFAULT_DB_PATH
     keep_versions: int = 20
+    # 이력 보존 기간 (일). 지운 것은 되돌릴 수 없으므로 정책 숫자를 코드에
+    # 묻어 두지 않는다 — 이 저장소의 다른 정책 숫자(keep_versions·
+    # robots_ttl_seconds·default_max_age)와 같은 대우다 (D-250).
+    #
+    # 검증 이력: 앵커당 **최신 1건은 나이와 무관하게 남기고**, 그 밖은 이
+    # 기간이 지나면 정리한다. 최신 1건은 "어느 버전을 검증했는가"(D-084)가
+    # 읽는 사실이다.
+    verification_retention_days: int = 90
+    # 회계(fetch_log): §7.7이 보고하는 창은 30일이다. 창과 같게 두면 도구가
+    # 자기 측정치를 잘라먹으므로 넉넉히 둔다 — 1년(365일)에 창 하나(30일)와
+    # 윤일 여유를 더한 400일이다. 그래서 "지난 1년"을 묻는 질의가 창 하나만큼
+    # 여유를 두고 성립한다. 행은 작고(수십 바이트) 디스크 문제는 버전 blob이다.
+    fetch_log_retention_days: int = 400
     # 본문 압축 코덱과 레벨. zstd 프레임은 자기서술적이라 레벨을 바꿔도 이미
     # 저장된 버전은 그대로 읽힌다 — 마이그레이션이 필요 없다 (D-137).
     compression: str = "zstd:6"
@@ -191,6 +206,8 @@ _TOML_SCHEMA: dict[str, dict[str, tuple[str, type]]] = {
         "db_path": ("db_path", str),
         "keep_versions": ("keep_versions", int),
         "compression": ("compression", str),
+        "verification_retention_days": ("verification_retention_days", int),
+        "fetch_log_retention_days": ("fetch_log_retention_days", int),
     },
     "fetch": {
         "user_agent": ("user_agent", str),
@@ -237,6 +254,8 @@ _ENV_OVERRIDES: dict[str, tuple[str, type]] = {
     "ANCHOR_DB_PATH": ("db_path", Path),
     "ANCHOR_KEEP_VERSIONS": ("keep_versions", int),
     "ANCHOR_COMPRESSION": ("compression", str),
+    "ANCHOR_VERIFICATION_RETENTION_DAYS": ("verification_retention_days", int),
+    "ANCHOR_FETCH_LOG_RETENTION_DAYS": ("fetch_log_retention_days", int),
     "ANCHOR_USER_AGENT": ("user_agent", str),
     "ANCHOR_RESPECT_ROBOTS": ("respect_robots", bool),
     "ANCHOR_TIMEOUT_SECONDS": ("timeout_seconds", float),
@@ -446,6 +465,19 @@ def _validate(config: Config) -> None:
         (
             1 <= config.keep_versions <= _SQLITE_MAX_INT,
             f"storage.keep_versions must be between 1 and {_SQLITE_MAX_INT}",
+        ),
+        # 0·음수는 "전부 지운다"이고, 앵커당 최신 1건 규칙만 남아 관측 로그가
+        # 통째로 사라진다. 지운 것은 되돌릴 수 없다.
+        (
+            1 <= config.verification_retention_days <= _SQLITE_MAX_INT,
+            f"storage.verification_retention_days must be between 1 and {_SQLITE_MAX_INT}",
+        ),
+        # 보고하는 창(§7.7의 30일)보다 짧으면 도구가 자기 측정치를 잘라먹는다 —
+        # `cache_stats`가 스스로 지운 구간을 세게 된다.
+        (
+            _STATS_WINDOW_DAYS <= config.fetch_log_retention_days <= _SQLITE_MAX_INT,
+            f"storage.fetch_log_retention_days must be between {_STATS_WINDOW_DAYS} "
+            f"(SPEC §7.7 보고 창) and {_SQLITE_MAX_INT}",
         ),
         (config.min_quote_chars >= 1, "anchor.min_quote_chars must be >= 1"),
         (config.short_quote_chars >= 1, "anchor.short_quote_chars must be >= 1"),

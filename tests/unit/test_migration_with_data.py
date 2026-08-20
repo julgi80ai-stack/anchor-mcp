@@ -154,7 +154,7 @@ def _user_version(path: Path) -> int:
 # -- D-077: 데이터가 든 구 DB의 마이그레이션 -------------------------------
 
 
-@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6, 7, 8])
+@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6, 7, 8, 9])
 def test_migrates_old_db_that_has_rows(tmp_path, source_version):
     path = tmp_path / f"v{source_version}.db"
     build_old_db(path, source_version)
@@ -171,7 +171,7 @@ def test_migrates_old_db_that_has_rows(tmp_path, source_version):
         assert after["verifications"] == before["verifications"] == 1
 
 
-@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6, 7, 8])
+@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6, 7, 8, 9])
 def test_migration_leaves_no_dangling_references(tmp_path, source_version):
     """표를 다시 만드는 v5 이후에도 참조가 살아 있어야 한다."""
     path = tmp_path / f"fk-v{source_version}.db"
@@ -227,7 +227,7 @@ def test_migrated_db_with_rows_is_usable(tmp_path):
 # -- D-246: 인용의 정체성은 앵커에 남는다 (v9) -------------------------------
 
 
-@pytest.mark.parametrize("source_version", [2, 3, 4, 5, 6, 7, 8])
+@pytest.mark.parametrize("source_version", [2, 3, 4, 5, 6, 7, 8, 9])
 def test_pre_v9_anchors_do_not_claim_a_cited_url_they_never_recorded(
     tmp_path, source_version
 ):
@@ -257,7 +257,7 @@ def test_pre_v9_anchors_do_not_claim_a_cited_url_they_never_recorded(
 def test_a_new_anchor_after_migration_records_its_cited_url(tmp_path):
     """마이그레이션된 DB에서 **새로** 만든 앵커는 정체성을 기록한다."""
     path = tmp_path / "cited-new.db"
-    build_old_db(path, 8)
+    build_old_db(path, 9)
     repository = Repository(path)
     try:
         document = repository.get_document("doc-2")
@@ -602,7 +602,7 @@ def test_lock_contention_is_still_retried(monkeypatch):
 # -- D-083: 관측 시간축을 뒤늦게 도입할 때 -----------------------------------
 
 
-@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6, 7, 8])
+@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6, 7, 8, 9])
 def test_observation_timeline_is_seeded_for_existing_rows(tmp_path, source_version):
     """v6 이전의 행에도 **관측 순서가 있어야** 한다 (D-083).
 
@@ -702,7 +702,7 @@ def test_migration_puts_the_current_body_newest(tmp_path):
 # -- D-231: v6 → v7, 중복 출현 횟수 ------------------------------------------
 
 
-@pytest.mark.parametrize("source_version", [2, 3, 4, 5, 6, 7, 8])
+@pytest.mark.parametrize("source_version", [2, 3, 4, 5, 6, 7, 8, 9])
 def test_existing_anchors_admit_they_do_not_know_their_occurrence_count(
     tmp_path, source_version
 ):
@@ -750,7 +750,7 @@ def test_new_anchors_carry_their_occurrence_count_after_migration(tmp_path):
 # -- D-239: v7 → v8, 포착 범위 -----------------------------------------------
 
 
-@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6, 7, 8])
+@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6, 7, 8, 9])
 def test_existing_versions_admit_they_do_not_know_their_coverage(
     tmp_path, source_version
 ):
@@ -824,3 +824,94 @@ def test_reobservation_fills_in_coverage_for_an_old_version(tmp_path):
         assert repository.get_version("ver-1").coverage.ratio == 0.9
     finally:
         repository.close()
+
+
+# -- D-249/D-248: 관측 로그는 버전을 붙잡지 않는다 (v10) ----------------------
+
+
+@pytest.mark.parametrize("source_version", [2, 3, 4, 5, 6, 7, 8, 9])
+def test_migrated_verifications_release_the_version_instead_of_pinning_it(
+    tmp_path, source_version
+):
+    """v10 이후 `checked_version`은 `ON DELETE SET NULL`이다 (D-249).
+
+    행이 든 구 DB를 올린 뒤에도 그래야 한다 — SQLite는 FK를 ALTER로 못 바꾸므로
+    표를 다시 만들었고(0005와 같은 절차), 재작성이 실패하면 이 계약이 조용히
+    구버전 그대로 남는다.
+    """
+    path = tmp_path / f"setnull-v{source_version}.db"
+    build_old_db(path, source_version)
+    Repository(path).close()
+
+    connection = sqlite3.connect(path)
+    try:
+        actions = {
+            row[2]: row[6]
+            for row in connection.execute("PRAGMA foreign_key_list(verifications)").fetchall()
+        }
+        assert actions["versions"] == "SET NULL", actions
+        connection.execute("PRAGMA foreign_keys = ON")
+        # **검증 이력만이** 붙잡는 버전을 만든다. 픽스처의 ver-1은 앵커가,
+        # ver-2는 `documents.current_version`이 붙잡고 있다 — 그 둘로 재면
+        # 계약의 보호와 로그의 보호가 구분되지 않는다(축①).
+        connection.execute(
+            """INSERT INTO versions
+               (id, document_id, text_hash, raw_hash, pipeline_version, captured_at,
+                last_observed_at, last_observed_seq, byte_size, char_count,
+                content_blob, http_status, source)
+               VALUES ('ver-log', 'doc-1', 'b3:log', 'b3:rawlog',
+                       'trafilatura/2.2.0+norm/3', '2026-08-05T00:00:00Z',
+                       '2026-08-05T00:00:00Z', 9, 100, 50, X'00', 200, 'live')"""
+        )
+        connection.execute(
+            """INSERT INTO verifications
+               (id, anchor_id, checked_version, checked_at, state, match_score,
+                edit_distance, found_offset, found_text, elapsed_ms)
+               VALUES ('vrf-log', 'anc-1', 'ver-log', '2026-08-05T12:00:00Z',
+                       'INTACT', 1.0, 0, 10, NULL, 3)"""
+        )
+        connection.commit()
+
+        connection.execute("DELETE FROM versions WHERE id = 'ver-log'")
+        connection.commit()
+
+        row = connection.execute(
+            "SELECT checked_version, state, checked_at FROM verifications WHERE id = 'vrf-log'"
+        ).fetchone()
+        assert row is not None, "관측 로그 행까지 사라졌다"
+        assert row[0] is None, "버전 참조가 남아 있다"
+        assert (row[1], row[2]) == ("INTACT", "2026-08-05T12:00:00Z")
+        # 계약은 그대로 붙잡는다 — 앵커가 가리키는 ver-1은 지울 수 없다.
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("DELETE FROM versions WHERE id = 'ver-1'")
+        connection.rollback()
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6, 7, 8, 9])
+def test_migration_creates_the_indexes_that_keep_gc_linear(tmp_path, source_version):
+    """보호 여부를 되묻는 조회·삭제가 전체 훑기로 돌아가지 않아야 한다 (D-248)."""
+    path = tmp_path / f"idx-v{source_version}.db"
+    build_old_db(path, source_version)
+    Repository(path).close()
+
+    connection = sqlite3.connect(path)
+    try:
+        names = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ).fetchall()
+        }
+    finally:
+        connection.close()
+    for index in (
+        "idx_anchors_created_version",
+        "idx_documents_current_version",
+        "idx_verif_version",
+        # 재작성이 기존 인덱스를 되살렸는가 — DROP TABLE이 함께 지운다.
+        "idx_verif_anchor",
+    ):
+        assert index in names, sorted(names)

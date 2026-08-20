@@ -16,7 +16,7 @@ import zstandard
 from anchor.errors import DocumentNotFound, StorageError
 from anchor.models import AnchorRecord, Coverage, Document, Version, uuid7
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 ZSTD_LEVEL = 6
 
 
@@ -183,6 +183,7 @@ MIGRATION_FILES: dict[int, str] = {
     7: "migrations/0007_anchor_occurrences.sql",
     8: "migrations/0008_version_coverage.sql",
     9: "migrations/0009_anchor_cited_url.sql",
+    10: "migrations/0010_reclaimable_versions.sql",
 }
 
 
@@ -248,14 +249,49 @@ _DELETE_BATCH = 400
 
 # gc가 지워도 되는 버전의 조건. **조회와 삭제 양쪽에서 같은 조건을 쓴다** —
 # 삭제 시점에 다시 확인해야 그 사이에 생긴 참조를 존중할 수 있다.
+#
+# 보호 대상은 **계약**뿐이다 (D-249). 버전을 붙잡던 것에는 계약과 이력이 섞여
+# 있었다: `anchors.created_version`은 §1.2가 약속한 인용 당시 원문이고,
+# `documents.current_version`은 지금 서빙되는 본문이다. `verifications
+# .checked_version`은 "T에 앵커 A를 버전 V와 대조했다"는 **관측 로그**이고,
+# 그것이 앞의 둘과 같은 무게로 버전을 붙잡는 바람에 재검증하는 순간 그 버전이
+# 영구 회수 불가가 됐다 — 정기적으로 verify하는 권장 워크플로에서 gc가 영원히
+# 0건을 지웠다. 관측 로그는 `ON DELETE SET NULL`로 참조만 놓는다.
 _VERSION_IS_UNREFERENCED = """
     NOT EXISTS (SELECT 1 FROM anchors a WHERE a.created_version = {ref})
-    AND NOT EXISTS (SELECT 1 FROM verifications f WHERE f.checked_version = {ref})
     -- 원문이 **지금 서빙하는** 본문은 캡처 시각 최대값이 아닐 수 있다
     -- (되돌림·아카이브). 보호하지 않으면 되돌림 문서 하나가 저장소 전체의
     -- gc를 마비시킨다 (D-080).
     AND NOT EXISTS (SELECT 1 FROM documents d WHERE d.current_version = {ref})
 """
+
+# 이 검증 행보다 **더 최근의** 검증이 같은 앵커에 있는가. 앵커당 최신 1건은
+# 나이와 무관하게 남기므로(D-084가 읽는 사실이다), 프루닝은 이 조건이 참인
+# 행만 지운다. gc와 같은 규율로 **삭제 시점에 다시 확인**한다.
+_VERIFICATION_IS_SUPERSEDED = """
+    EXISTS (
+      SELECT 1 FROM verifications later
+      WHERE later.anchor_id = verifications.anchor_id
+        AND (later.checked_at > verifications.checked_at
+             OR (later.checked_at = verifications.checked_at
+                 AND later.id > verifications.id))
+    )
+"""
+
+# 회수 후보 선정. `EXPLAIN QUERY PLAN`으로 계획을 검사할 수 있게 모듈 상수로 둔다 —
+# 테스트가 **코드가 실제로 실행하는 문장**을 봐야 계획 회귀를 잡는다.
+_RECLAIMABLE_VERSIONS_SQL = f"""
+    SELECT id, size FROM (
+      SELECT id, LENGTH(content_blob) AS size,
+             ROW_NUMBER() OVER (
+               PARTITION BY document_id ORDER BY captured_at DESC, id DESC
+             ) AS rank_in_document
+      FROM versions
+    ) ranked
+    WHERE rank_in_document > ?
+      AND {_VERSION_IS_UNREFERENCED.format(ref="ranked.id")}
+"""
+
 
 
 def _enable_wal(connection: sqlite3.Connection) -> None:
@@ -994,34 +1030,31 @@ class Repository:
     # -- gc ----------------------------------------------------------------
 
     def collect_garbage_versions(self, *, keep: int = 20) -> tuple[int, int]:
-        """문서당 최근 keep개를 넘는 고아 버전을 삭제한다 (SPEC §4.2).
-
-        앵커가 가리키는 버전은 절대 삭제하지 않는다. 검증 이력이 참조하는
-        버전도 FK 무결성과 감사 추적을 위해 보존한다 (스펙의 최소 보존
-        규칙보다 넓게 남기는 것은 안전한 방향이다).
+        """버전만 회수한다 (SPEC §4.2). 공간 회수까지 한 번에 한다.
 
         반환: (삭제된 버전 수, 회수된 blob 바이트 추정치)
         """
-        # 대상 선정은 **락 밖에서** 한다. 이 조회는 문서당 버전 수에 제곱이라
-        # (16,000 버전에서 20초 실측), 트랜잭션 안에 두면 그 시간만큼 쓰기 락을
-        # 붙잡아 MCP 서버의 모든 쓰기가 멈춘다 — SPEC §10 동시성 격리 위반.
+        deleted, freed = self._delete_reclaimable_versions(keep=keep)
+        self._vacuum_if_fragmented(deleted=deleted)
+        return deleted, freed
+
+    def _delete_reclaimable_versions(self, *, keep: int) -> tuple[int, int]:
+        """문서당 최근 keep개를 넘는 **계약 밖** 버전을 삭제한다 (SPEC §4.2).
+
+        보호되는 것은 인용된 버전(`anchors.created_version`)과 지금 서빙되는
+        버전(`documents.current_version`), 그리고 문서당 최근 keep개다. 검증
+        이력은 더 이상 버전을 붙잡지 않는다 — 그것은 계약이 아니라 관측
+        로그이고, 붙잡게 두면 회수가 영원히 0건이 된다 (D-249).
+        """
+        # 대상 선정은 **락 밖에서** 한다. 트랜잭션 안에 두면 그 시간만큼 쓰기
+        # 락을 붙잡아 MCP 서버의 모든 쓰기가 멈춘다 — SPEC §10 동시성 격리 위반.
         # 순위는 **윈도 함수**로 매긴다. 문서별 상관 서브쿼리는 버전 수에 제곱이라
         # (8,000 버전 한 문서에서 3.4초, 16,000에서 20초 실측) 그 시간만큼 저장소가
-        # 붙잡혀 다른 도구가 전부 멈춘다.
-        rows = self._connection.execute(
-            f"""SELECT id, size FROM (
-                  SELECT id, LENGTH(content_blob) AS size,
-                         ROW_NUMBER() OVER (
-                           PARTITION BY document_id ORDER BY captured_at DESC, id DESC
-                         ) AS rank_in_document
-                  FROM versions
-                ) ranked
-                WHERE rank_in_document > ?
-                  AND {_VERSION_IS_UNREFERENCED.format(ref="ranked.id")}""",
-            (keep,),
-        ).fetchall()
+        # 붙잡혀 다른 도구가 전부 멈춘다. 보호 여부를 되묻는 `NOT EXISTS`도
+        # 인덱스를 타야 한다 — 없으면 후보 행마다 참조 표를 전체 훑어 다시
+        # 2차 곡선이 된다 (D-248, v10 인덱스).
+        rows = self._connection.execute(_RECLAIMABLE_VERSIONS_SQL, (keep,)).fetchall()
         if not rows:
-            self._vacuum_if_fragmented(deleted=0)
             return 0, 0
 
         # 삭제할 때 보존 조건을 **다시 확인**한다. 조회와 삭제 사이에 누군가
@@ -1043,8 +1076,143 @@ class Repository:
             deleted += changed
             if changed:
                 freed += sum(row[1] for row in batch) * changed // len(batch)
-        self._vacuum_if_fragmented(deleted=deleted)
         return deleted, freed
+
+    def collect_garbage(
+        self,
+        *,
+        keep: int = 20,
+        verifications_before: str | None = None,
+        fetch_log_before: str | None = None,
+        robots_before: str | None = None,
+    ) -> dict:
+        """저장소 정리 전체 — 이력 프루닝 + 버전 회수 + 공간 회수 (SPEC §4.2).
+
+        프루닝을 **먼저** 한다. 지운 검증 행만큼 뒤이은 버전 삭제가 건드릴
+        `ON DELETE SET NULL` 대상이 줄고, 공간 회수를 한 번만 돌리면 된다.
+        `*_before`가 None이면 그 표는 건드리지 않는다 — 정리 대상을 부르는
+        쪽이 정하고, 저장소가 기본 보존 기간을 지어내지 않는다.
+        """
+        pruned_verifications = (
+            self.prune_verifications(before=verifications_before)
+            if verifications_before is not None else 0
+        )
+        pruned_fetch_log = (
+            self.prune_fetch_log(before=fetch_log_before)
+            if fetch_log_before is not None else 0
+        )
+        pruned_robots = (
+            self.prune_robots_cache(before=robots_before)
+            if robots_before is not None else 0
+        )
+        deleted, freed = self._delete_reclaimable_versions(keep=keep)
+        self._vacuum_if_fragmented(
+            deleted=deleted + pruned_verifications + pruned_fetch_log + pruned_robots
+        )
+        return {
+            "deleted_versions": deleted,
+            "freed_bytes_estimate": freed,
+            "pruned_verifications": pruned_verifications,
+            "pruned_fetch_log": pruned_fetch_log,
+            "pruned_robots_cache": pruned_robots,
+        }
+
+    def prune_verifications(self, *, before: str) -> int:
+        """보존 기간이 지난 검증 이력을 지운다. **앵커당 최신 1건은 남긴다** (D-250).
+
+        최신 1건은 나이와 무관하게 보존한다 — `latest_verified_version`이 읽는
+        사실이고(D-084), 그것이 사라지면 "한 번도 검증하지 않았다"와 "오래
+        전에 검증했다"가 구분되지 않는다. 그 밖의 행은 "T에 검증했다"는 관측
+        로그이며, 이 표에는 지금까지 어떤 삭제 경로도 없었다.
+
+        gc와 같은 규율이다: 선정은 락 밖에서, 삭제는 배치로, 조건은 **삭제
+        시점에 다시 확인**한다. 사이에 새 검증이 들어오면 그 행이 최신이 되고
+        여기 뽑힌 행은 여전히 최신이 아니므로, 재확인은 판정을 뒤집지 않으면서
+        경쟁을 존중한다.
+        """
+        rows = self._connection.execute(
+            """SELECT id FROM (
+                 SELECT id, checked_at,
+                        ROW_NUMBER() OVER (
+                          PARTITION BY anchor_id ORDER BY checked_at DESC, id DESC
+                        ) AS rank_in_anchor
+                 FROM verifications
+               ) ranked
+               WHERE rank_in_anchor > 1 AND checked_at < ?""",
+            (before,),
+        ).fetchall()
+        return self._delete_in_batches(
+            [row[0] for row in rows],
+            f"""DELETE FROM verifications
+                WHERE id IN ({{placeholders}})
+                  AND checked_at < ?
+                  AND {_VERIFICATION_IS_SUPERSEDED}""",
+            trailing=(before,),
+        )
+
+    def prune_fetch_log(self, *, before: str) -> int:
+        """보존 기간이 지난 회계 행을 지운다 (D-250).
+
+        `fetch_stats_since`·`bytes_saved_estimate_since`는 창 안만 읽는다.
+        보존 기간을 창보다 넉넉히 두는 판단은 부르는 쪽(설정)의 몫이다.
+        """
+        return self._delete_by_age(
+            table="fetch_log", key="id", age_column="requested_at", before=before
+        )
+
+    def prune_robots_cache(self, *, before: str) -> int:
+        """TTL이 지난 robots 캐시를 지운다 (D-250).
+
+        지운 결과는 "다음에 다시 물어본다"이고, 그것이 TTL 만료의 뜻 그대로다.
+        """
+        return self._delete_by_age(
+            table="robots_cache", key="origin", age_column="fetched_at", before=before
+        )
+
+    def _delete_by_age(self, *, table: str, key: str, age_column: str, before: str) -> int:
+        """나이만으로 지우는 표의 공통 경로. 배치마다 락을 놓는다.
+
+        한 문장으로 지우면 그 시간 내내 저장소가 붙잡혀, D-248에서 고친 것을
+        프루닝이 도로 만든다.
+        """
+        total = 0
+        while True:
+            rows = self._connection.execute(
+                f"SELECT {key} FROM {table} WHERE {age_column} < ? ORDER BY {age_column} LIMIT ?",
+                (before, _DELETE_BATCH),
+            ).fetchall()
+            if not rows:
+                return total
+            placeholders = ",".join("?" * len(rows))
+            with self._connection as connection:
+                connection.execute(
+                    f"""DELETE FROM {table}
+                        WHERE {key} IN ({placeholders}) AND {age_column} < ?""",
+                    [row[0] for row in rows] + [before],
+                )
+                (changed,) = connection.execute("SELECT changes()").fetchone()
+            total += changed
+            if not changed:
+                # 뽑힌 행이 하나도 안 지워졌다(다른 클라이언트가 먼저 지웠다).
+                # 계속 돌면 같은 조회를 영원히 반복한다.
+                return total
+
+    def _delete_in_batches(
+        self, ids: list[str], sql_template: str, *, trailing: Sequence[Any] = ()
+    ) -> int:
+        """미리 뽑아 둔 id를 배치로 지운다. 조건은 `sql_template`이 다시 확인한다."""
+        total = 0
+        for start in range(0, len(ids), _DELETE_BATCH):
+            batch = ids[start : start + _DELETE_BATCH]
+            placeholders = ",".join("?" * len(batch))
+            with self._connection as connection:
+                connection.execute(
+                    sql_template.format(placeholders=placeholders),
+                    [*batch, *trailing],
+                )
+                (changed,) = connection.execute("SELECT changes()").fetchone()
+            total += changed
+        return total
 
     def _vacuum_if_fragmented(self, *, deleted: int) -> None:
         """공간을 회수한다.

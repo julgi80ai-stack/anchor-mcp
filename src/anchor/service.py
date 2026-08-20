@@ -1181,7 +1181,12 @@ class Anchor:
 
     @_foreground
     def collect_garbage(self, *, keep: int | None = None) -> dict:
-        """고아 버전 정리 (SPEC §4.2). 앵커가 가리키는 버전은 절대 삭제하지 않는다."""
+        """저장소 정리 (SPEC §4.2).
+
+        **인용된 버전은 절대 삭제하지 않는다.** 지금 서빙되는 버전과 문서당
+        최근 `keep`개도 남는다. 그 밖의 버전과, 보존 기간이 지난 이력
+        (검증·회계·robots 캐시)은 회수된다.
+        """
         if keep is None:
             keep = self._config.keep_versions
         if keep < 1:
@@ -1191,8 +1196,19 @@ class Anchor:
                 f"keep must be at least 1, got {keep} — "
                 "보존 버전 수는 1 이상이어야 합니다 (0은 전체 삭제입니다)"
             )
-        deleted, freed = self._repository.collect_garbage_versions(keep=keep)
-        return {"deleted_versions": deleted, "freed_bytes_estimate": freed, "keep": keep}
+        # 버전만 회수하면 나머지 표는 영원히 자란다 — `versions` 밖에는 어떤
+        # 삭제 경로도 없었다 (D-250). 보존 기간은 설정이 정하고, 저장소는
+        # 받은 경계선만 적용한다.
+        result = self._repository.collect_garbage(
+            keep=keep,
+            verifications_before=iso_ago(
+                self._config.verification_retention_days * 86400
+            ),
+            fetch_log_before=iso_ago(self._config.fetch_log_retention_days * 86400),
+            # robots는 TTL이 곧 보존 기간이다 — 지난 행을 남겨 둘 이유가 없다.
+            robots_before=iso_ago(self._config.robots_ttl_seconds),
+        )
+        return {**result, "keep": keep}
 
     def _resolve_version_ref(self, document_id: str, ref: str) -> Version:
         """'latest', 'latest~N' 또는 버전 id를 버전으로 해석한다.
