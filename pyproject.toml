@@ -9,6 +9,11 @@ description = "AI가 사용한 웹 근거의 시간적·출처적 무결성 계�
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
+# 기본 glob(LICEN[CS]E*·NOTICE*·COPYING*·AUTHORS*)은 THIRD-PARTY.md를 안 잡는다.
+# 그래서 sdist에는 실리고 **휠에는 빠져** 있었다 — 카피레프트 감사 결과를
+# 배포물이 달고 가지 않으면 그 규율이 저장소 안에만 남는다 (2026-08-20).
+# 명시하면 기본 glob을 덮으므로 셋을 전부 적는다.
+license-files = ["LICENSE", "NOTICE", "THIRD-PARTY.md"]
 authors = [{ name = "Julgi.Kang" }]
 dependencies = [
     # 라이선스 하한은 1.8.0 — 미만은 GPLv3+이며 Apache-2.0 배포와 충돌한다. 낮추지 말 것.
