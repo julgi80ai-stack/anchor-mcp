@@ -235,6 +235,7 @@ CREATE TABLE versions (
     coverage_prose_chars    INTEGER,  -- total characters of prose units counted in the source
     coverage_captured_chars INTEGER,  -- of those, characters found in the stored body
     coverage_dropped        TEXT,     -- "aside:32 dd:554" — dropped blocks by structure
+    last_observed_raw_hash  TEXT,     -- raw bytes hash of the **previous observation** (v11; NULL = unknown)
     char_count       INTEGER NOT NULL,
     content_blob     BLOB NOT NULL,               -- zstd(normalized_text)
     http_status      INTEGER NOT NULL,
@@ -424,6 +425,7 @@ To prevent duplicate registration of the same document, normalize in the followi
           have no way to block it. If the final URL differs from the input, the input
           URL is registered in `document_aliases`.
    402 → PaymentRequired (Cloudflare Pay Per Use, etc.) → step 6
+   200, 203 → carries a representation (RFC 9110 §15.3.4) → normalize and store
    403     → not retried (§5.4 "a 403 is reported as a 403") → step 6
              unless the server carried a parsable `Retry-After`, which is an
              invitation to retry — we wait exactly that long and ask again (v1.12)
@@ -510,6 +512,9 @@ Anchor operates as an **honest client**. This is not a feature; it is a premise.
 - **User-Agent**: default `Anchor/<release version> (+https://github.com/julgi80ai-stack/anchor-mcp)`. No disguise or spoofing option is provided, and **a blank value is rejected at configuration time** (v1.8) — you cannot promise to honour the rules while refusing to say who you are, and an empty UA makes robots matching run on an empty token. Validation happens **the moment a `Config` is constructed**: the direct-library path (§8) must receive the same guarantee.
 - **robots.txt**: respected by default. The `respect_robots = false` setting exists, but enabling it prints a warning in the server startup log.
 - **Rate limiting**: a per-host token bucket. The configured value is honored even under concurrent calls — left unlocked, waiting threads all wake at once and hammer the host at several times the configured rate (v1.5).
+- **Retry waits have a floor** (v1.16): the server's value is used when given (§10), but **never below `max(retry_backoff_base, 1/rate_limit_rps)`**. Following `Retry-After: 0`, a negative value, or a past HTTP-date literally means knocking **four times within 6 ms** on a server that just returned 429 (measured) — that is not honouring an instruction, it is using the instruction as an excuse to drop courtesy. No new constant is introduced because where "how polite are we to this host" is decided already exists in the configuration. If the floor exceeds the ceiling (60 s), we do not retry.
+- **"Success" for robots.txt is any 2xx** (v1.16, RFC 9309 §2.3.1.1). Treating only 200 as success makes **a `Disallow` delivered with 203 read as "no rules", discarding the site owner's intent entirely** — a head-on violation of the honest-client principle.
+- **202 is not a failure but "no representation yet"** (v1.16). Not storing it is correct (a 202 body is a status monitor, not the requested resource) — but reporting it only as `error` makes the user read it as failure.
 - **Honoring `Retry-After`** (clarified in v1.5): both numeric and HTTP-date forms are parsed. If the server specifies a wait longer than the ceiling (default 60 seconds), we **stop retrying rather than truncating it and knocking early** — reporting "could not confirm" is the honest answer. Unparseable or abnormal values (`nan`, etc.) fall back to our own exponential backoff.
 - **Size ceiling**: applied to **every response**, not only successful ones (v1.5). We do not buffer an enormous error page or blocking interstitial in full. **robots.txt is a response too** (v1.8) — exempting it alone lets a 20MB robots.txt settle wholesale into the cache DB.
 - **Conditional requests**: always used. This is exactly what reduces server load. Validators ride **only on the hop of the resource we received them from** (v1.8) — the document's canonical URL. Sent on every hop, a destination honestly comparing them against its own validators returns 304, which Anchor reads as "nothing changed", serving the old body as current forever (the move is never detected) while leaking the ETag to other hosts. Sent only on the first hop, re-checking through a redirecting alias loses conditional requests entirely. The hop-to-canonical comparison uses the **normalized form** (§5.1, v1.8) — raw strings never match once query ordering, tracking parameters, or a fragment differ.
@@ -558,6 +563,8 @@ Deciding on a single fingerprint (the head alone) **credits blocks absent from t
 
 
 > **The measurement's own blind spot (v1.16)**: `unknown` does not mean "there is no blind spot"; it means **"we do not know how much"**. There are two causes — the source could not be parsed, or the row predates v8 and was never measured. Parse failure does happen: an XHTML document carrying a single XML declaration folded to `basis=unknown`, silencing **a fully supported path entirely** (remedied in v1.16). Whether to tell the user where the measurement itself is silent remains **undecided** — emitting a sentence on every parse failure risks false alarms, so it stays silent for now.
+
+**`raw_changed` is measured against the previous observation** (v1.16). Compared against the bytes the version was made from, it stays true **forever once it has changed once — even on re-checks where not a byte moved**, and the blind-spot signal drowns in its own noise. A version's `raw_hash` is a **provenance fact** ("which bytes this body came from") and cannot be overwritten, so the comparand moved to an observation coordinate (`versions.last_observed_raw_hash`, §4.1) — the same judgment that separated `captured_at` from `last_observed_at`.
 
 **No verdict is affected by this value.** `outcome`, `INTACT`, `ALTERED`, and `MISSING` are all identical to what they were before measurement existed. We still say `unchanged` — we simply also say **how much we saw before saying it**.
 
@@ -1195,7 +1202,7 @@ anchor-mcp/
 │   │   ├── robustlinks.py # Robust Links serialization
 │   │   └── diff.py
 │   ├── store/
-│   │   ├── schema.sql     # full schema for new DBs (currently v10)
+│   │   ├── schema.sql     # full schema for new DBs (currently v11)
 │   │   ├── migrations/    # incremental SQL. Existing DBs catch up through these
 │   │   └── repository.py  # the sole SQL access point (includes internal serialization)
 │   ├── service.py         # public facade (the Anchor class)
@@ -1360,6 +1367,11 @@ This is not a formality. There are people in this field who have held on to this
 | 4 | **5.5** | **`COVERAGE_MIN_PROSE_SHARE = 1/8`** — below this share of visible text, no ratio is stated (`no-prose`). `no-prose` is redefined from "zero units" to "**nothing countable as prose**" | Where link density and the 40-character rule stripped away nearly the whole denominator, the few units left being fully captured produced a **claim of 100%** — `blog.rust-lang.org` stored 162 of 15,661 visible characters at a ratio of 1.0. That is worse than `no-prose` (unknown): it is an active falsehood. The threshold comes from the empty band of 53 observations (0.018–0.358) (D-273) |
 | 5 | **5.5** | **The measurement's own blind spot is written down** — `unknown` means "we do not know how much", not "there is no blind spot". Whether to announce that silence is recorded as undecided | The audit noted that §5.5 never described the blind spot of the measurement itself. Emitting a sentence on every parse failure risks false alarms, so it stays silent — **writing down what we do not know** is this section's whole purpose |
 | 6 | **6.3** | `UNRESOLVED` gains the cause "the version being compared was reclaimed and its body could not be read" | The origin was fine and we are the ones who failed to look, so it is neither `GONE` nor `UNREACHABLE` (D-251) |
+
+| 7 | **5.4, 10** | **Retry waits get a floor** — the server's value is used but never below `max(retry_backoff_base, 1/rate_limit_rps)`. A **politeness gate** is added to §10 | v1.12's fix ("only as long as the server asked") **removed the floor** — on `Retry-After: 0`, a negative, or a past date we knocked **four times within 6 ms** on a server that had just returned 429 (measured). Every existing gate measured only "how fast", so this direction of regression was **impossible to catch** (getting faster *is* the violation). Reversal: minimum interval 1.00 s → 0.00 s (D-275) |
+| 8 | **5.2, 5.4** | **Statuses that carry a representation are 200 and 203** (RFC 9110 §15.3.4). "Success" for robots.txt is **any 2xx** (RFC 9309 §2.3.1.1). 202 is not failure but "no representation yet" | Behind a transforming proxy (corporate gateway, carrier compression, some CDN middleboxes), a 203 body arrived and was discarded, leaving one `error` row, and since it is neither 404 nor 410 `verify` returned a **permanent `UNREACHABLE`** — users behind such a proxy could **never re-verify that citation**. Following the axis surfaced two more of the same defect: **a `Disallow` delivered with 203 was discarded entirely** (throwing away the owner's intent — a head-on §5.4 violation), and archive replay and CDX behaved the same way (D-282) |
+| 9 | **4.1, 5.5** | Schema **v11**: `versions.last_observed_raw_hash`. `raw_changed` is now measured **against the previous observation** | Compared against the version's own `raw_hash`, one byte change made it **true forever, even on re-checks where nothing moved** — D-242's blind-spot sentence repeated endlessly and the signal died. `raw_hash` is a provenance fact and cannot be overwritten, so the comparand moved to an observation coordinate (D-274) |
+| 10 | **7.3, 7.5, 13** | New `attention[].occurrences_capped` (saturation means "or more"); a version row's `coverage` is **fixed at creation** (pre-v8 NULL rows are not backfilled); the two **known exceptions** to schema stability are written down | `occurrences` saturates at 8 with no qualifier in the JSON, so 50 occurrences read as 8 (D-279). `unchanged` **overwrote an old version's coverage with the current value** (v1 ratio 1.0 → 0.043), so the code betrayed §7.5's promise about "what we did not see at the time" (D-280). The schema-stability test compared neither defaults nor FK actions, so all of v1–v9 diverged while it stayed green (D-256) |
 
 ## 16. v1.14 → v1.15 Change History
 

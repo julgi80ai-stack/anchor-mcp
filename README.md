@@ -141,7 +141,7 @@ The ledger and the decision records serve different purposes: `THIRD-PARTY.md` a
 | 항목 · Item | 상태 · State |
 |---|---|
 | 기술사양서 · Spec | v1.16 (2026-08-20, KR/EN) |
-| 구현 · Implementation | **v1.14.0** (2026-08-20) — 조치 코드를 다시 감사해 고친 판: 회수된 판본을 가리키는 참조가 생 예외로 새던 것과, **침묵을 고치려던 계측이 거짓 주장으로 뒤집힌 자리** 셋을 닫았다 · Remediation code re-audited and repaired: references to reclaimed versions no longer leak raw exceptions, and three places where the coverage measurement — written to fix silence — had inverted into false claims are closed. 테스트 1232개 · 1232 tests. CI: 3 OS × Python 3.11–3.13, license gate, benchmark gate |
+| 구현 · Implementation | **v1.15.0** (2026-08-20) — 감사 2기 조치 완결: 회수 경합·커버리지 거짓말·203 표현 처리(변환 프록시 뒤의 `Disallow`를 무시하던 것 포함)·재시도 정중함 바닥 · Second-audit remediation complete: the reclaim race, the coverage falsehoods, 203 representation handling (including a `Disallow` that was being discarded behind transforming proxies), and a politeness floor for retries. 테스트 1266개 · 1266 tests. CI: 릴리스 태그·수동 실행 (3 OS × Python 3.11–3.13), license gate, benchmark gate |
 | 실사용 관찰 · Field observation | 30일 hit_rate 관찰 창 진행 중 · 30-day hit-rate window in progress (`anchor stats`) |
 | 라이선스 감사 · License audit | 카피레프트 강제 0건 · zero forced copyleft (선택형 `tld`는 MPL-1.1 선택 · disjunctive `tld` elected as MPL-1.1, THIRD-PARTY §4.4) |
 
