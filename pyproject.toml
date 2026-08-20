@@ -47,6 +47,12 @@ dev = [
 anchor = "anchor.cli:app"
 anchor-mcp = "anchor.server:main"
 
+[tool.hatch.build.targets.sdist]
+# .gitignore에 넣는 것만으로 충분하지만, 여기서 한 번 더 막는다 —
+# 배포물은 되돌릴 수 없고(PyPI 재업로드 불가), 무시 규칙 하나가 지워지면
+# 그대로 새어 나간다. 이 두 줄이 두 번째 자물쇠다.
+exclude = [".hypothesis", ".pytest_cache", "**/__pycache__", "*.db", ".coverage"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/anchor"]
 

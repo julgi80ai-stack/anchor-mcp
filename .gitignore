@@ -15,6 +15,16 @@ dist/
 # 로컬 전용 (git 미추적)
 CLAUDE.md
 
+# Hypothesis 로컬 캐시 — **sdist에 실려 나간다** (2026-08-20).
+# git이 추적하지 않아 눈에 안 띄었지만 hatchling은 .gitignore에 없는 파일을
+# sdist에 담는다. 실측: sdist 653항목 중 434가 이것이었고, 그중 289개에
+# 개발 기계의 홈 절대 경로가 박혀 있었다. PyPI는 같은 버전 재업로드가 안
+# 되므로 한 번 올리면 영구 게시된다.
+#
+# 이 주석에 그 경로를 예시로 적으면 안 된다 — .gitignore 자신이 sdist에
+# 실리므로 같은 유출이 된다. 조치하면서 실제로 한 번 그렇게 했다.
+.hypothesis/
+
 # 커버리지 데이터
 .coverage
 coverage.xml

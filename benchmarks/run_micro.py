@@ -513,6 +513,8 @@ def bench_normal_corpus() -> None:
 
 
 def _fetch_with_deadline(url: str, db: Path, deadline_s: float) -> tuple[str, float, bool]:
+    # 반환 3번째 = **비정상**(마감 초과 또는 예상 밖 예외). 둘 다 "이 실패
+    # 종류가 계약대로 보고됐다"를 무너뜨리므로 판정에서 같은 칸에 둔다.
     """페치를 **마감 안에** 끝내고, 못 끝내면 그 사실을 값으로 돌려준다.
 
     **왜 필요한가** (2026-08-20 게이트 감사): `MAX_RETRY_AFTER_SECONDS` 상한이
@@ -537,8 +539,14 @@ def _fetch_with_deadline(url: str, db: Path, deadline_s: float) -> tuple[str, fl
             box["outcome"] = "성공(예상 밖)"
         except AnchorError as error:
             box["outcome"] = type(error).__name__
-        except Exception as error:  # 예상 밖 예외도 게이트가 보게 한다
+        except Exception as error:
+            # 예상 밖 예외는 **판정이** 봐야 한다 (2026-08-20 재감사, E-1).
+            # 처음엔 detail 문자열에만 실었는데, 판정식이 문자열을 읽지
+            # 않으므로 404 경로가 통째로 깨져도 PASS·종료코드 0이 나왔다.
+            # 조치 전에는 예외가 벤치를 죽여 CI가 빨갰다 — 마감을 달면서
+            # 오히려 **덜 정직해졌다.** 별도 플래그로 판정에 올린다.
             box["outcome"] = f"예외:{type(error).__name__}"
+            box["abnormal"] = True
         box["elapsed"] = (time.perf_counter() - started) * 1000.0
 
     started = time.perf_counter()
@@ -547,7 +555,11 @@ def _fetch_with_deadline(url: str, db: Path, deadline_s: float) -> tuple[str, fl
     worker.join(deadline_s)
     if worker.is_alive():
         return "마감 초과(응답 없음)", (time.perf_counter() - started) * 1000.0, True
-    return str(box.get("outcome", "?")), float(box.get("elapsed", 0.0)), False
+    return (
+        str(box.get("outcome", "?")),
+        float(box.get("elapsed", 0.0)),
+        bool(box.get("abnormal", False)),
+    )
 
 
 def bench_failure_is_fast() -> None:
@@ -627,10 +639,10 @@ def bench_failure_is_fast() -> None:
                 # 다음 케이스로 넘어가기 위한 것이지 성능 판정선이 아니다 —
                 # 판정선은 `ceiling`이다.
                 deadline_s = max(ceiling * 3.0, 10_000.0) / 1000.0
-                outcome, elapsed, timed_out = _fetch_with_deadline(url, db, deadline_s)
+                outcome, elapsed, abnormal = _fetch_with_deadline(url, db, deadline_s)
                 gate(
                     f"실패는 빠르다: {label} < {ceiling:.0f}ms",
-                    not timed_out and elapsed < ceiling and outcome != "성공(예상 밖)",
+                    not abnormal and elapsed < ceiling and outcome != "성공(예상 밖)",
                     f"{elapsed:.0f}ms ({outcome}) — 재시도가 되살아나면 이 종류만 빨개진다",
                 )
         # --- 정중함: 지정값이 0이어도 바닥은 지킨다 (D-275) ---
