@@ -35,11 +35,6 @@ def _json_object(output: str) -> dict:
     return json.JSONDecoder().raw_decode(output[output.index("{"):])[0]
 
 
-@pytest.fixture
-def anyio_backend():
-    return "asyncio"
-
-
 def _config(tmp_path, name="store.db") -> Config:
     return Config(
         db_path=tmp_path / name,

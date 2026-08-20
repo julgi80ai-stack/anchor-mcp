@@ -26,11 +26,6 @@ pytestmark = pytest.mark.anyio
 
 
 @pytest.fixture
-def anyio_backend():
-    return "asyncio"
-
-
-@pytest.fixture
 def task_server(tmp_path):
     config = Config(db_path=tmp_path / "tasks.db")
     server, service = build_server(db_path=config.db_path, config=config)

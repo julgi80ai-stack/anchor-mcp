@@ -30,11 +30,6 @@ pytestmark = pytest.mark.anyio
 QUOTE = "링크는 살아 있지만 내용이 바뀌는 인용 표류가 가장 위험하다."
 
 
-@pytest.fixture
-def anyio_backend():
-    return "asyncio"
-
-
 def make_config(tmp_path, **kwargs):
     return Config(
         db_path=tmp_path / "conc.db", rate_limit_rps=1000.0, retry_backoff_base=0.01, **kwargs

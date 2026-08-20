@@ -41,11 +41,6 @@ EXPECTED_TOOLS = {
 
 
 @pytest.fixture
-def anyio_backend():
-    return "asyncio"
-
-
-@pytest.fixture
 def mcp_server(fixture_server, tmp_path):
     config = Config(
         db_path=tmp_path / "store.db",

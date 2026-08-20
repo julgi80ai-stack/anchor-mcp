@@ -18,6 +18,14 @@ from anchor.service import Anchor
 _GATE_TIMEOUT_SECONDS = 30.0
 
 
+# anyio 백엔드 — async 테스트 9개 파일이 글자 그대로 같은 것을 각자 두고 있었다
+# (9사본 × 3줄). 사용자가 전부 이 디렉토리 안이라 여기가 가시 범위가 정확히
+# 일치하는 가장 좁은 자리다. 값은 옮기기 전과 같다 (2026-08-20, 9단계 5번).
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
 def article_html(*, nonce: str = "n0", extra_sentence: str = "") -> str:
     """trafilatura가 본문을 추출할 수 있는 수준의 기사 HTML.
 

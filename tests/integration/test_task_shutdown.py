@@ -43,11 +43,6 @@ ANCHOR_COUNT = 40
 PER_ANCHOR_BUDGET_MS = 300
 
 
-@pytest.fixture
-def anyio_backend():
-    return "asyncio"
-
-
 def _sentences(count: int) -> list[str]:
     # 길이 축을 연다: 패딩을 달리해 55~180자 사이로 흩는다. 전부 같은 길이의
     # 한글 문장이면 길이 축이 닫힌다 (D-178이 살아남은 이유).

@@ -25,11 +25,6 @@ from tests.integration.conftest import article_html
 pytestmark = pytest.mark.anyio
 
 
-@pytest.fixture
-def anyio_backend():
-    return "asyncio"
-
-
 def _config(tmp_path) -> Config:
     return Config(db_path=tmp_path / "store.db", rate_limit_rps=1000.0, retry_backoff_base=0.01)
 
