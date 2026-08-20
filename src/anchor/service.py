@@ -29,6 +29,7 @@ from anchor.errors import (
     FetchFailed,
     RobotsDisallowed,
     StorageError,
+    VersionNotFound,
 )
 from anchor.fetcher.archive import ArchiveFallback, ArchiveHit
 from anchor.fetcher.client import ConditionalFetcher, FetchResponse
@@ -651,10 +652,18 @@ class Anchor:
         병합을 일으켜 문서가 옮겨갈 수 있다 (D-185). 별칭이 새 소속을
         가리키므로 한 번 따라가 재시도한다 — 원래부터 없던 문서라면 같은
         DocumentNotFound가 다시 나온다.
+
+        같은 창에서 **앵커를 달려던 판본 자체가 gc에 회수**될 수도 있다
+        (D-251). 그때도 한 번 다시 해석한다 — 사용자가 부탁한 것은 "이
+        인용문에 앵커를 달아 달라"이지 "이 판본 id에 달아 달라"가 아니므로,
+        지금 살아 있는 판본으로 다시 해석하는 것이 그 부탁을 지키는 길이다.
+        인용문이 새 판본에 없으면 `QuoteNotFound`가 나온다 — 그것이 사실이다.
+        재시도는 **한 번뿐**이다. 계속 밀리는 저장소에서 무한히 도는 대신
+        도메인 예외로 사실을 보고한다.
         """
         try:
             return self._cite_once(document_ref, quote, note)
-        except DocumentNotFound:
+        except (DocumentNotFound, VersionNotFound):
             return self._cite_once(document_ref, quote, note)
 
     def _cite_once(self, document_ref: str, quote: str, note: str | None) -> CiteResult:
@@ -876,6 +885,29 @@ class Anchor:
                 requests += 1
                 failure_state = matcher.UNREACHABLE
 
+            if failure_state is None:
+                # 방금 관측한 버전을 그대로 쓴다. 여기서 latest_version()을 다시
+                # 조회하면 아카이브 폴백·본문 되돌림 상황에서 앵커 생성에 쓴 옛
+                # 본문과 자기 자신을 대조하게 된다 (D-011).
+                #
+                # 그 판본은 방금 만들어졌어도 **영원하지 않다.** 다른
+                # 클라이언트의 페치가 새 판본을 만들면 이것은 더 이상
+                # `current_version`이 아니고, 인용된 적도 없으므로 gc의 보호를
+                # 전혀 못 받는다 (D-249 이후). `assert`로 두면 여기서 배치
+                # 전체가 죽고 `python -O`에서는 AttributeError가 된다 (D-251).
+                latest = self._repository.get_version(fetch_result.version_id)
+                if latest is not None:
+                    try:
+                        text = self._repository.get_version_text(latest.id)
+                    except VersionNotFound:
+                        latest = None
+                if latest is None:
+                    # 대조할 본문이 없다 — 확인 불가이지 인용 무효가 아니다.
+                    # 페치 실패와 같은 칸으로 보내 이 묶음만 보류하고 배치는
+                    # 계속 간다 (D-185 선례). 원문은 멀쩡했으므로 GONE도
+                    # UNREACHABLE도 아니다 — 우리가 못 본 것이다.
+                    failure_state = matcher.UNRESOLVED
+
             if failure_state is not None:
                 for anchor in document_anchors:
                     self._repository.insert_verification(
@@ -911,13 +943,6 @@ class Anchor:
                         )
                     )
                 continue
-
-            # 방금 관측한 버전을 그대로 쓴다. 여기서 latest_version()을 다시
-            # 조회하면 아카이브 폴백·본문 되돌림 상황에서 앵커 생성에 쓴 옛
-            # 본문과 자기 자신을 대조하게 된다 (D-011).
-            latest = self._repository.get_version(fetch_result.version_id)
-            assert latest is not None
-            text = self._repository.get_version_text(latest.id)
 
             for anchor in document_anchors:
                 if should_stop is not None and should_stop():

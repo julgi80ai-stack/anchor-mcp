@@ -13,7 +13,7 @@ from typing import Any, Sequence
 
 import zstandard
 
-from anchor.errors import DocumentNotFound, StorageError
+from anchor.errors import DocumentNotFound, StorageError, VersionNotFound
 from anchor.models import AnchorRecord, Coverage, Document, Version, uuid7
 
 SCHEMA_VERSION = 10
@@ -1004,7 +1004,11 @@ class Repository:
             "SELECT content_blob FROM versions WHERE id = ?", (version_id,)
         ).fetchone()
         if row is None:
-            raise KeyError(f"version not found — 버전 없음: {version_id}")
+            # `KeyError`는 `AnchorError`가 아니다 — CLI의 `_USER_ERRORS`도 MCP
+            # 서버의 `except AnchorError`도 잡지 못해 트레이스백으로 샌다.
+            # 여기까지 오는 흔한 경로는 gc다: 버전 id를 읽은 뒤 본문을 읽기
+            # 전에 회수됐다 (D-251).
+            raise VersionNotFound(f"version not found — 버전 없음: {version_id}")
         return zstandard.ZstdDecompressor().decompress(row["content_blob"]).decode("utf-8")
 
     # -- fetch_log ---------------------------------------------------------
@@ -1337,6 +1341,20 @@ class Repository:
                     f"Document vanished (merged elsewhere?) — "
                     f"문서가 사라졌습니다(병합?): {document_id}"
                 )
+            if self._connection.execute(
+                "SELECT 1 FROM versions WHERE id = ?", (created_version,)
+            ).fetchone() is None:
+                # D-185가 문서를 확인하면서 **바로 옆의 버전은 확인하지 않았다.**
+                # 선택자 생성(§10 예산 최대 200ms) 사이에 gc가 이 판본을
+                # 회수하면 여기서 생 IntegrityError가 났고, 사용자의 인용
+                # 요청이 트레이스백으로 거부됐다 (D-251).
+                #
+                # 두 확인 모두 `BEGIN IMMEDIATE` 안이므로 확인과 INSERT 사이에
+                # 다른 커넥션이 지울 수 없다 — 쓰기 락을 이미 쥐고 있다.
+                raise VersionNotFound(
+                    f"Version vanished (reclaimed by gc?) — "
+                    f"앵커를 달려던 판본이 회수됐습니다: {created_version}"
+                )
             self._connection.execute(
                 """INSERT INTO anchors
                    (id, document_id, created_version, exact, prefix, suffix,
@@ -1426,8 +1444,25 @@ class Repository:
         found_offset: int | None,
         found_text: str | None,
         elapsed_ms: int,
-    ) -> None:
+    ) -> str | None:
+        """검증 한 건을 기록한다. **실제로 기록된** `checked_version`을 돌려준다.
+
+        `checked_version`이 가리키는 판본이 그 사이 회수됐으면 NULL로 적는다
+        (D-251). 지어내는 것이 아니라 **스키마가 이미 정해 둔 답**이다 —
+        이 열은 `ON DELETE SET NULL`이므로, 1밀리초 늦게 회수됐더라도 남는
+        행은 똑같이 NULL이다. 검증 이력은 계약이 아니라 관측 로그이고
+        (D-249), NULL은 "어느 판본을 봤는지 모른다"는 사실이다.
+
+        **관측 자체를 버리지는 않는다.** 대조는 실제로 일어났고 판정도
+        났으므로("T에 검증했다·결과는 무엇"), 그 사실까지 예외로 날리면
+        배치 하나가 통째로 사라진다. 반대로 `anchor_id` 쪽 FK는 완화하지
+        않는다 — 그것은 관측 로그가 아니라 대상 자체다.
+        """
         with self._connection:
+            if checked_version is not None and self._connection.execute(
+                "SELECT 1 FROM versions WHERE id = ?", (checked_version,)
+            ).fetchone() is None:
+                checked_version = None
             self._connection.execute(
                 """INSERT INTO verifications
                    (id, anchor_id, checked_version, checked_at, state, match_score,
@@ -1446,6 +1481,7 @@ class Repository:
                     elapsed_ms,
                 ),
             )
+        return checked_version
 
     # -- robots_cache ------------------------------------------------------
 

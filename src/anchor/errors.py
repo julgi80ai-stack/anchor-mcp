@@ -60,6 +60,21 @@ class DocumentNotFound(AnchorError):
     """주어진 id 또는 URL에 해당하는 문서가 캐시에 없다."""
 
 
+class VersionNotFound(AnchorError):
+    """가리킨 버전이 저장소에 없다 — 대개 그 사이 gc가 회수했다 (D-251).
+
+    버전을 지우는 경로는 둘뿐이다: `collect_garbage`(보존 정책 밖의 판본)와
+    `merge_document`(같은 본문의 중복 제거). 둘 다 다른 스레드·다른 프로세스가
+    언제든 할 수 있는 일이므로, **읽고 나서 쓰기까지의 사이**에 대상이
+    사라지는 일은 평범하다. 그때 생 `sqlite3.IntegrityError`나 `KeyError`가
+    새면 CLI는 트레이스백으로 죽고 MCP 배치는 통째로 무너진다 — 라이브러리도
+    `AnchorError` 하나로 받는다는 SPEC §8의 약속이 깨진다.
+
+    **인용된 버전에는 이 예외가 날 수 없다.** gc의 보호 집합이 앵커가 붙잡은
+    버전을 지우지 않기 때문이다(SPEC §4.2) — 이것이 §1.2의 인용 복원 불변식이다.
+    """
+
+
 class FetchFailed(AnchorError):
     """HTTP 획득 실패. http_status에 서버가 준 상태를 그대로 담는다.
 
