@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import re
 import statistics
 import sys
 import tempfile
@@ -18,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from anchor.anchoring.matcher import UNRESOLVED, match_anchor  # noqa: E402
+from anchor.anchoring.matcher import ALTERED, MISSING, UNRESOLVED, match_anchor  # noqa: E402
 from anchor.anchoring.selector import build_selector  # noqa: E402
 from anchor.config import Config  # noqa: E402
 from anchor.errors import AnchorError  # noqa: E402
@@ -201,7 +202,25 @@ def bench_cache_hit_under_load() -> None:
 
 
 def bench_matcher_worst_case() -> int:
-    """반환: UNRESOLVED 수 — 경합 벤치가 같은 실행의 전경 기준선으로 쓴다."""
+    """앵커 하나의 최악 벽시계 (SPEC §10). 반환: UNRESOLVED 수 — 경합 벤치가
+    같은 실행의 전경 기준선으로 쓴다.
+
+    **이 게이트가 지키지 않는 것** (2026-08-20 게이트 감사 — 공시):
+
+    이름이 "최악 사례"라서 SPEC §6.2의 **예산 집행**까지 지키는 것처럼 읽히지만
+    그렇지 않다. 예산을 **20배**로 늘려도 p99가 184.2ms로 기준선(188.8ms)과
+    구분되지 않았다. 아래 `budget_ms=200`이 **한 번도 구속하지 않기** 때문이다 —
+    50만 자 스캔의 생비용이 이미 185ms라 예산에 닿기 전에 끝난다. 게이트가
+    출력하는 `UNRESOLVED 0/100`이 그 증거다(예산 소진이면 UNRESOLVED가 나온다).
+
+    즉 여기서 재는 것은 **매칭의 생비용**이고, 그 축에서는 판별력이 있다
+    (앵커당 +80ms → 280.5ms FAIL). 예산 집행 회귀는 경합 게이트(D-203)가
+    잡는다 — 예산 ×3에서 그쪽만 565.4ms로 빨개졌다.
+
+    추출 사각지대를 공시했을 때와 같은 판단이다(SPEC §5.5): **범위를 넓히지
+    않고 침묵을 고친다.** 이 PASS를 "예산 기제가 멀쩡하다"로 읽으면 안 된다.
+    전경 경로에서 예산이 구속하는 축은 아직 게이트가 없다 — 대장에 등재했다.
+    """
     big_text = "채움 문장이 끝없이 이어지는 대폭 개편 문서다. " * 20000  # ~50만 자
     samples = []
     unresolved = 0
@@ -338,7 +357,15 @@ def bench_matcher_under_contention(foreground_unresolved: int) -> None:
     )
 
 
-def bench_normal_corpus() -> None:
+def _drifted(text: str) -> str:
+    """문서가 **평범하게** 움직인 모습 — 공백만 달라지고 산문은 그대로다.
+
+    이 한 줄이 이 벤치의 축이다. 이유는 아래 `bench_normal_corpus`에 있다.
+    """
+    return re.sub(r"  +", " ", text.replace("\n\n", "\n \n"))
+
+
+def _corpus_anchors() -> list:
     golden = Path(__file__).parent.parent / "tests" / "fixtures" / "golden"
     texts = [p.read_text("utf-8") for p in sorted(golden.glob("*.expected.md"))]
     anchors = []
@@ -350,25 +377,114 @@ def bench_normal_corpus() -> None:
                     anchors.append((text, build_selector(text, quote)))
                 except Exception:
                     continue
-    anchors = (anchors * (500 // len(anchors) + 1))[:500]
+    return anchors
 
+
+def _match_corpus(anchors: list, drift) -> tuple[float, dict[str, int]]:
     started = time.perf_counter()
-    unresolved = 0
+    states: dict[str, int] = {}
     for text, selector in anchors:
         result = match_anchor(
-            text,
+            drift(text),
             exact=selector.exact,
             prefix=selector.prefix,
             suffix=selector.suffix,
             position_hint=selector.position_hint,
             budget_ms=200,
         )
-        if result.state == UNRESOLVED:
-            unresolved += 1
-    elapsed = time.perf_counter() - started
+        states[result.state] = states.get(result.state, 0) + 1
+    return time.perf_counter() - started, states
+
+
+def bench_normal_corpus() -> None:
+    """정상 코퍼스 — 두 축으로 잰다: 문서가 그대로일 때, 그리고 **움직였을 때**.
+
+    **왜 두 축인가** (2026-08-20 게이트 감사): 원래는 첫 축만 있었다. 그런데
+    `build_selector(text, quote)`가 **같은 텍스트에서** 인용문을 잘라 만들므로
+    `match_anchor`의 1단계 `text.find(exact)`가 **항상 적중**한다. 그 아래의
+    판정 기제(문맥·퍼지·Myers)는 **한 줄도 실행되지 않았다.** 실측으로 확인:
+    문맥 매칭·퍼지 매칭·`_context_supports`를 각각 죽여도 셋 다 `0/211 PASS`.
+    이름은 "정상 코퍼스 판정률"인데 실제로 지키던 것은 `str.find`뿐이었다.
+
+    D-202(항진식 게이트)와 같은 부류다 — 통과가 아무것도 뜻하지 않는 검사.
+
+    그래서 **드리프트 축**을 연다. 공백만 달라진 문서는 산문이 그대로이므로
+    인용문은 **여전히 거기 있다.** 그러니 이 코퍼스에서는:
+      · UNRESOLVED(판정 불가)가 1%를 넘으면 안 되고,
+      · MISSING(사라졌다)은 **한 건도 나오면 안 된다** — 있는 것을 없다고
+        말하는 것이라, 우리가 에이전트에게 하는 **거짓 보고**다.
+
+    되돌림으로 판별력을 확인했다(기준선은 양 축 모두 0이라 흔들리지 않는다):
+      · `_context_supports` 무력화 → 드리프트 UNRESOLVED **34/500 (6.80%)**
+                                   FAIL. 같은 실행에서 위의 원문 축은 0/500
+                                   PASS다 — 구 픽스처가 눈이 멀었다는 증거다.
+      · 퍼지 매칭 사망           → 드리프트 MISSING **34/500** FAIL (전에는
+                                   아무 게이트도 못 잡았다 — 인용문이 멀쩡한데
+                                   사라졌다고 보고하는 회귀가 조용히 통과했다)
+    """
+    anchors = _corpus_anchors()
+    anchors = (anchors * (500 // len(anchors) + 1))[:500]
+
+    elapsed, states = _match_corpus(anchors, lambda text: text)
+    unresolved = states.get(UNRESOLVED, 0)
     rate = unresolved / len(anchors)
     gate("500 앵커 / 60초", elapsed < 60.0, f"{len(anchors)}건 {elapsed:.2f}s")
     gate("UNRESOLVED < 1%", rate < 0.01, f"{unresolved}/{len(anchors)} ({rate:.2%})")
+
+    drift_elapsed, drift_states = _match_corpus(anchors, _drifted)
+    drift_unresolved = drift_states.get(UNRESOLVED, 0)
+    drift_missing = drift_states.get(MISSING, 0)
+    altered = drift_states.get(ALTERED, 0)
+    gate(
+        "드리프트 코퍼스 UNRESOLVED < 1%",
+        drift_unresolved / len(anchors) < 0.01,
+        f"{drift_unresolved}/{len(anchors)} "
+        f"({drift_unresolved / len(anchors):.2%}), ALTERED {altered}건이 판정 기제를 통과했다, "
+        f"{drift_elapsed:.2f}s",
+    )
+    gate(
+        "드리프트 코퍼스 MISSING 0건 (있는 것을 없다고 하지 않는다)",
+        drift_missing == 0,
+        f"MISSING {drift_missing}/{len(anchors)}",
+    )
+
+
+def _fetch_with_deadline(url: str, db: Path, deadline_s: float) -> tuple[str, float, bool]:
+    """페치를 **마감 안에** 끝내고, 못 끝내면 그 사실을 값으로 돌려준다.
+
+    **왜 필요한가** (2026-08-20 게이트 감사): `MAX_RETRY_AFTER_SECONDS` 상한이
+    회귀하면 `403(Retry-After:3600)` 케이스가 `time.sleep(3600)`에 들어간다.
+    케이스별 마감이 없으면 게이트 줄은 **출력되지 않고**, 회귀는 빨간 줄이
+    아니라 **응답 없는 CI 잡**으로 나타난다.
+
+    "실패는 빠르다"를 지키는 게이트가 정작 자기 자신은 한 시간을 매달리는
+    것이라, 이 도구가 자기 계약을 스스로 어기는 자리였다.
+
+    스레드는 죽일 수 없으므로 데몬으로 두고 버린다 — 프로세스 종료로 정리된다.
+    """
+    import threading
+
+    box: dict[str, object] = {}
+
+    def work() -> None:
+        started = time.perf_counter()
+        try:
+            with Anchor(db_path=db, config=Config(db_path=db)) as ax:
+                ax.fetch(url, max_age=0)
+            box["outcome"] = "성공(예상 밖)"
+        except AnchorError as error:
+            box["outcome"] = type(error).__name__
+        except Exception as error:  # 예상 밖 예외도 게이트가 보게 한다
+            box["outcome"] = f"예외:{type(error).__name__}"
+        box["elapsed"] = (time.perf_counter() - started) * 1000.0
+
+    started = time.perf_counter()
+    worker = threading.Thread(target=work, daemon=True)
+    worker.start()
+    worker.join(deadline_s)
+    if worker.is_alive():
+        return "마감 초과(응답 없음)", (time.perf_counter() - started) * 1000.0, True
+    return str(box.get("outcome", "?")), float(box.get("elapsed", 0.0)), False
 
 
 def bench_failure_is_fast() -> None:
@@ -432,7 +548,10 @@ def bench_failure_is_fast() -> None:
         ("403(Retry-After:3600)", 403, "User-agent: *\nAllow: /\n", "3600", 500.0),
     ]
     try:
-        with tempfile.TemporaryDirectory() as tmp:
+        # `ignore_cleanup_errors`: 마감을 넘긴 스레드가 DB 파일을 쥔 채
+        # 남아 있을 수 있다. 정리 실패로 벤치 자체가 죽으면 게이트 결과를
+        # 잃는다 — 우리가 재려던 것이 바로 그 상황이므로.
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             for index, (label, status, robots, retry_after, ceiling) in enumerate(cases):
                 state.update(status=status, robots=robots, retry_after=retry_after)
                 # **케이스마다 새 저장소**다. robots는 오리진 단위로 24시간
@@ -441,17 +560,14 @@ def bench_failure_is_fast() -> None:
                 # 처음 돌렸을 때 실제로 그렇게 "성공(예상 밖)"이 나왔다.
                 db = Path(tmp) / f"fail{index}.db"
                 url = f"{base}/case{index}"
-                with Anchor(db_path=db, config=Config(db_path=db)) as ax:
-                    start = time.perf_counter()
-                    try:
-                        ax.fetch(url, max_age=0)
-                        outcome = "성공(예상 밖)"
-                    except AnchorError as error:
-                        outcome = type(error).__name__
-                    elapsed = (time.perf_counter() - start) * 1000
+                # 마감은 상한의 3배(최소 10초). 회귀를 FAIL로 **보고하고**
+                # 다음 케이스로 넘어가기 위한 것이지 성능 판정선이 아니다 —
+                # 판정선은 `ceiling`이다.
+                deadline_s = max(ceiling * 3.0, 10_000.0) / 1000.0
+                outcome, elapsed, timed_out = _fetch_with_deadline(url, db, deadline_s)
                 gate(
                     f"실패는 빠르다: {label} < {ceiling:.0f}ms",
-                    elapsed < ceiling and outcome != "성공(예상 밖)",
+                    not timed_out and elapsed < ceiling and outcome != "성공(예상 밖)",
                     f"{elapsed:.0f}ms ({outcome}) — 재시도가 되살아나면 이 종류만 빨개진다",
                 )
         # --- 정중함: 지정값이 0이어도 바닥은 지킨다 (D-275) ---
