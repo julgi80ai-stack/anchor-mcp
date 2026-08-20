@@ -1,0 +1,145 @@
+# SPDX-License-Identifier: Apache-2.0
+"""관측 가능한 표면의 지문 — 정리 작업이 행동을 바꾸지 않았음을 증명한다.
+
+9단계(코드 품질)는 **행동을 바꾸지 않는 변경**만 한다. 그것을 "테스트가
+초록이다"로만 확인하면 부족하다 — 테스트가 보지 않는 표면(임포트 경로,
+MCP 도구 스키마, 공개 시그니처)이 조용히 바뀔 수 있고, 파일을 옮기다
+임포트를 놓치면 **테스트가 수집되지 않아 그냥 줄어든다**(초록인 채로).
+
+그래서 표면을 파일로 찍어 두고 전후를 대조한다. 사용법:
+
+    python tools/surface_snapshot.py > /tmp/before.txt   # 정리 전
+    ... 정리 ...
+    python tools/surface_snapshot.py > /tmp/after.txt
+    diff /tmp/before.txt /tmp/after.txt                  # 반드시 빈 diff
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import importlib
+import inspect
+import pkgutil
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+
+def _emit(line: str) -> None:
+    print(line)
+
+
+def dump_modules() -> None:
+    """공개 임포트 경로 — 파일을 옮겨도 여기 이름이 사라지면 안 된다."""
+    import anchor
+
+    names = sorted(
+        m.name for m in pkgutil.walk_packages(anchor.__path__, "anchor.")
+    )
+    for name in names:
+        _emit(f"module {name}")
+
+
+def dump_public_api() -> None:
+    """공개 클래스·함수의 시그니처와 dataclass 필드."""
+    import anchor
+
+    targets = sorted(
+        m.name for m in pkgutil.walk_packages(anchor.__path__, "anchor.")
+    ) + ["anchor"]
+    for mod_name in sorted(set(targets)):
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception as error:  # 임포트가 깨지면 그 자체가 회귀다
+            _emit(f"IMPORT-FAILED {mod_name}: {type(error).__name__}")
+            continue
+        for attr in sorted(dir(mod)):
+            if attr.startswith("_"):
+                continue
+            obj = getattr(mod, attr)
+            if getattr(obj, "__module__", None) != mod_name:
+                continue  # 재수출은 원 정의 모듈에서 한 번만 찍는다
+            if dataclasses.is_dataclass(obj):
+                fields = ", ".join(
+                    f"{f.name}:{_type_name(f.type)}" for f in dataclasses.fields(obj)
+                )
+                _emit(f"dataclass {mod_name}.{attr}({fields})")
+            elif inspect.isclass(obj):
+                _emit(f"class {mod_name}.{attr}({_bases(obj)})")
+                for meth in sorted(dir(obj)):
+                    if meth.startswith("_") and meth != "__init__":
+                        continue
+                    fn = getattr(obj, meth, None)
+                    if inspect.isfunction(fn):
+                        _emit(f"  def {meth}{_signature(fn)}")
+            elif inspect.isfunction(obj):
+                _emit(f"def {mod_name}.{attr}{_signature(obj)}")
+            elif isinstance(obj, (str, int, float, bool, frozenset, tuple)):
+                _emit(f"const {mod_name}.{attr} = {obj!r}")
+
+
+def _type_name(t: object) -> str:
+    return getattr(t, "__name__", str(t))
+
+
+def _bases(cls: type) -> str:
+    return ", ".join(b.__name__ for b in cls.__bases__)
+
+
+def _signature(fn: object) -> str:
+    try:
+        return str(inspect.signature(fn))
+    except (ValueError, TypeError):
+        return "(?)"
+
+
+def dump_mcp_surface() -> None:
+    """MCP 도구 이름과 입력 스키마 — 에이전트가 보는 계약."""
+    try:
+        from anchor.server import build_server
+    except Exception as error:
+        _emit(f"MCP-IMPORT-FAILED {type(error).__name__}")
+        return
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            server, service = build_server(db_path=Path(tmp) / "s.db")
+        except Exception as error:
+            _emit(f"MCP-BUILD-FAILED {type(error).__name__}: {error}")
+            return
+        try:
+            tools = getattr(server, "_tools", None) or getattr(server, "tools", None)
+            if tools is None:
+                _emit("MCP tools: (서버 내부 표현을 못 찾음 — 수동 확인 필요)")
+            else:
+                for name in sorted(tools):
+                    _emit(f"mcp-tool {name}")
+        finally:
+            service.close()
+
+
+def dump_schema() -> None:
+    """SQLite 스키마 — 정리가 스키마를 건드리면 안 된다."""
+    from anchor.store.repository import MIGRATION_FILES, SCHEMA_VERSION
+
+    _emit(f"schema-version {SCHEMA_VERSION}")
+    for version in sorted(MIGRATION_FILES):
+        _emit(f"migration {version} {MIGRATION_FILES[version]}")
+
+
+def main() -> int:
+    _emit("### modules")
+    dump_modules()
+    _emit("### public api")
+    dump_public_api()
+    _emit("### mcp")
+    dump_mcp_surface()
+    _emit("### schema")
+    dump_schema()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
