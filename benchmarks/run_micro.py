@@ -242,6 +242,69 @@ def bench_matcher_worst_case() -> int:
     return unresolved
 
 
+def bench_foreground_budget() -> None:
+    """전경 경로에서 **예산이 실제로 집행되는가** (SPEC §6.2).
+
+    **이 게이트가 왜 생겼나** (2026-08-20 게이트 감사): "최악 사례" 게이트가
+    이름과 달리 예산 집행을 전혀 지키지 않았다 — 예산을 20배로 올려도 p99가
+    구분되지 않았다. 그 픽스처는 50만 자 스캔의 생비용(185ms)이 예산(200ms)에
+    닿기 **전에** 끝나서, 예산이 한 번도 구속하지 않았기 때문이다. 그때는
+    "아직 게이트가 없다"고 공시만 하고 넘겼다(SPEC v1.17 §10). 이 함수가
+    그 자리를 메운다.
+
+    **판정은 벽시계가 아니라 상태로 한다.** 예산이 구속하면 판정을 보류해
+    `UNRESOLVED`가 나오고(SPEC §6.2 — 모르는 것을 모른다고 말한다), 집행이
+    회귀해 예산이 무시되면 스캔이 **완주해서** `MISSING`이 된다. 이 갈림은
+    기계 속도와 무관하므로, 부하가 걸린 러너에서도 뒤집히지 않는다 — 여유가
+    얇은 벽시계 게이트들이 겪는 문제를 원리적으로 피한다.
+
+    **절단이라는 교란을 배제한다.** 처음 만든 픽스처는 한국어 채움이라 한 자가
+    3바이트였고, 2MB 상한에 걸려 **절단** 때문에 `UNRESOLVED`가 났다(SPEC은
+    다 보지 못한 문서를 `MISSING`이라 하지 않는다). 그러면 예산을 무시해도
+    `UNRESOLVED`라 판별력이 0이 된다. ASCII 채움으로 바꿔 바이트 상한 아래에
+    두고, `truncated`가 False임을 **게이트가 직접 확인**한다.
+    """
+    # ASCII 1바이트/자 — 115만 자가 2MB 상한 아래에 들어온다.
+    text = "Filler prose that repeats endlessly through a heavily revised document. " * 16000
+    quote = (
+        "this exact sentence appears nowhere in the document and is long enough "
+        "to force the myers path, truly."
+    )
+    samples, states, truncated_seen = [], set(), set()
+    for _ in range(5):
+        started = time.perf_counter()
+        result = match_anchor(
+            text,
+            exact=quote,
+            prefix="no such prefix",
+            suffix="no such suffix",
+            position_hint=len(text) // 2,
+            budget_ms=200,
+        )
+        samples.append((time.perf_counter() - started) * 1000)
+        states.add(result.state)
+        truncated_seen.add(result.truncated)
+    p99 = percentile(samples, 0.99)
+    gate(
+        "전경 예산 집행: 예산이 구속하면 UNRESOLVED",
+        states == {UNRESOLVED},
+        f"상태 {sorted(states)} — 집행이 회귀하면 스캔이 완주해 MISSING이 된다 "
+        f"(실측 무예산 1,055ms/MISSING). 벽시계와 무관한 판정이다",
+    )
+    gate(
+        "전경 예산 집행: 절단이 아니라 예산이 이유다",
+        truncated_seen == {False},
+        f"truncated {sorted(truncated_seen)} — 절단이면 UNRESOLVED가 예산과 "
+        f"무관해져 위 게이트의 판별력이 0이 된다 ({len(text):,}자 / "
+        f"{len(text.encode()):,}바이트, 상한 2MB)",
+    )
+    gate(
+        "전경 예산 집행: 예산+여유 안에 끝난다",
+        p99 < 250.0,
+        f"p99={p99:.1f}ms (예산 200ms) — 무예산이면 {len(text):,}자를 완주해 1초를 넘긴다",
+    )
+
+
 def bench_matcher_under_contention(foreground_unresolved: int) -> None:
     """배경 배치(정중 모드)의 매칭을 **전경 호출이 실제로 진행 중인 동안** 잰다
     (D-202/D-203).
@@ -607,6 +670,7 @@ def main() -> int:
     bench_cache_hit()
     bench_cache_hit_under_load()
     foreground_unresolved = bench_matcher_worst_case()
+    bench_foreground_budget()
     bench_matcher_under_contention(foreground_unresolved)
     bench_normal_corpus()
     bench_failure_is_fast()
