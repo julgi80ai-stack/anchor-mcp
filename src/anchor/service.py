@@ -8,31 +8,29 @@ v0.1 완료 기준: 같은 URL 두 번 호출 시 두 번째가 본문 0바이�
 
 from __future__ import annotations
 
-import functools
 import math
-import sys
-import threading
 import time
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from pathlib import Path
 from types import TracebackType
 
 import httpx
 
-from anchor.anchoring import approx, matcher
+from anchor.anchoring import matcher
 from anchor.anchoring.selector import (
     OCCURRENCE_COUNT_LIMIT,
     QUALITY_SHORT,
     build_selector,
 )
+from anchor.calls.lifecycle import _CLOSE_GRACE_SECONDS, _CallGate, _foreground
+from anchor.calls.locks import _UrlLocks
+from anchor.calls.traffic import _Traffic
 from anchor.config import Config, load_config
 from anchor.errors import (
     AnchorError,
     DocumentNotFound,
     FetchFailed,
     RobotsDisallowed,
-    StorageError,
     VersionNotFound,
 )
 from anchor.fetcher.archive import ArchiveFallback, ArchiveHit
@@ -102,26 +100,6 @@ _DOCUMENT_STATUSES = ("live", "gone", "forbidden", "paywalled")
 # 아직 문서로 등록되지 않은 URL의 실패를 기록할 때 쓰는 자리표시자.
 # `fetch_log.document_id`가 NOT NULL이라 빈 값을 넣을 수 없다 (D-014).
 _UNREGISTERED = "-"
-
-
-class _Traffic:
-    """한 번의 사용자 호출이 실제로 쓴 네트워크 (D-130·D-134·D-135).
-
-    성공 반환 경로에서만 회계를 만들면, 실패로 끝난 호출의 바이트는 페처와
-    폴백의 지역변수에 있다가 예외와 함께 사라진다. 받는 즉시 여기에 쌓아
-    두고, 어떻게 끝나든 이 값으로 **한 행**을 남긴다.
-    """
-
-    __slots__ = ("bytes_down", "document_id", "http_status")
-
-    def __init__(self) -> None:
-        self.bytes_down = 0
-        self.document_id: str | None = None
-        self.http_status: int | None = None
-
-    def add(self, count: int) -> None:
-        self.bytes_down += count
-
 
 # 아카이브 폴백으로 이어지는 원본 실패 (SPEC §5.2 5→6단계).
 _ARCHIVE_FALLBACK_STATUSES = frozenset({402, 403, 404, 410, 429})
@@ -207,192 +185,6 @@ def _may_consult_archive(error: AnchorError) -> bool:
             return error.http_status in _ARCHIVE_FALLBACK_STATUSES
         return error.reason in _ARCHIVE_FALLBACK_REASONS
     return False
-
-
-class _UrlLockEntry:
-    """URL 하나의 락과 그것을 쓰는(보유·대기) 사람 수."""
-
-    __slots__ = ("lock", "refs")
-
-    def __init__(self) -> None:
-        self.lock = threading.RLock()
-        self.refs = 0
-
-
-class _UrlLocks:
-    """URL 하나당 락 하나. 쓰는 사람이 없어지면 사라진다 (D-038·D-128).
-
-    페치의 "조회 → 판단 → 생성"을 같은 URL끼리 직렬화하는 것은 의도다 —
-    두 스레드가 동시에 "문서 없음"으로 판단하면 documents.url UNIQUE에
-    걸리고, 같은 문서를 두 번 가져와 사이트에 두 배로 부담을 준다.
-
-    문제는 **다른 URL 사이의 거짓 공유**였다. 고정 64개 스트라이프는 URL이
-    십수 개만 되어도 충돌하고(생일 문제), 락은 네트워크 왕복 전체(기본 30초
-    타임아웃 포함) 동안 잡혀 있다 — 실측으로 무관한 문서가 7.92초를 기다렸다.
-    "성능 손해일 뿐"이 아니라 SPEC §10이 요구사항으로 못 박은 격리다.
-
-    등록부 뮤텍스 아래에서 하는 일은 사전 조회와 참조 계수뿐이다 —
-    네트워크도 SQLite도 그 밑에서 일어나지 않으므로, 캐시 히트 경로에
-    실리는 비용은 경합 없는 잠금 두 번(µs 미만)이다. 참조 수는 보유자와
-    대기자를 함께 세므로, 기다리는 사람이 있는 락은 지워지지 않는다.
-    """
-
-    def __init__(self) -> None:
-        self._mutex = threading.Lock()
-        self._entries: dict[str, _UrlLockEntry] = {}
-
-    @contextmanager
-    def acquire(self, key: str) -> Iterator[None]:
-        with self._mutex:
-            entry = self._entries.get(key)
-            if entry is None:
-                entry = _UrlLockEntry()
-                self._entries[key] = entry
-            entry.refs += 1
-        try:
-            entry.lock.acquire()
-        except BaseException:
-            self._release(key, entry)
-            raise
-        try:
-            yield
-        finally:
-            entry.lock.release()
-            self._release(key, entry)
-
-    def _release(self, key: str, entry: _UrlLockEntry) -> None:
-        with self._mutex:
-            entry.refs -= 1
-            # 같은 키의 새 항목이 이미 들어섰을 수 있다 — 내 것일 때만 지운다.
-            if entry.refs == 0 and self._entries.get(key) is entry:
-                del self._entries[key]
-
-    # -- 관측 (동시성 계약은 관측 가능해야 회귀를 잡는다) --------------------
-
-    def refcount(self, key: str) -> int:
-        """그 URL의 락을 보유·대기 중인 수. 0이면 등록부에 없다."""
-        with self._mutex:
-            entry = self._entries.get(key)
-            return entry.refs if entry is not None else 0
-
-    def size(self) -> int:
-        """등록부에 남은 락 수. 정상 상태에서는 진행 중인 페치 수와 같다."""
-        with self._mutex:
-            return len(self._entries)
-
-
-# close()가 진행 중 호출을 기다리며 잠자코 있는 시간. 넘기면 알리고 계속
-# 기다린다 — server.shutdown(D-117)과 같은 판단이다.
-_CLOSE_GRACE_SECONDS = 10.0
-
-
-class _CallGate:
-    """진행 중인 공개 API 호출을 세고, 닫는 동안 새 호출을 막는다 (D-129).
-
-    `close()`가 진행 중 작업을 기다리지도 이후 사용을 막지도 않아,
-    `Anchor.__exit__`가 워커보다 먼저 끝나면 진행 중이던 페치가
-    `Bad file descriptor`로 죽고 이후 호출이 생 `sqlite3.ProgrammingError`로
-    샜다. 서버 경로는 "워커 정리 후 저장소 해제"(D-034/D-117)로 막혀 있었지만
-    라이브러리 직접 사용 경로(SPEC §8)에는 같은 보장이 없었다.
-
-    `foreground_section`(GIL 양보, D-196~D-204)과는 **별개 기제**다. 양보는
-    배경 워커(정중 스레드)의 재진입을 일부러 표시하지 않는데, 종료 안전은
-    바로 그 배경 호출까지 세어야 성립하기 때문이다.
-    """
-
-    def __init__(self) -> None:
-        self._condition = threading.Condition(threading.Lock())
-        self._active = 0
-        self._closing = False
-        self._closed_event = threading.Event()
-        self._local = threading.local()
-
-    @property
-    def closing(self) -> bool:
-        return self._closing
-
-    @contextmanager
-    def entered(self) -> Iterator[None]:
-        depth = getattr(self._local, "depth", 0)
-        with self._condition:
-            # 이미 이 스레드에서 시작된 호출의 내부 호출(verify → fetch)은
-            # 막지 않는다. 막으면 "진행 중 호출은 끝까지 보장한다"가 깨진다.
-            if self._closing and depth == 0:
-                raise StorageError(
-                    "store is closed — 저장소가 닫혔습니다 (close 이후의 호출)"
-                )
-            self._active += 1
-        self._local.depth = depth + 1
-        try:
-            yield
-        finally:
-            self._local.depth = depth
-            with self._condition:
-                self._active -= 1
-                self._condition.notify_all()
-
-    def begin_close(self, grace: float) -> bool:
-        """닫기를 시작하고 진행 중 호출이 끝나기를 기다린다.
-
-        이미 닫혔거나 닫는 중이면 False — 이중 close는 무해하다. 유예가
-        지나면 stderr로 알리고 **계속 기다린다**: 공개 API 호출은 전부
-        유한하고(HTTP 타임아웃·재시도 상한 D-206, 앵커당 시간 예산 §10),
-        여기서 포기하고 닫으면 그 호출이 죽어 고치려던 결함으로 되돌아간다.
-        """
-        own = getattr(self._local, "depth", 0)  # 내 호출 안에서 부른 close
-        with self._condition:
-            if self._closing:
-                already_closing = True
-            else:
-                already_closing = False
-                self._closing = True
-        if already_closing:
-            # 다른 스레드가 닫는 중이다. 자원 해제 전에 돌려보내면 "close가
-            # 반환했으면 닫혔다"가 그 스레드에서만 거짓이 된다 — 기다린다.
-            self._closed_event.wait()
-            return False
-        with self._condition:
-            deadline = time.monotonic() + grace
-            warned = False
-            while self._active > own:
-                remaining = deadline - time.monotonic()
-                if remaining > 0:
-                    self._condition.wait(remaining)
-                    continue
-                if not warned:
-                    print(
-                        f"anchor: waiting for {self._active - own} in-flight call(s) to "
-                        "finish before closing the store — 저장소를 닫기 전에 진행 중인 "
-                        "호출이 끝나기를 기다리는 중",
-                        file=sys.stderr,
-                    )
-                    warned = True
-                self._condition.wait(1.0)
-        return True
-
-    def finish_close(self) -> None:
-        """자원 해제가 끝났음을 알린다 — 같이 기다리던 close들이 돌아간다."""
-        self._closed_event.set()
-
-
-def _foreground(method):
-    """전경(지연 민감) 호출 구간을 표시한다 (D-196).
-
-    배경 워커의 매칭 루프는 이 구간이 열려 있는 동안에만 GIL 양보로
-    잠든다. 배경 워커(정중 스레드) 자신의 재진입은 표시하지 않는다 —
-    자기 자신을 위해 양보하게 만들지 않기 위해서다."""
-
-    @functools.wraps(method)
-    def wrapper(self, *args, **kwargs):
-        # 종료 안전(D-129)은 양보 의미론과 별개 기제다 — 정중 스레드의
-        # 호출도 세어야 close가 그것을 기다린다.
-        with self._calls.entered():
-            if approx.is_polite_thread():
-                return method(self, *args, **kwargs)
-            with approx.foreground_section():
-                return method(self, *args, **kwargs)
-
-    return wrapper
 
 
 class Anchor:

@@ -17,6 +17,7 @@ MCP 도구 스키마, 공개 시그니처)이 조용히 바뀔 수 있고, 파�
 from __future__ import annotations
 
 import dataclasses
+import re
 import importlib
 import inspect
 import pkgutil
@@ -76,7 +77,7 @@ def dump_public_api() -> None:
             elif inspect.isfunction(obj):
                 _emit(f"def {mod_name}.{attr}{_signature(obj)}")
             elif isinstance(obj, (str, int, float, bool, frozenset, tuple)):
-                _emit(f"const {mod_name}.{attr} = {obj!r}")
+                _emit(_stable(f"const {mod_name}.{attr} = {obj!r}"))
 
 
 def _type_name(t: object) -> str:
@@ -87,9 +88,26 @@ def _bases(cls: type) -> str:
     return ", ".join(b.__name__ for b in cls.__bases__)
 
 
+# `repr`에 실려 오는 실행마다 달라지는 것들. 지문이 이것을 담으면 **아무것도
+# 바꾸지 않아도 매번 diff가 뜨고**(실측 18줄 — typer의 OptionInfo/ArgumentInfo),
+# 규약 R3의 "삭제·변경 0줄" 검사가 무력해진다. 더 나쁜 것은 그 잡음을 손수
+# "무해"로 판정하는 습관이 붙는 것이다 — 진짜 시그니처 변경이 같은 자리에
+# 섞이면 놓친다. 증명 도구는 결정적이어야 한다.
+_VOLATILE = (
+    (re.compile(r"0x[0-9a-fA-F]+"), "0xADDR"),          # 메모리 주소
+    (re.compile(r"<([\w.]+) object at 0xADDR>"), r"<\1>"),  # 주소를 뗀 뒤 남는 껍질
+)
+
+
+def _stable(text: str) -> str:
+    for pattern, replacement in _VOLATILE:
+        text = pattern.sub(replacement, text)
+    return text
+
+
 def _signature(fn: object) -> str:
     try:
-        return str(inspect.signature(fn))
+        return _stable(str(inspect.signature(fn)))
     except (ValueError, TypeError):
         return "(?)"
 
