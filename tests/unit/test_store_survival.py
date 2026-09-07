@@ -590,7 +590,8 @@ def test_merge_moves_the_accounting_rows(tmp_path):
         target = _seed_document(repository, "https://e.test/b", "B 본문이다. " * 30)
         for _ in range(3):
             repository.log_fetch(
-                document_id=source, outcome="cache_hit", http_status=None,
+                document_id=source, url=f"https://example.test/{source}",
+                outcome="cache_hit", error_kind=None, http_status=None,
                 bytes_down=0, elapsed_ms=1, requested_at=utcnow_iso(),
             )
         repository.merge_document(source, target)

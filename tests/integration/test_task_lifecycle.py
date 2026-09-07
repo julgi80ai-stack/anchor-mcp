@@ -151,7 +151,8 @@ def test_shutdown_during_background_task_does_not_crash(tmp_path):
         def busy(stop):
             while not stop():
                 service._repository.log_fetch(
-                    document_id="d", requested_at="2026-08-17T00:00:00Z",
+                    document_id="d", url="https://example.test/d",
+                    requested_at="2026-08-17T00:00:00Z", error_kind=None,
                     outcome="cache_hit", http_status=200, bytes_down=0, elapsed_ms=1,
                 )
 

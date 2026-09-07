@@ -684,12 +684,19 @@ def build_server(
         }
 
     @server.tool(name="cache_stats")
-    def cache_stats() -> dict[str, Any]:
+    def cache_stats(failure_sample: int = 20) -> dict[str, Any]:
         """Cache accounting: document/version/anchor counts, disk usage, and the
-        last 30 days of savings (hit rate, bytes saved).
+        last 30 days of savings (hit rate, bytes saved). Failures are broken down
+        by kind and by HTTP status, and the most recent ones are listed with the
+        URL that was requested — neither axis alone says what actually failed
+        (203 is a success status, and status is absent for robots refusals,
+        connection failures and timeouts alike). `failure_sample` caps that list;
+        `recent_failures_truncated` says whether it was cut. Rows written before
+        schema v12 report `unrecorded`, not a guessed kind.
 
-        캐시 회계: 문서·버전·앵커 수, 디스크 사용량, 최근 30일 절감 효과."""
-        return service.cache_stats()
+        캐시 회계. 실패는 종류·상태코드 두 축으로 나뉘고 최근 실패는 요청한
+        URL과 함께 열거된다 — 어느 한 축만으로는 무엇이 실패했는지 알 수 없다."""
+        return service.cache_stats(failure_sample=failure_sample)
 
     @server.tool(name="get_timemap")
     def get_timemap(document_id: str, format: str = "link") -> dict[str, Any]:

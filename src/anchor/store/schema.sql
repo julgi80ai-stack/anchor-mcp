@@ -69,7 +69,22 @@ CREATE TABLE fetch_log (
                                   -- | renormalized | created | archive | error
     http_status   INTEGER,
     bytes_down    INTEGER NOT NULL DEFAULT 0,
-    elapsed_ms    INTEGER NOT NULL
+    elapsed_ms    INTEGER NOT NULL,
+    -- 아래 둘은 v12에서 붙었고 **끝에 온다**. `ALTER TABLE ADD COLUMN`은 열을
+    -- 뒤에만 붙일 수 있으므로 여기서 가운데 끼우면 마이그레이션으로 올라온
+    -- DB와 신규 DB의 열 순서가 갈린다 (D-256이 세운 가드가 잡는 자리).
+    --
+    -- url: 이 호출이 **요청한** URL (D-283). 첫 페치가 실패하면 documents 행이
+    -- 없어 document_id가 `-`가 된다 — 그때 무엇을 못 가져왔는지 아는 유일한
+    -- 열이다(실사용 오류 148건 중 141건). v12 이전 행은 NULL이며 문서 URL로
+    -- 소급해 채우지 않는다 — 리다이렉트·별칭·병합을 지난 문서 URL은 그때
+    -- 요청한 URL이 아니다.
+    url           TEXT,
+    -- error_kind: outcome='error'일 때 **무엇이** 실패했는가. 예외 계층이 이미
+    -- 아는 사실을 그대로 적는다 — 새로 판정하지 않는다. 상태코드로는 갈리지
+    -- 않는다: 203은 성공 경로라 `error + 203`은 추출 실패를 뜻하고, 상태코드
+    -- NULL 한 칸에 robots 거부·연결 실패·타임아웃이 접힌다.
+    error_kind    TEXT
 );
 
 -- 리다이렉트 이전 URL → 문서. 사용자가 넘긴 URL로도 캐시를 찾게 한다 (v4).

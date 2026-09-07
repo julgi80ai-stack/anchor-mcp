@@ -18,6 +18,7 @@ import pytest
 
 from anchor.config import Config
 from anchor.errors import AnchorError
+from anchor.fetcher.urlnorm import normalize_url
 from anchor.service import Anchor
 
 from .conftest import article_html
@@ -35,7 +36,8 @@ def _anchor(tmp_path: Path, **overrides) -> Anchor:
 
 def _log(anchor: Anchor) -> list[dict]:
     rows = anchor._repository._connection.execute(
-        "SELECT document_id, outcome, http_status, bytes_down FROM fetch_log ORDER BY id"
+        "SELECT document_id, url, outcome, error_kind, http_status, bytes_down "
+        "FROM fetch_log ORDER BY id"
     ).fetchall()
     return [dict(row) for row in rows]
 
@@ -207,6 +209,29 @@ FAILURE_CASES = [
 ]
 
 
+# 실패의 **종류**는 예외 계층이 이미 알고 있다 (D-283). 상태코드는 그것을
+# 말하지 못한다 — 실사용 저장소에서 `error + 203` 2건이 "203을 거부했다"로
+# 읽혔지만 203은 성공 경로이고(`REPRESENTATION_STATUSES`), 실제로는 본문을
+# 다 받은 뒤의 추출 실패였다. 상태코드 41건이 통째로 NULL인 것도 같은 구멍
+# 이다(robots 거부·타임아웃·연결 실패가 한 칸에 접힌다). 여기 기대값은
+# **예외에서 그대로 나온 이름**이지 우리가 붙인 해석이 아니다.
+_EXPECTED_KIND = {
+    "robots_explicit_unregistered": "robots_denied",
+    "robots_unavailable_unregistered": "robots_unavailable",
+    "timeout": "timeout",
+    "redirect_limit": "redirect",
+    "content_too_large": "too_large",
+    "extraction_failed": "extraction_failed",
+    "timeout_registered": "timeout",
+    "body_cut_mid_transfer": "network",
+    "body_stall_mid_transfer": "timeout",
+    "robots_cut_mid_transfer": "robots_unavailable",
+    "archive_lookup_cut_mid_transfer": "http_status",
+}
+assert set(_EXPECTED_KIND) == {case[0] for case in FAILURE_CASES}, (
+    "실패 축이 늘거나 줄면 기대 종류도 함께 적는다"
+)
+
 @pytest.mark.parametrize(
     "name,prepare,overrides,path,pre_register,expect",
     FAILURE_CASES,
@@ -235,6 +260,15 @@ def test_every_failure_kind_leaves_one_row_with_the_bytes_it_downloaded(
     assert rows[0]["outcome"] == "error"
     assert rows[0]["bytes_down"] == expect(state), (
         f"{name}: 실수령 {expect(state)}B 중 {rows[0]['bytes_down']}B만 계상됐다"
+    )
+    # 무엇을 못 가져왔는가 (D-283). 문서가 없으면 document_id는 `-`이고, 그때
+    # URL까지 없으면 그 실패는 **영영 열거되지 않는다** — 재시도도 재고 조사도
+    # 불가능하다. 실사용 저장소의 오류 148건 중 141건이 그 상태였다.
+    assert rows[0]["url"] == normalize_url(f"{base}{path}"), (
+        f"{name}: 실패한 요청의 URL이 기록되지 않았다"
+    )
+    assert rows[0]["error_kind"] == _EXPECTED_KIND[name], (
+        f"{name}: 실패 종류가 {rows[0]['error_kind']!r}로 기록됐다"
     )
 
 
@@ -608,3 +642,107 @@ def test_a_failure_after_the_body_lookup_does_not_add_a_second_row(
 
     assert len(rows) == 1, f"호출 1회가 {len(rows)}행으로 계상됐다"
     assert rows[0]["outcome"] == "error"
+
+
+# -- D-283: 실패가 귀속되고 분해된다 --------------------------------------
+
+
+def _fail(anchor: Anchor, url: str) -> None:
+    with pytest.raises(AnchorError):
+        anchor.fetch(url, max_age=0)
+
+
+def test_failures_are_broken_down_by_kind_and_status(tmp_path, fixture_server):
+    """같은 상태코드 아래 다른 종류가, 같은 종류 아래 다른 상태코드가 있다.
+
+    두 축을 함께 내는 이유가 이것이다. 상태코드만 보면 404(원문 부재)와
+    403(사이트 거부)이 갈리지만 **추출 실패는 200에 숨고**, 종류만 보면 그
+    둘이 `http_status` 하나로 접힌다.
+    """
+    base, state = fixture_server
+    state.bodies["/empty"] = "<html><body></body></html>"
+    with _anchor(tmp_path) as anchor:
+        _fail(anchor, f"{base}/private")  # robots 거부 — 상태코드 없음
+        _fail(anchor, f"{base}/empty")  # 200인데 추출 실패
+        state.status_override = 404
+        _fail(anchor, f"{base}/gone")  # 원문 부재
+        window = anchor.cache_stats()["last_30d"]
+
+    breakdown = window["error_breakdown"]
+    assert breakdown["by_kind"]["robots_denied"] == 1
+    assert breakdown["by_kind"]["extraction_failed"] == 1, (
+        "본문을 다 받고 추출에서 실패한 것은 상태코드로 드러나지 않는다"
+    )
+    assert breakdown["by_kind"]["http_status"] == 1
+    # 추출 실패는 200으로 기록된다 — 종류가 없으면 성공처럼 보이는 자리다.
+    assert breakdown["by_status"]["200"] == 1
+    assert breakdown["by_status"]["404"] == 1
+    assert breakdown["by_status"]["none"] == 1, "robots 거부에는 상태코드가 없다"
+    # 두 축 어느 쪽도 사건을 잃거나 지어내지 않는다.
+    assert sum(breakdown["by_kind"].values()) == window["errors"] == 3
+    assert sum(breakdown["by_status"].values()) == window["errors"]
+
+
+def test_failures_before_v12_report_that_they_were_not_recorded(tmp_path, fixture_server):
+    """옛 행의 종류는 `unrecorded`다 — `other`로 접으면 단정이 된다 (D-283).
+
+    `other`는 "예외 계층 밖의 무엇"이라는 **사실**이고, 옛 행에 대해 우리가
+    아는 것은 "기록하지 않았다"뿐이다. 둘을 같은 칸에 넣으면 v12 이전의
+    침묵이 판정으로 둔갑한다 — v7 occurrences·v8 coverage와 같은 규칙.
+    """
+    base, state = fixture_server
+    with _anchor(tmp_path) as anchor:
+        state.status_override = 404
+        _fail(anchor, f"{base}/gone")
+        # 마이그레이션으로 올라온 옛 행을 흉내낸다: 두 열이 NULL이다.
+        with anchor._repository._connection:
+            anchor._repository._connection.execute(
+                "UPDATE fetch_log SET url = NULL, error_kind = NULL"
+            )
+        window = anchor.cache_stats()["last_30d"]
+
+    assert window["error_breakdown"]["by_kind"] == {"unrecorded": 1}
+    assert window["recent_failures"] == [], "URL이 없는 행의 URL을 지어내지 않는다"
+
+
+def test_recent_failures_name_what_could_not_be_fetched(tmp_path, fixture_server):
+    """실패 열거는 URL을 준다 — 없으면 재시도도 재고 조사도 불가능하다 (D-283).
+
+    특히 **문서가 등록되기 전에** 실패한 것이 그렇다. 그때 `document_id`는
+    `-`이므로 URL이 유일한 단서다 (실사용 오류 148건 중 141건).
+    """
+    base, state = fixture_server
+    with _anchor(tmp_path) as anchor:
+        state.status_override = 404
+        _fail(anchor, f"{base}/gone-one")
+        _fail(anchor, f"{base}/gone-two")
+        window = anchor.cache_stats()["last_30d"]
+
+    rows = window["recent_failures"]
+    assert {row["url"] for row in rows} == {
+        normalize_url(f"{base}/gone-one"),
+        normalize_url(f"{base}/gone-two"),
+    }
+    assert all(row["error_kind"] == "http_status" for row in rows)
+    assert all(row["http_status"] == 404 for row in rows)
+    assert window["recent_failures_truncated"] is False
+
+
+def test_the_failure_sample_says_when_it_was_cut(tmp_path, fixture_server):
+    """표본이 잘리면 잘렸다고 말한다. **정확히 상한만큼**일 때는 잘리지 않았다.
+
+    상한과 같은 수를 받았다고 잘렸다고 단정하면 그 경계에서 도구가 자기에
+    대해 거짓을 말한다 (D-227과 같은 규칙).
+    """
+    base, state = fixture_server
+    with _anchor(tmp_path) as anchor:
+        state.status_override = 404
+        for index in range(3):
+            _fail(anchor, f"{base}/gone-{index}")
+        exact = anchor.cache_stats(failure_sample=3)["last_30d"]
+        cut = anchor.cache_stats(failure_sample=2)["last_30d"]
+
+    assert len(exact["recent_failures"]) == 3
+    assert exact["recent_failures_truncated"] is False, "상한과 같은 수는 잘린 것이 아니다"
+    assert len(cut["recent_failures"]) == 2
+    assert cut["recent_failures_truncated"] is True

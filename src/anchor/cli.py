@@ -384,6 +384,24 @@ def stats(
         f"다운로드 {window['bytes_down']:,} bytes · 절감 추정 {window['bytes_saved_estimate']:,} bytes"
         f" · hit_rate {window['hit_rate']:.2%}"
     )
+    # 실패를 한 덩어리로 두면 무엇이 분모를 채웠는지 알 수 없다 (D-283).
+    # 종류와 상태코드를 나란히 적는다 — 어느 쪽도 혼자서는 말하지 못한다.
+    breakdown = window["error_breakdown"]
+    if window["errors"]:
+        for axis, label in (("by_kind", "실패 종류"), ("by_status", "상태코드")):
+            items = breakdown.get(axis) or {}
+            if items:
+                typer.echo(
+                    f"  {label}: "
+                    + ", ".join(f"{name} {count}" for name, count in items.items())
+                )
+    failures = window["recent_failures"]
+    if failures:
+        more = " (더 있음)" if window["recent_failures_truncated"] else ""
+        typer.echo(f"  최근 실패{more}:")
+        for row in failures:
+            status = row["http_status"] if row["http_status"] is not None else "-"
+            typer.echo(f"    {row['error_kind'] or '-':<20} {status:<5} {row['url']}")
 
 
 @app.command()

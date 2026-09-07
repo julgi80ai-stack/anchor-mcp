@@ -16,7 +16,7 @@ import zstandard
 from anchor.errors import DocumentNotFound, StorageError, VersionNotFound
 from anchor.models import AnchorRecord, Coverage, Document, Version, uuid7
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 ZSTD_LEVEL = 6
 
 
@@ -185,6 +185,7 @@ MIGRATION_FILES: dict[int, str] = {
     9: "migrations/0009_anchor_cited_url.sql",
     10: "migrations/0010_reclaimable_versions.sql",
     11: "migrations/0011_version_observed_raw.sql",
+    12: "migrations/0012_fetch_log_attribution.sql",
 }
 
 
@@ -1038,8 +1039,10 @@ class Repository:
         self,
         *,
         document_id: str,
+        url: str | None,
         requested_at: str,
         outcome: str,
+        error_kind: str | None,
         http_status: int | None,
         bytes_down: int,
         elapsed_ms: int,
@@ -1047,9 +1050,19 @@ class Repository:
         with self._connection:
             self._connection.execute(
                 """INSERT INTO fetch_log
-                   (document_id, requested_at, outcome, http_status, bytes_down, elapsed_ms)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (document_id, requested_at, outcome, http_status, bytes_down, elapsed_ms),
+                   (document_id, url, requested_at, outcome, error_kind,
+                    http_status, bytes_down, elapsed_ms)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    document_id,
+                    url,
+                    requested_at,
+                    outcome,
+                    error_kind,
+                    http_status,
+                    bytes_down,
+                    elapsed_ms,
+                ),
             )
 
     # -- gc ----------------------------------------------------------------
@@ -1281,6 +1294,56 @@ class Repository:
                 f"SELECT COUNT(*) FROM {table}"
             ).fetchone()
         return counts
+
+    def error_breakdown_since(self, since_iso: str) -> dict[str, dict[str, int]]:
+        """실패를 **종류별·상태코드별**로 나눈 집계 (D-283).
+
+        두 축을 함께 낸다. 어느 쪽도 혼자서는 무엇이 실패했는지 말하지 못하기
+        때문이다. 상태코드는 203(성공 코드)에 붙은 실패를 "203 거부"로 보이게
+        하고 상태 없는 실패를 한 칸에 접으며, 종류는 403과 404를 `http_status`
+        하나로 접는다. 둘을 나란히 놓아야 "사이트가 거부했다"와 "우리가 못
+        읽었다"가 갈린다.
+
+        v12 이전 행의 `error_kind`는 NULL이다 — 그것을 `"other"`로 접으면
+        **모르는 것을 아는 것처럼** 만든다. `"unrecorded"`로 따로 센다.
+        """
+        kinds: dict[str, int] = {}
+        for kind, count in self._connection.execute(
+            """SELECT COALESCE(error_kind, 'unrecorded'), COUNT(*) FROM fetch_log
+               WHERE outcome = 'error' AND requested_at >= ?
+               GROUP BY 1""",
+            (since_iso,),
+        ).fetchall():
+            kinds[kind] = count
+        statuses: dict[str, int] = {}
+        for status, count in self._connection.execute(
+            """SELECT COALESCE(CAST(http_status AS TEXT), 'none'), COUNT(*) FROM fetch_log
+               WHERE outcome = 'error' AND requested_at >= ?
+               GROUP BY 1""",
+            (since_iso,),
+        ).fetchall():
+            statuses[status] = count
+        return {
+            "by_kind": dict(sorted(kinds.items(), key=lambda kv: (-kv[1], kv[0]))),
+            "by_status": dict(sorted(statuses.items(), key=lambda kv: (-kv[1], kv[0]))),
+        }
+
+    def failed_urls_since(self, since_iso: str, *, limit: int) -> list[dict]:
+        """실패한 요청을 **열거한다** (D-283). 최근 것부터.
+
+        회계의 수치는 "얼마나"만 말한다. 재시도할지, 그 미스가 중요했는지는
+        **무엇을** 못 가져왔는지 알아야 판단할 수 있고, 그 판단은 우리가 아니라
+        호출자가 한다. URL이 없는 v12 이전 행은 지어내지 않고 그대로 뺀다.
+        """
+        rows = self._connection.execute(
+            """SELECT url, error_kind, http_status, requested_at, elapsed_ms, bytes_down
+               FROM fetch_log
+               WHERE outcome = 'error' AND url IS NOT NULL AND requested_at >= ?
+               ORDER BY requested_at DESC, id DESC
+               LIMIT ?""",
+            (since_iso, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def fetch_stats_since(self, since_iso: str) -> dict[str, int]:
         """fetch_log 집계: outcome별 건수 + 총 다운로드 바이트."""

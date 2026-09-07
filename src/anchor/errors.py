@@ -100,3 +100,54 @@ class StorageError(AnchorError):
     잘못된 `--db` 값은 그런 뜻이 아니다. 저장소 계층에서 도메인화하므로
     라이브러리 직접 사용 경로(SPEC §8)도 같은 보장을 받는다.
     """
+
+
+# 실패의 **종류**. 상태코드가 말하지 못하는 것을 예외 계층은 이미 알고 있다
+# (D-283). 여기서 새로 판정하는 것은 없다 — 어떤 예외가 났는가, 그리고 그
+# 예외가 스스로 들고 있는 `reason`이 무엇인가를 옮겨 적을 뿐이다.
+#
+# 이 표가 없으면 회계는 실패를 상태코드로만 가른다. 실사용에서 그것이 어떻게
+# 어긋났는지는 두 가지로 드러났다. `error + 203` 2건은 "203을 거부했다"로
+# 읽혔지만 203은 성공 경로이고 실제로는 추출 실패였고(200의 추출 실패 2건과
+# 같은 사건), 상태코드 NULL 41건에는 robots 거부·연결 실패·타임아웃이 한
+# 칸에 접혀 있었다.
+ERROR_KINDS = (
+    "robots_denied",
+    "robots_unavailable",
+    "invalid_url",
+    "http_status",
+    "timeout",
+    "network",
+    "redirect",
+    "too_large",
+    "unsupported_content",
+    "extraction_failed",
+    "storage",
+    "not_found",
+    "other",
+)
+
+
+def error_kind(error: BaseException) -> str:
+    """예외가 스스로 말하는 실패의 종류. 모르면 `"other"`다 — 지어내지 않는다."""
+    if isinstance(error, RobotsDisallowed):
+        # 사이트 소유자의 의사(explicit)와 의사를 확인하지 못한 것(unavailable)은
+        # 다른 사실이다. 회계에서 접으면 "우리가 못 물어봤다"가 "그쪽이
+        # 거부했다"로 보고된다 — D-228이 정확히 그 모양이었다.
+        return "robots_unavailable" if error.reason == "unavailable" else "robots_denied"
+    if isinstance(error, InvalidURL):
+        return "invalid_url"
+    if isinstance(error, FetchFailed):
+        # reason은 페처가 붙인 사실이다(status | timeout | network | redirect).
+        return error.reason if error.reason != "status" else "http_status"
+    if isinstance(error, ContentTooLarge):
+        return "too_large"
+    if isinstance(error, UnsupportedContent):
+        return "unsupported_content"
+    if isinstance(error, ExtractionFailed):
+        return "extraction_failed"
+    if isinstance(error, StorageError):
+        return "storage"
+    if isinstance(error, (DocumentNotFound, VersionNotFound)):
+        return "not_found"
+    return "other"

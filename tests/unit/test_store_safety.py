@@ -160,7 +160,8 @@ def test_rollback_is_not_defeated_by_concurrent_commit(tmp_path):
     thread.join(timeout=10)
 
     repository.log_fetch(
-        document_id="doc", requested_at="2026-08-17T00:00:01Z", outcome="committed",
+        document_id="doc", url="https://example.test/doc",
+        requested_at="2026-08-17T00:00:01Z", outcome="committed", error_kind=None,
         http_status=200, bytes_down=0, elapsed_ms=1,
     )
     outcomes = [

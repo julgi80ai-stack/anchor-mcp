@@ -10,7 +10,7 @@ SPEC §13 로드맵 참조.
 # 임포트보다 **먼저** 정의한다. `config`가 기본 User-Agent를 이 값에서
 # 만들기 때문이다(SPEC §5.4 `Anchor/<릴리스 버전>`) — 아래 임포트가
 # service → config를 끌어오므로, 순서를 바꾸면 순환 임포트가 된다 (D-221).
-__version__ = "1.15.0"
+__version__ = "1.16.0"
 
 from anchor.service import Anchor  # noqa: E402
 

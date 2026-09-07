@@ -33,6 +33,7 @@ from anchor.errors import (
     FetchFailed,
     RobotsDisallowed,
     VersionNotFound,
+    error_kind,
 )
 from anchor.fetcher.archive import ArchiveFallback, ArchiveHit
 from anchor.fetcher.client import (
@@ -379,13 +380,19 @@ class Anchor:
             return self._fetch_counted(
                 norm_url, max_age, force_refresh, include_content, started, traffic
             )
-        except AnchorError:
+        except AnchorError as error:
             self._log(
                 traffic.document_id or _UNREGISTERED,
                 "error",
                 traffic.http_status,
                 traffic.bytes_down,
                 started,
+                url=norm_url,
+                # 무엇이 실패했는가는 예외가 이미 안다 (D-283). 상태코드로는
+                # 갈리지 않는다 — 203은 성공 경로라 `error + 203`이 추출
+                # 실패를 뜻하고, 상태코드 없는 실패 한 칸에 robots 거부·연결
+                # 실패·타임아웃이 함께 접힌다.
+                kind=error_kind(error),
             )
             raise
 
@@ -1028,7 +1035,9 @@ class Anchor:
         )
 
     @_foreground
-    def cache_stats(self, *, window_seconds: float = 30 * 86400) -> dict:
+    def cache_stats(
+        self, *, window_seconds: float = 30 * 86400, failure_sample: int = 20
+    ) -> dict:
         """캐시 회계 (SPEC §7.7). 절감 효과를 사용자가 직접 확인하는 지표."""
         since = iso_ago(window_seconds)
         counts = self._repository.count_rows()
@@ -1036,6 +1045,11 @@ class Anchor:
         requests = window["requests"]
         cache_hits = window.get("cache_hit", 0)
         not_modified = window.get("not_modified", 0)
+        # 표본 상한 + 1을 뽑아 **잘렸는지를 사실로 안다** — 상한과 같은 수를
+        # 받았다고 잘렸다고 단정하면 정확히 상한만큼 실패한 창에서 거짓이 된다.
+        sampled = self._repository.failed_urls_since(since, limit=failure_sample + 1)
+        truncated = len(sampled) > failure_sample
+        failures = sampled[:failure_sample]
         return {
             "documents": counts["documents"],
             "versions": counts["versions"],
@@ -1060,6 +1074,17 @@ class Anchor:
                 # 내역의 합이 총 요청 수와 맞지 않는다 (D-136, SPEC §7.7).
                 "archive": window.get("archive", 0),
                 "errors": window.get("error", 0),
+                # `errors` 하나로는 무엇이 분모를 채웠는지 알 수 없다 (D-283).
+                # 403(사이트 거부)·404(원문 부재)·robots 거부는 이 도구가
+                # **제대로 한 일**이고, 추출 실패·협상 거부는 우리 결함이다.
+                # 둘을 접어 두면 hit_rate를 논할 때 무엇이 오염원인지 알 수
+                # 없다. 판정은 하지 않는다 — 사실만 두 축으로 갈라 놓는다.
+                "error_breakdown": self._repository.error_breakdown_since(since),
+                # 그리고 **무엇을** 못 가져왔는지 (D-283). 수치는 "얼마나"만
+                # 말하고, 재시도·재고 조사는 URL이 있어야 가능하다. 표본이라
+                # 잘린 사실을 함께 싣는다.
+                "recent_failures": failures,
+                "recent_failures_truncated": truncated,
                 "bytes_down": window["bytes_down"],
                 "bytes_saved_estimate": self._repository.bytes_saved_estimate_since(since),
                 "hit_rate": round((cache_hits + not_modified) / requests, 4) if requests else 0.0,
@@ -1584,7 +1609,9 @@ class Anchor:
         # 여기가 `DocumentNotFound`를 던지면, 성공 1행을 남긴 채 실패 경로의
         # 회계가 한 행 더 붙는다 — "호출 1회 = 1행"이 깨진다 (D-130·D-133).
         content = self._repository.get_version_text(version.id) if include_content else None
-        elapsed_ms = self._log(document.id, outcome, http_status, bytes_down, started)
+        elapsed_ms = self._log(
+            document.id, outcome, http_status, bytes_down, started, url=document.url
+        )
         return FetchResult(
             document_id=document.id,
             version_id=version.id,
@@ -1615,12 +1642,23 @@ class Anchor:
         http_status: int | None,
         bytes_down: int,
         started: float,
+        *,
+        url: str | None = None,
+        kind: str | None = None,
     ) -> int:
+        """호출 1회 = 1행. `url`은 **이 호출이 요청한 URL**이다 (D-283).
+
+        문서 id로는 실패를 귀속시킬 수 없다 — 첫 페치가 실패하면 문서 행이
+        아직 없어 `-`가 되기 때문이다(실사용 오류 148건 중 141건). 그러면
+        무엇을 못 가져왔는지가 어디에도 남지 않는다.
+        """
         elapsed_ms = int((time.monotonic() - started) * 1000)
         self._repository.log_fetch(
             document_id=document_id,
+            url=url,
             requested_at=utcnow_iso(),
             outcome=outcome,
+            error_kind=kind,
             http_status=http_status,
             bytes_down=bytes_down,
             elapsed_ms=elapsed_ms,

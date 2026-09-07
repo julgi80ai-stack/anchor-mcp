@@ -390,7 +390,8 @@ def test_prunes_fetch_log_past_retention_and_keeps_the_reported_window(repo):
     document_id = make_document(repo)
     for age in (500, 401, 399, 40, 29, 1):
         repo.log_fetch(
-            document_id=document_id, requested_at=ago(days=age), outcome="cache_hit",
+            document_id=document_id, url=f"https://example.test/{document_id}",
+            requested_at=ago(days=age), outcome="cache_hit", error_kind=None,
             http_status=200, bytes_down=0, elapsed_ms=4,
         )
 
@@ -439,7 +440,8 @@ def test_pruning_releases_the_store_between_batches(repo):
     version = add_version(repo, document_id, "v0", day=1, serve=True)
     for index in range(4000):
         repo.log_fetch(
-            document_id=document_id, requested_at=ago(days=500 + index % 30),
+            document_id=document_id, url=f"https://example.test/{document_id}",
+            requested_at=ago(days=500 + index % 30), error_kind=None,
             outcome="cache_hit", http_status=200, bytes_down=0, elapsed_ms=1,
         )
     idle = _probe_latency_ms(repo, version.id)
@@ -484,7 +486,8 @@ def test_library_gc_reports_what_it_pruned(tmp_path):
                 found_text=None, elapsed_ms=1,
             )
         repository.log_fetch(
-            document_id=repository.list_documents()[0].id, requested_at=ago(days=900),
+            document_id=repository.list_documents()[0].id, url="https://stale.test/a",
+            requested_at=ago(days=900), error_kind=None,
             outcome="cache_hit", http_status=200, bytes_down=0, elapsed_ms=1,
         )
         repository.set_robots("https://stale.test", "User-agent: *", 200, ago(days=9))
@@ -679,11 +682,13 @@ def test_pruning_uses_timestamps_written_by_the_production_writers(tmp_path):
             found_text=None, elapsed_ms=1,
         )
         repository.log_fetch(
-            document_id=document_id, requested_at=iso_ago(500 * 86400),
+            document_id=document_id, url=f"https://example.test/{document_id}",
+            requested_at=iso_ago(500 * 86400), error_kind=None,
             outcome="cache_hit", http_status=200, bytes_down=0, elapsed_ms=1,
         )
         repository.log_fetch(
-            document_id=document_id, requested_at=utcnow_iso(), outcome="cache_hit",
+            document_id=document_id, url=f"https://example.test/{document_id}",
+            requested_at=utcnow_iso(), outcome="cache_hit", error_kind=None,
             http_status=200, bytes_down=0, elapsed_ms=1,
         )
         repository.set_robots("https://old.test", "User-agent: *", 200, iso_ago(90000))
