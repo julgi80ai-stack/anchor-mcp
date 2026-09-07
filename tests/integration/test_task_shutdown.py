@@ -392,7 +392,9 @@ async def test_cancel_overlapping_long_network_wait(fixture_server, tmp_path):
                     f"취소 응답이 조인 상한을 훌쩍 넘겨 {cancel_elapsed:.1f}s 매달렸다"
                 )
                 # 네트워크 대기와 겹치면 비종결일 수 있다 — 그 자체는 계약 위반이
-                # 아니다 (SPEC §15 4행 한정). 종결은 폴링으로 관찰한다.
+                # 아니다 (SPEC §7.0 "ttl 정책과 종료 보장"). 종결은 폴링으로
+                # 관찰한다. **규범 절을 가리킨다** — 이력 절은 판본마다 아래로
+                # 밀리므로 그 번호로 적으면 다음 개정에서 조용히 낡는다.
                 assert cancelled.status in ("working", "cancelled")
 
                 deadline = time.monotonic() + 20
