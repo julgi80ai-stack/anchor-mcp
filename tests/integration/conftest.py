@@ -98,6 +98,10 @@ class FixtureState:
         self.status_override_with_body: bool = False
         # 애그리게이터 응답을 이상한 페이로드로 바꿔치기 (파싱 견고성 검증용)
         self.archive_payload_override: str | None = None
+        # Accept를 실제로 **협상하는** 서버. 참이면 `*/*`가 없는 요청에 406을
+        # 준다. 픽스처 서버가 Accept를 아예 안 보면 "우리가 협상을 지나치게
+        # 좁혔다"는 축이 존재하지 않는다 — 실사용에서 406·415가 4건 났다.
+        self.require_accept_any: bool = False
         # CDX 응답의 statuscode 축 (D-092). 우리가 `filter=statuscode:200`을
         # 요청했다는 사실은 응답이 그 필터를 지켰다는 증거가 아니다 — 필터를
         # 무시하는 미러, statuscode 열 자체를 주지 않는 미러가 실재한다.
@@ -270,6 +274,12 @@ class _Handler(BaseHTTPRequestHandler):
             self.end_headers()
             if body:
                 self.wfile.write(body)
+            return
+
+        if state.require_accept_any and "*/*" not in (self.headers.get("Accept") or ""):
+            self.send_response(406)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
             return
 
         etag = state.etags.get(self.path, state.etag)

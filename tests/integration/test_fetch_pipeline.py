@@ -126,3 +126,43 @@ def test_cached_content_survives_source_death(fixture_server, anchor):
 
     preserved = anchor.get_version_text(first.version_id)
     assert "인용 표류" in preserved
+
+
+# -- 협상을 지나치게 좁히지 않는다 (실사용 406·415 4건) --------------------
+
+
+def test_a_server_that_negotiates_is_not_refused_by_our_own_accept_header(
+    fixture_server, anchor
+):
+    """`*/*`를 붙이지 않으면 협상하는 서버가 406으로 우리를 돌려보낸다.
+
+    이것은 우회가 아니라 **우리 결함**이다. 403은 사이트 소유자의 의사이고
+    202 인터스티셜은 안티봇이지만, 406은 우리가 받아들일 유형을 지나치게 좁게
+    선언한 결과다. 브라우저 흉내(UA 위장)와 달리 `*/*;q=0.1`을 꼬리에 다는 것은
+    표준 HTTP 예절이고, 사이트가 막은 것을 뚫는 일이 아니다.
+
+    넓힌 대가로 처리 못 하는 유형이 들어올 수는 있다. 그때는 `UnsupportedContent`
+    (`error_kind="unsupported_content"`)로 **실패의 이름이 정확해질 뿐**이다 —
+    협상 실패로 가장되지 않는다.
+    """
+    base, state = fixture_server
+    state.require_accept_any = True
+
+    result = anchor.fetch(f"{base}/article")
+
+    assert result.outcome == "created"
+
+
+def test_the_accept_header_still_names_what_we_actually_handle():
+    """넓혀도 **선호는 남긴다** — `*/*`만 보내면 서버가 아무거나 골라도 된다.
+
+    우리가 실제로 처리하는 유형(HTML·평문·PDF)이 앞에 오고 `*/*`는 낮은 q로
+    꼬리에 붙는다. 그래야 협상하는 서버가 우리에게 HTML을 준다.
+    """
+    from anchor.fetcher.client import ACCEPT_HEADER
+
+    head, _, tail = ACCEPT_HEADER.rpartition(",")
+    assert "*/*" in tail and "q=0" in tail, ACCEPT_HEADER
+    for media_type in ("text/html", "text/plain", "application/pdf"):
+        assert media_type in head, f"{media_type}가 선호 목록에서 빠졌다"
+    assert "*/*" not in head, "`*/*`가 앞에 오면 선호가 무의미해진다"

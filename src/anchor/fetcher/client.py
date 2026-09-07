@@ -20,7 +20,18 @@ import httpx
 from anchor.errors import ContentTooLarge, FetchFailed, InvalidURL, RobotsDisallowed
 from anchor.fetcher.urlnorm import normalize_url
 
-ACCEPT_HEADER = "text/html, application/xhtml+xml, text/plain, application/pdf"
+# 처리하는 유형을 **선호로** 앞세우고, 꼬리에 낮은 q의 `*/*`를 단다 (v1.22).
+# 꼬리가 없으면 협상하는 서버가 406으로 돌려보낸다 — 실사용에서 406·415가
+# 4건 났고, 그것은 사이트가 막은 것이 아니라 **우리가 받아들일 유형을 지나치게
+# 좁게 선언한 결과**다. 브라우저 흉내(UA 위장)나 안티봇 우회와는 다른 일이다:
+# 여기서 뚫는 것은 없고, 표준 협상에서 우리 쪽 과잉 제약을 푸는 것뿐이다.
+#
+# 넓힌 대가로 처리 못 하는 유형이 올 수 있다. 그때는 `UnsupportedContent`가
+# 되어 **실패의 이름이 정확해질 뿐**이다 — 협상 실패로 가장되지 않는다.
+# `*/*`를 앞에 두지 않는 이유는 그러면 선호가 무의미해지기 때문이다.
+ACCEPT_HEADER = (
+    "text/html, application/xhtml+xml, text/plain, application/pdf, */*;q=0.1"
+)
 # 재시도가 **규약인** 상태. 429는 레이트 제한이고, 물러났다 다시 오는 것이
 # 그 상태코드가 요구하는 행동이다.
 RETRYABLE_STATUSES = frozenset({429})

@@ -99,6 +99,13 @@ def _occurrences_capped(occurrences: int | None) -> bool:
 _STATUS_EXPLANATION = {
     202: " Accepted (the server has not produced a representation yet — "
     "서버가 요청을 접수만 했고 아직 표현을 주지 않았습니다)",
+    # 406·415는 상태코드만 보면 "서버가 막았다"로 읽히지만 실제로는 **협상이
+    # 어긋난 것**이다 (SPEC §5.2). 무엇이 어긋났는지 말해 주지 않으면 호출자는
+    # 403과 같은 칸에 넣는다.
+    406: " Not Acceptable (content negotiation failed — "
+    "우리가 보낸 Accept와 서버가 줄 수 있는 표현이 맞지 않았습니다)",
+    415: " Unsupported Media Type (the server rejected the request's media type — "
+    "서버가 요청의 미디어 타입을 거부했습니다)",
 }
 
 _STATUS_BY_HTTP = {402: "paywalled", 403: "forbidden", 404: "gone", 410: "gone"}
