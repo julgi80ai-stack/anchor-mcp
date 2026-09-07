@@ -56,7 +56,7 @@ def test_same_url_concurrent_fetch_creates_one_document(fixture_server, tmp_path
         for thread in threads:
             thread.join(timeout=60)
 
-        documents = anchor.list_documents()
+        documents = anchor.list_documents().documents
 
     assert not errors, f"동시 페치에서 오류: {errors[:3]}"
     assert len(documents) == 1, f"문서가 중복 생성됐다: {len(documents)}건"
@@ -238,6 +238,6 @@ def test_same_url_stays_serialized_and_lock_registry_drains(fixture_server, tmp_
         assert state.max_inflight == 1, (
             f"같은 URL의 요청이 서버에서 겹쳤다 ({state.max_inflight}건 동시)"
         )
-        assert len(anchor.list_documents()) == 1
+        assert len(anchor.list_documents().documents) == 1
         assert anchor._url_locks.refcount(norm) == 0
         assert anchor._url_locks.size() == 0, "쓰지 않는 URL 락이 등록부에 남았다"

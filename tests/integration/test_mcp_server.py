@@ -34,6 +34,7 @@ EXPECTED_TOOLS = {
     "diff_versions",
     "get_version",
     "list_documents",
+    "list_anchors",
     "cache_stats",
     "get_timemap",
     "export_robust_links",
@@ -175,6 +176,24 @@ async def test_robust_links_and_stats_and_list(fixture_server, mcp_server):
 
         listed = await client.call_tool("list_documents", {"status": "live"})
         assert len(listed.structured_content["documents"]) == 1
+        # 목록은 자기가 전부인지 말한다 (D-284). 이 값이 없으면 호출자는
+        # 잘린 목록을 전부로 읽는다.
+        assert listed.structured_content["total"] == 1
+        assert listed.structured_content["truncated"] is False
+        assert listed.structured_content["documents"][0]["anchor_count"] == 1
+
+        # 앵커를 마지막 검증 상태와 함께 연다 (D-285). 검증 전에는 null이다 —
+        # INTACT로 채우면 확인한 적 없는 것을 확인했다고 말하는 셈이다.
+        anchors = await client.call_tool("list_anchors", {})
+        assert anchors.structured_content["total"] == 1
+        assert anchors.structured_content["anchors"][0]["state"] is None
+
+        # 호출자가 가진 목록과 대조한다 — 없는 것도 말한다.
+        matched = await client.call_tool(
+            "list_documents", {"urls": [f"{base_url}/article", f"{base_url}/absent"]}
+        )
+        assert len(matched.structured_content["documents"]) == 1
+        assert matched.structured_content["unmatched_urls"] == [f"{base_url}/absent"]
 
 
 async def test_verify_citations_as_task(fixture_server, mcp_server):

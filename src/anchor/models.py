@@ -183,6 +183,81 @@ class Document:
     last_modified: str | None
     robots_allowed: bool
     current_version: str | None = None  # 원문이 지금 서빙하는 본문의 버전 (v3)
+    # 이 문서에 걸린 앵커의 수 (D-284). **목록을 만들 때 센 값**이고, `None`은
+    # 세지 않았다는 뜻이다 — 0으로 채우면 "앵커가 없다"는 단정이 된다. 이 수가
+    # 없으면 "앵커 달린 문서만"을 추릴 수 없고, 실사용에서 문서 367건 중 앵커가
+    # 붙은 것은 46건이었다.
+    anchor_count: int | None = None
+
+
+@dataclass(frozen=True)
+class DocumentListing:
+    """`list_documents`의 결과 (D-284).
+
+    목록만 돌려주면 호출자는 그것을 **전부**로 읽는다. 실사용에서 무필터 호출이
+    102,765자로 MCP 토큰 한도를 넘겨 응답이 파일로 떨어졌다 — 도구가 자기
+    응답으로 호출자를 막은 것이다. 상한을 두되 **자른 사실을 함께 싣는다**
+    (D-227과 같은 규칙: 도구는 자기에 대해 거짓을 말하지 않는다).
+    """
+
+    documents: tuple[Document, ...]
+    total: int      # 필터를 통과한 전체 수 (상한을 적용하기 **전**)
+    returned: int   # 실제로 실은 수
+    truncated: bool  # 상한에서 잘렸는가. 정확히 상한만큼은 **잘린 것이 아니다**
+    # `urls`로 물었을 때 캐시에 없던 URL (D-284). 코퍼스와 대조하려면 "무엇이
+    # 있는가"만으로 부족하고 **무엇이 없는가**를 알아야 한다. 우리는 이 목록을
+    # 해석하지 않는다 — URL은 호출자가 준다 (SPEC §1.3).
+    unmatched_urls: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class AnchorSummary:
+    """앵커 하나와 그 **마지막** 검증 상태 (D-285).
+
+    `MOVED`가 `attention`에 없는 것은 설계가 맞다 — 조치가 필요 없기 때문이다
+    (SPEC §6.3). 그러나 `summary`가 "MOVED 3"이라고 말하면서 어느 앵커인지
+    물어볼 곳이 없으면 그 수는 확인할 수 없는 주장이 된다. 상태가 `None`이면
+    **아직 한 번도 검증되지 않았다**는 뜻이다 — INTACT로 채우면 단정이 된다.
+    """
+
+    anchor_id: str
+    document_id: str
+    url: str          # 이 앵커가 인용한 URL (없으면 문서의 현재 URL)
+    exact: str
+    quality: str
+    created_at: str
+    state: str | None = None
+    checked_at: str | None = None
+
+
+@dataclass(frozen=True)
+class AnchorListing:
+    """`list_anchors`의 결과 (D-285). 자른 사실은 `DocumentListing`과 같은 규칙."""
+
+    anchors: tuple[AnchorSummary, ...]
+    total: int
+    returned: int
+    truncated: bool
+
+
+@dataclass(frozen=True)
+class VerifyScope:
+    """이 보고서가 **무엇을 안 봤는가** (P1, A-1의 재발 방지).
+
+    `checked: 104, ALTERED: 0`에는 분모가 없다. 앵커가 안 걸린 문헌과 앵커가
+    걸렸고 멀쩡한 문헌을 구분할 신호가 응답에 없으면, 탐지 실패가 무해한 침묵이
+    아니라 **거짓 안심**이 된다 — 문서의 1%만 보고 `unchanged`를 다른 문서와
+    같은 확신으로 말했던 A-1이 앵커 집합에서 되풀이되는 자리다.
+
+    **판정은 하나도 바꾸지 않는다.** 사실만 더한다. 무엇을 인용했어야 하는지는
+    우리가 모르고 판정하지도 않는다 — 코퍼스와의 대조는 `list_documents(urls=)`로
+    호출자가 한다.
+    """
+
+    anchors_in_cache: int
+    documents_checked: int
+    documents_with_anchors: int
+    documents_in_cache: int
 
 
 @dataclass(frozen=True)
@@ -327,6 +402,12 @@ class VerifyReport:
     # 달면 전부 INTACT인 보고서에서 이 사실이 통째로 사라진다 (D-093과
     # 같은 판단). **판정은 바꾸지 않는다.**
     low_coverage: int = 0
+    # 이 보고서가 **무엇을 안 봤는가** (P1). `checked`와 `summary`만으로는
+    # "앵커가 안 걸린 문헌"과 "앵커가 걸렸고 멀쩡한 문헌"이 구분되지 않아,
+    # `ALTERED: 0`이 근거 없는 안심으로 읽힌다. 판정은 바꾸지 않는다.
+    scope: VerifyScope = field(
+        default_factory=lambda: VerifyScope(0, 0, 0, 0)
+    )
 
 
 @dataclass(frozen=True)

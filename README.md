@@ -50,7 +50,7 @@ claude mcp add -s user anchor -- /absolute/path/.venv/bin/anchor-mcp
 { "mcpServers": { "anchor": { "command": "/absolute/path/.venv/bin/anchor-mcp" } } }
 ```
 
-도구 9종 · 9 tools: `fetch_document` `cite` `verify_citations` `diff_versions` `get_version` `list_documents` `cache_stats` `get_timemap` `export_robust_links`
+도구 10종 · 10 tools: `fetch_document` `cite` `verify_citations` `diff_versions` `get_version` `list_documents` `list_anchors` `cache_stats` `get_timemap` `export_robust_links`
 
 ### 모델이 anchor를 우선 쓰게 하려면 · Make your model prefer anchor
 
@@ -115,7 +115,7 @@ anchor-mcp/
 ├── NOTICE                     저작권 고지 · attribution (distributed)
 ├── THIRD-PARTY.md             제3자 라이선스 대장 · third-party license ledger
 ├── docs/
-│   ├── SPEC.md                기술사양서 v1.20 · technical spec (Korean)
+│   ├── SPEC.md                기술사양서 v1.21 · technical spec (Korean)
 │   ├── MANIFESTO.md           설계 철학 · design philosophy (Korean)
 │   └── decisions/             ADR — 판단 기록 (동결) · frozen decision records
 ├── src/anchor/                구현 · implementation (fetcher / normalize / anchoring / export / store / server / cli)
@@ -140,8 +140,8 @@ The ledger and the decision records serve different purposes: `THIRD-PARTY.md` a
 
 | 항목 · Item | 상태 · State |
 |---|---|
-| 기술사양서 · Spec | v1.20 (2026-09-07, KR/EN) |
-| 구현 · Implementation | **v1.16.0** (2026-09-07) — 실사용이 찾은 회계의 구멍: 실패한 요청이 **무엇이었는지** 남지 않았고(첫 페치 실패는 문서 행이 없어 `document_id`가 `-`가 된다), 실패의 **종류**를 상태코드로만 갈랐다(203은 성공 코드라 그 아래 실패가 “203 거부”로 읽혔다). 스키마 v12 · `cache_stats`에 `error_breakdown`·`recent_failures` · Accounting holes found in real use: failed requests left no record of **what** was requested, and failure **kind** was inferred from status alone (203 is a success code, so failures under it read as “203 rejected”). Schema v12; `cache_stats` gains `error_breakdown` and `recent_failures`. 테스트 1270개 · 1270 tests. CI: 릴리스 태그·수동 실행 (3 OS × Python 3.11–3.13), license gate, benchmark gate |
+| 기술사양서 · Spec | v1.21 (2026-09-07, KR/EN) |
+| 구현 · Implementation | **v1.17.0** (2026-09-07) — 실사용이 찾은 회계의 구멍: 실패한 요청이 **무엇이었는지** 남지 않았고(첫 페치 실패는 문서 행이 없어 `document_id`가 `-`가 된다), 실패의 **종류**를 상태코드로만 갈랐다(203은 성공 코드라 그 아래 실패가 “203 거부”로 읽혔다). 스키마 v12 · `cache_stats`에 `error_breakdown`·`recent_failures` · Accounting holes found in real use: failed requests left no record of **what** was requested, and failure **kind** was inferred from status alone (203 is a success code, so failures under it read as “203 rejected”). Schema v12; `cache_stats` gains `error_breakdown` and `recent_failures`. 그리고 **캐시에 무엇이 있는지 물어볼 길**: `verify`에 분모(`scope`), `list_documents`에 페이지네이션·`anchor_count`·`urls` 대조, 새 도구 `list_anchors`(attention에 담기지 않는 `MOVED`를 지목한다) · And a way to ask what is in the cache: `verify` gains a denominator (`scope`), `list_documents` gains pagination, `anchor_count` and `urls` matching, and a new `list_anchors` tool names the `MOVED` anchors that never enter `attention`. 테스트 1281개 · 1281 tests. CI: 릴리스 태그·수동 실행 (3 OS × Python 3.11–3.13), license gate, benchmark gate |
 | 실사용 관찰 · Field observation | 30일 hit_rate 관찰 창 진행 중 · 30-day hit-rate window in progress (`anchor stats`) |
 | 라이선스 감사 · License audit | 카피레프트 강제 0건 · zero forced copyleft (선택형 `tld`는 MPL-1.1 선택 · disjunctive `tld` elected as MPL-1.1, THIRD-PARTY §4.4) |
 

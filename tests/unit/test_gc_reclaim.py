@@ -599,11 +599,11 @@ def test_list_documents_calls_a_reclaimed_check_pending_not_verified(tmp_path):
 
     with Anchor(db_path=path, config=Config(db_path=path, keep_versions=2)) as anchor_api:
         anchor_api.collect_garbage()
-        pending = anchor_api.list_documents(has_pending_verification=True)
-        settled = anchor_api.list_documents(has_pending_verification=False)
+        pending = anchor_api.list_documents(has_pending_verification=True).documents
+        settled = anchor_api.list_documents(has_pending_verification=False).documents
 
     assert [d.id for d in pending] == [document_id], pending
-    assert settled == []
+    assert settled == ()
 
 
 def test_a_check_of_the_served_version_is_not_turned_pending_by_gc(tmp_path):
@@ -630,10 +630,10 @@ def test_a_check_of_the_served_version_is_not_turned_pending_by_gc(tmp_path):
 
     with Anchor(db_path=path, config=Config(db_path=path, keep_versions=2)) as anchor_api:
         anchor_api.collect_garbage()
-        pending = anchor_api.list_documents(has_pending_verification=True)
-        settled = anchor_api.list_documents(has_pending_verification=False)
+        pending = anchor_api.list_documents(has_pending_verification=True).documents
+        settled = anchor_api.list_documents(has_pending_verification=False).documents
 
-    assert pending == []
+    assert pending == ()
     assert [d.id for d in settled] == [document_id]
 
 

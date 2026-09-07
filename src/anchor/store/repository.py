@@ -1474,6 +1474,47 @@ class Repository:
         ).fetchone()
         return self._to_anchor(row) if row else None
 
+    def count_anchors_by_document(self) -> dict[str, int]:
+        """문서별 앵커 수 (D-284). 문서를 하나씩 세면 목록마다 N+1 질의가 된다.
+
+        앵커가 **없는** 문서는 여기 나오지 않는다 — 호출자가 0으로 읽는다.
+        """
+        return {
+            row[0]: row[1]
+            for row in self._connection.execute(
+                "SELECT document_id, COUNT(*) FROM anchors GROUP BY document_id"
+            ).fetchall()
+        }
+
+    def summarize_anchors(self) -> list[dict]:
+        """앵커와 그 **마지막** 검증 (D-285). 상태가 NULL이면 검증된 적이 없다.
+
+        마지막 하나를 고르는 기준은 `checked_at DESC, rowid DESC`다 — 같은 초에
+        두 번 검증되면 시각만으로는 갈리지 않고, 그때 **먼저 쓴 것**이 최신으로
+        뽑히면 방금 낸 판정이 옛 판정에 덮인다.
+        """
+        rows = self._connection.execute(
+            """SELECT a.id            AS anchor_id,
+                      a.document_id   AS document_id,
+                      COALESCE(a.cited_url, d.url) AS url,
+                      a.exact         AS exact,
+                      a.quality       AS quality,
+                      a.created_at    AS created_at,
+                      v.state         AS state,
+                      v.checked_at    AS checked_at
+               FROM anchors a
+               JOIN documents d ON d.id = a.document_id
+               LEFT JOIN (
+                 SELECT anchor_id, state, checked_at,
+                        ROW_NUMBER() OVER (
+                          PARTITION BY anchor_id ORDER BY checked_at DESC, rowid DESC
+                        ) AS rn
+                 FROM verifications
+               ) v ON v.anchor_id = a.id AND v.rn = 1
+               ORDER BY a.created_at, a.id"""
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def select_anchors(
         self,
         *,

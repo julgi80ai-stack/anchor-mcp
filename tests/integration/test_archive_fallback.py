@@ -50,7 +50,7 @@ def test_archive_rescues_citation_from_gone(fixture_server, cdx_anchor):
     assert report.summary["INTACT"] == 1      # 인용 구제
     assert report.attention == ()
 
-    (document,) = cdx_anchor.list_documents()
+    (document,) = cdx_anchor.list_documents().documents
     assert document.status == "gone"          # 원본 상태는 사실대로 남는다
 
 
@@ -148,7 +148,7 @@ def test_first_fetch_of_dead_url_recovers_from_archive(fixture_server, cdx_ancho
     result = cdx_anchor.fetch(f"{base_url}/article")
     assert result.outcome == "archive"
     assert result.source == "archive"
-    (document,) = cdx_anchor.list_documents()
+    (document,) = cdx_anchor.list_documents().documents
     assert document.status == "gone"
     assert QUOTE in (result.content or "")
 

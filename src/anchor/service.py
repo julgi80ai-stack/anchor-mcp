@@ -31,6 +31,7 @@ from anchor.errors import (
     AnchorError,
     DocumentNotFound,
     FetchFailed,
+    InvalidURL,
     RobotsDisallowed,
     VersionNotFound,
     error_kind,
@@ -45,15 +46,19 @@ from anchor.fetcher.ratelimit import HostRateLimiter
 from anchor.fetcher.robots import RobotsGate
 from anchor.fetcher.urlnorm import normalize_url
 from anchor.models import (
+    AnchorListing,
     AnchorRecord,
+    AnchorSummary,
     AttentionItem,
     CiteResult,
     Coverage,
     Document,
+    DocumentListing,
     FetchResult,
     Network,
     Redirect,
     VerifyReport,
+    VerifyScope,
     Version,
     age_seconds,
     iso_ago,
@@ -802,8 +807,19 @@ class Anchor:
                 break
 
         checked = sum(tally.summary.values())
+        # 분모는 **우리가 이미 아는 사실**로만 낸다 (P1). 무엇을 인용했어야
+        # 하는지는 우리가 모르고 판정하지도 않는다 — 코퍼스와의 대조는
+        # `list_documents(urls=)`로 호출자가 한다.
+        anchor_counts = self._repository.count_anchors_by_document()
+        scope = VerifyScope(
+            anchors_in_cache=sum(anchor_counts.values()),
+            documents_checked=len({anchor.document_id for anchor in anchors}),
+            documents_with_anchors=len(anchor_counts),
+            documents_in_cache=self._repository.count_rows()["documents"],
+        )
         return VerifyReport(
             checked=checked,
+            scope=scope,
             summary=tally.summary,
             sources=tally.sources,
             attention=tuple(tally.attention),
@@ -959,8 +975,43 @@ class Anchor:
         status: str | None = None,
         host: str | None = None,
         has_pending_verification: bool | None = None,
-    ) -> list[Document]:
-        documents = self._repository.list_documents()
+        has_anchors: bool | None = None,
+        urls: list[str] | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> DocumentListing:
+        """캐시된 문서 목록 (SPEC §7.6).
+
+        상한을 두되 **자른 사실을 함께 싣는다** (D-284). 목록만 돌려주면 호출자는
+        그것을 전부로 읽는데, 실사용에서 무필터 호출이 102,765자로 토큰 한도를
+        넘겨 도구가 자기 응답으로 호출자를 막았다.
+
+        `urls`는 호출자가 가진 목록(서지 등)과 대조하기 위한 것이다. 별칭표를
+        거쳐 찾으므로 **리다이렉트 전 URL로 물어도** 찾고, 없던 것은
+        `unmatched_urls`로 돌려준다 — 무엇이 있는가만으로는 대조가 안 된다.
+        그 목록이 무엇을 뜻하는지는 판정하지 않는다 (SPEC §1.3).
+        """
+        if limit is not None and limit < 0:
+            raise ValueError(f"limit must be >= 0 — limit은 0 이상이어야 합니다: {limit}")
+        if offset < 0:
+            raise ValueError(f"offset must be >= 0 — offset은 0 이상이어야 합니다: {offset}")
+        unmatched: list[str] = []
+        if urls is not None:
+            # 별칭·정규화를 거쳐 찾는다 — 조회 경로는 페치와 같아야 한다.
+            # 여기서 정본 URL만 맞추면 가진 문서를 "없다"고 답하게 된다.
+            matched: dict[str, Document] = {}
+            for raw in urls:
+                try:
+                    found = self._repository.get_document_by_any_url(normalize_url(raw))
+                except InvalidURL:
+                    found = None
+                if found is None:
+                    unmatched.append(raw)
+                else:
+                    matched[found.id] = found
+            documents = list(matched.values())
+        else:
+            documents = self._repository.list_documents()
         if status is not None:
             # 열거값 밖 문자열에 빈 목록을 돌려주면 호출자는 "캐시가 비었다"로
             # 읽는다 (D-121) — format 인자들과 같은 방식으로 명확히 거부한다.
@@ -978,7 +1029,64 @@ class Anchor:
             documents = [
                 d for d in documents if self._has_pending_verification(d) == has_pending_verification
             ]
-        return documents
+        # 앵커 수는 한 번에 센다 — 문서마다 세면 목록마다 N+1 질의가 된다.
+        counts = self._repository.count_anchors_by_document()
+        documents = [
+            dataclasses.replace(d, anchor_count=counts.get(d.id, 0)) for d in documents
+        ]
+        if has_anchors is not None:
+            documents = [d for d in documents if bool(d.anchor_count) == has_anchors]
+        total = len(documents)
+        window = documents[offset:] if limit is None else documents[offset : offset + limit]
+        return DocumentListing(
+            documents=tuple(window),
+            total=total,
+            returned=len(window),
+            # 상한과 같은 수를 받았다고 잘렸다고 단정하지 않는다 — 남은 것이
+            # 실제로 있을 때만 참이다 (D-227).
+            truncated=offset + len(window) < total,
+            unmatched_urls=tuple(unmatched),
+        )
+
+    @_foreground
+    def list_anchors(
+        self,
+        *,
+        state: str | None = None,
+        document_id: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> AnchorListing:
+        """앵커를 **마지막 검증 상태**와 함께 연다 (SPEC §7.10, D-285).
+
+        `MOVED`는 `attention`에 들어가지 않는다 — 조치가 필요 없기 때문이다
+        (§6.3). 그래서 `summary`가 "MOVED 3"이라고 말해도 **어느 앵커인지 물어볼
+        곳이 없었다.** 상태가 `None`인 앵커는 아직 한 번도 검증되지 않은 것이다.
+        """
+        if state is not None and state not in matcher.ALL_STATES:
+            # 열거값 밖 문자열에 빈 목록을 돌려주면 호출자는 "그런 앵커가 없다"로
+            # 읽는다 (D-121과 같은 판단).
+            raise ValueError(
+                f"Unknown state — 지원하지 않는 상태: {state} "
+                f"({' | '.join(matcher.ALL_STATES)})"
+            )
+        if limit is not None and limit < 0:
+            raise ValueError(f"limit must be >= 0 — limit은 0 이상이어야 합니다: {limit}")
+        if offset < 0:
+            raise ValueError(f"offset must be >= 0 — offset은 0 이상이어야 합니다: {offset}")
+        rows = self._repository.summarize_anchors()
+        if document_id is not None:
+            rows = [row for row in rows if row["document_id"] == document_id]
+        if state is not None:
+            rows = [row for row in rows if row["state"] == state]
+        total = len(rows)
+        window = rows[offset:] if limit is None else rows[offset : offset + limit]
+        return AnchorListing(
+            anchors=tuple(AnchorSummary(**row) for row in window),
+            total=total,
+            returned=len(window),
+            truncated=offset + len(window) < total,
+        )
 
     @_foreground
     def get_version_text(self, version_id: str) -> str:

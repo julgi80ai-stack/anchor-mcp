@@ -38,7 +38,7 @@ def _anchor(tmp_path, name="store.db") -> Anchor:
 
 
 def _document_by_url(anchor: Anchor, url: str):
-    for document in anchor.list_documents():
+    for document in anchor.list_documents().documents:
         if document.url.endswith(url):
             return document
     raise AssertionError(f"문서가 없다: {url}")
@@ -61,8 +61,8 @@ def test_denial_at_redirect_destination_is_not_charged_to_the_origin(
         with pytest.raises(RobotsDisallowed):
             anchor.fetch(f"{origin_url}/article", max_age=0)
 
-        origin = [d for d in anchor.list_documents() if d.url.startswith(origin_url)][0]
-        destination = [d for d in anchor.list_documents() if d.url.startswith(other_url)][0]
+        origin = [d for d in anchor.list_documents().documents if d.url.startswith(origin_url)][0]
+        destination = [d for d in anchor.list_documents().documents if d.url.startswith(other_url)][0]
         assert origin.robots_allowed is True, (
             "아무것도 금지하지 않은 출발지 호스트가 금지된 것으로 기록됐다"
         )

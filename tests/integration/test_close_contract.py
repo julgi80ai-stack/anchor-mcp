@@ -61,7 +61,7 @@ def test_double_close_is_idempotent(fixture_server, tmp_path):
     anchor.close()
     anchor.close()  # 두 번째는 무해해야 한다
     with Anchor(db_path=tmp_path / "close.db", config=make_config(tmp_path)) as reopened:
-        assert len(reopened.list_documents()) == 1  # 닫기가 데이터를 해치지 않았다
+        assert len(reopened.list_documents().documents) == 1  # 닫기가 데이터를 해치지 않았다
 
 
 def test_close_waits_for_in_flight_call(fixture_server, tmp_path):

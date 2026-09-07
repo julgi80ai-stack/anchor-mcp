@@ -1,6 +1,6 @@
 # Anchor — A Provenance-Tracking Fetch Cache (EN)
 
-**Technical Specification v1.20 (as of completion)**
+**Technical Specification v1.21 (as of completion)**
 
 > **Translation note**: This is an English translation of `SPEC.md`. The Korean
 > version is normative — if the two ever disagree, the Korean text governs.
@@ -17,6 +17,8 @@
 | Minimum requirement | Python 3.11+ |
 | Governing specs | RFC 7089, RFC 9110 (conditional requests), W3C Web Annotation Data Model, MCP 2026-07-28 |
 | Design rationale | `docs/decisions/0001` (prior art and positioning), `docs/decisions/0002` (licensing and reuse) |
+
+> **v1.20 → v1.21 change summary**: The other half of the same real-use report — **a way to ask what is in the cache**. The largest piece is §7.3's `scope`: `checked: 104, ALTERED: 0` had no denominator, so **a never-anchored reference was indistinguishable from an intact one**, and the user nearly reported it as "the bibliography is fine" — **A-1 recurring in the set of anchors**. §7.6 adds `limit`/`offset` with `total` and `truncated`, ending the case where **the tool blocked its own caller with its own answer** (102,765 characters unfiltered), adds `anchor_count`/`has_anchors` so the 46 documents that actually have anchors can be selected, and adds `urls` to compare against a list the caller holds — answering with what is **missing** (`unmatched_urls`) too. §7.10 `list_anchors` is the path to name the `MOVED` anchors that never enter `attention`. **We do not read corpus files such as `refs.bib`** — that is an identity judgement, the ground of B-1. See §15 for the full list.
 
 > **v1.19 → v1.20 change summary**: **Real use found what auditing did not.** Schema **v12** — `fetch_log` gains `url` and `error_kind` (§4.1). When a first fetch fails there is no `documents` row yet, so `document_id` is `-`: **141 of 148** measured errors left no record of what could not be fetched, making retry and stock-taking impossible. And status codes do not say **what** failed: two `error + 203` rows read as "203 was rejected", but **203 is a success path** and these were extraction failures after the body arrived in full (the same event as the two extraction failures under 200), while **41** rows with no status collapsed robots refusals, connection failures and timeouts into one bucket. `cache_stats` now splits failures along **two axes — kind and status** — and enumerates recent failures **with their URL** (§7.7). `error_kind` is not a new judgement but a transcription of what the exception hierarchy already knows; what it means is for the caller to decide (§1.3). Rows from before v12 count as `"unrecorded"`, never folded into `"other"`. See §15 for the full list.
 
@@ -853,6 +855,12 @@ Re-verifies anchors against the current source. Processes in batch and observes 
   "ambiguous": 1,                           // anchors whose quote occurs more than once (v1.12, §6.1)
   "low_coverage": 2,                        // anchors compared against a narrowly captured document (v1.13, §5.5)
   "pipeline_changed": 0,                    // anchors compared across a changed extraction pipeline (v1.12)
+  "scope": {                                // what this report did **not** look at (v1.20)
+    "anchors_in_cache": 104,                //   all anchors in the cache (differs from checked = partial)
+    "documents_checked": 46,                //   documents compared this run
+    "documents_with_anchors": 46,           //   documents that have at least one anchor
+    "documents_in_cache": 367               //   all documents in the cache
+  },
   "attention": [
     {
       "anchor_id": "018f...",
@@ -883,6 +891,12 @@ If `stopped_early` is true, `checked` and `summary` are **partial results**. The
 
 The `attention` array carries only the items that require action (`ALTERED`/`MISSING`/`GONE`/**`UNREACHABLE`**/`UNRESOLVED`). It does not fill the context by listing all 36 `INTACT` entries. `UNREACHABLE` was added in v1.12 (§6.3 defines its action as "schedule a retry"); while it was missing, **a batch that verified nothing appeared with an empty `attention`** and callers read it as "nothing wrong".
 
+**`scope` is the report's denominator** (new in v1.20). `checked` and `summary` alone do not distinguish **a reference that was never anchored** from **a reference that is anchored and intact**. In real use a reader who received `checked: 104, ALTERED: 0` nearly reported it as "nothing wrong with the 51-item bibliography" when in fact most of that bibliography had no anchors at all — **the statement had no basis.** This is the one place where a detection failure turns from harmless silence into false reassurance.
+
+It is **A-1 returning**: the place where we spoke of `unchanged` with the same confidence for a document we had seen 1% of was fixed in v1.13 by §5.5's coverage, and the same illness recurred — not in versions this time, but in the **set of anchors**. The cure is the same: make the response say what we did **not** look at.
+
+**No verdict changes.** Whatever `scope` says, `INTACT` is still `INTACT`. And **what should have been cited is not judged** — that is not a fact available to us (§1.3). Comparing against a list the caller holds is supplied by `list_documents(urls=…)` (§7.6): this response says "of what we know, what did we look at", and that one answers "of what you care about, what is missing here".
+
 `position_hint` and `found_offset` are provided together (v1.7). From edit distance alone the caller cannot tell whether this is **a revision in the same place** or **a lookalike paragraph from another section of the document**. If the two are far apart, the item is worth a human look even though it passed §6.2's context corroboration.
 
 ### 7.4 `diff_versions`
@@ -910,6 +924,12 @@ Returns the list of cached documents together with their status and last-checked
 `status` is case-folded and then validated against the enumeration (`live | gone | forbidden | paywalled`); anything else is rejected with the list of allowed values (v1.9). Returning an error-free empty list for a string outside the enumeration reads to the caller as "the cache is empty."
 
 The criterion for `has_pending_verification` is **which version was verified**, not when (v1.7). Reverts reuse an old row and archive rescues carry a past Memento time, so measuring by time answers "nothing to verify" right after the current body changed — a workflow narrowing its targets with this filter would never re-examine documents whose verdicts flipped.
+
+**A listing says whether it is the whole thing** (new in v1.20). `limit` (MCP default 100) and `offset` cut it down, but `total` (the count **before** the cap), `returned` and `truncated` ride along. Cutting silently makes the caller read the part as the whole — in real use an unfiltered call came to **102,765 characters**, exceeded the MCP token limit, and the response was spilled to a file: **the tool blocked its own caller with its own answer**. `truncated` is true only when something was actually left out — **exactly the cap is not a cut** (the same rule as `recent_failures_truncated` in §7.7).
+
+Each document carries `anchor_count` (new in v1.20). Without it, "only documents that have anchors" is unanswerable — in real use 46 of 367 documents had anchors, and there was no way to select those 46. `has_anchors` filters either way. `None` means it was not counted, and is never filled in as 0.
+
+`urls` exists to compare the cache against **a list the caller already holds** (a bibliography, say) (new in v1.20). Lookup uses the same path as fetching — normalization and the alias table — so **a pre-redirect URL still matches** (corpus URLs usually are the pre-redirect ones). URLs not in the cache come back in `unmatched_urls`: knowing what **is** there does not make a comparison; you need to know what is **not**. **The caller supplies the URLs** (§1.3) — we do not interpret that list, and do not know whether it is a bibliography or anything else.
 
 ### 7.7 `cache_stats`
 
@@ -1009,6 +1029,16 @@ Exports anchors in **Robust Links** notation. This is the interoperability outpu
 `data-versionurl` is filled in only when the archive URI-M is known. Otherwise only `data-originalurl` and `data-versiondate` are emitted — a form the Robust Links spec permits.
 
 ---
+
+### 7.10 `list_anchors` *(new in v1.20)*
+
+Lists anchors together with the state of their **latest** verification. Filters: `state` (the seven of §6.3) and `document_id`. Truncation follows the same rule as §7.6 (`total`, `returned`, `truncated`).
+
+**Why it is needed.** `MOVED` does not appear in `attention` — it needs no action, and that judgement is right (§7.3). But when `summary` says "MOVED 3" and there is **nowhere to ask which anchors those were**, the number is a claim the caller cannot check. That is exactly what happened in real use: three moves were reported and no path in MCP or the CLI could name the citations. The states were already stored in `verifications` — **we were holding a fact and not handing it over.**
+
+A `state` of `null` means the anchor has **never been verified**. It is not filled in as `INTACT`: that would claim we checked something we never did (the same rule as v7 `occurrences` and v8 `coverage`). A `state` outside the enumeration is rejected as an error, not answered with an empty list (the same judgement as `status` in §7.6).
+
+The latest one is chosen by `checked_at DESC, rowid DESC`. Ordering by time alone would, for an anchor verified twice within the same second, **pick the earlier verdict as the newest** and bury the one just written.
 
 ## 8. Python API
 
@@ -1392,7 +1422,20 @@ This is not a formality. There are people in this field who have held on to this
 
 ---
 
-## 15. v1.19 → v1.20 Change History
+## 15. v1.20 → v1.21 Change History
+
+**The other half of the same real-use report.** Where v1.20 fixed the accounting of failures, this revision opens **a way to ask what is in the cache**. All three lie on one axis — facts stored with no way to read them back — and the denominator of §7.3 is the largest.
+
+| # | § | Change | Defect behind it |
+|---|---|---|---|
+| 1 | **7.3** | `verify` reports gain `scope` — total anchors and documents in the cache, and how many documents this run compared | `checked: 104, ALTERED: 0` **has no denominator.** A reference that was never anchored is indistinguishable from one that is anchored and intact, and the user nearly reported it as "nothing wrong with the 51-item bibliography" — most of that bibliography had no anchors, and **the statement had no basis.** It is the one place where a detection failure becomes false reassurance, and it is **A-1 returning** (the place where 1% of a document supported a confident `unchanged` was fixed by §5.5 in v1.13; the same illness recurred in the set of anchors) |
+| 2 | **7.6** | `limit`/`offset` with `total`, `returned`, `truncated`; per-document `anchor_count`; a `has_anchors` filter | An unfiltered call reached **102,765 characters**, exceeded the MCP token limit, and spilled to a file — **the tool blocked its own caller with its own answer.** And without anchor counts, "only documents with anchors" was unanswerable (measured: **46** of 367) (D-284) |
+| 3 | **7.6** | `urls` compares against a list the caller holds; the ones not present come back as `unmatched_urls` | Knowing what **is** cached does not make a corpus comparison. Lookup uses the same path as fetching (normalization, alias table), so **a pre-redirect URL still matches** — bibliography URLs usually are the pre-redirect ones. **The caller supplies the URLs** (§1.3); we do not interpret the list |
+| 4 | **7.10 (new)** | `list_anchors` — anchors with the state of their **latest** verification | `MOVED` never enters `attention` (it needs no action — and that judgement is right). Yet `summary` would say "MOVED 3" with **nowhere to ask which anchors those were.** The states were already in `verifications` — a fact held and not handed over (D-285) |
+
+**We do not read corpus files such as `refs.bib`.** Doing so would mean parsing a bibliography format, resolving DOI→URL, and deciding that **this citation is that anchor** — an identity judgement, the same ground as B-1 (believing a 301 meant "same resource" and rewriting a citation's canonical URL). Instead the denominator is split in two: **inside**, §7.3's `scope` answers "of what we know, what did we look at"; **outside**, §7.6's `urls` answers "of what you care about, what is missing here". No verdict changes.
+
+## 16. v1.19 → v1.20 Change History
 
 **Real use found what auditing did not.** Everything in this section is measured on the user's live store (2026-09-07: 805 requests, 148 errors), and both defects lie on the same axis — we were storing facts and offering no way to read them back.
 
@@ -1404,7 +1447,7 @@ This is not a formality. There are people in this field who have held on to this
 
 **`error_kind` is not a new judgement.** It transcribes what the exception hierarchy already knows (the exceptions of §8, plus `FetchFailed.reason` / `RobotsDisallowed.reason`), and says nothing about what it means — whether a retry is worthwhile, whether the miss mattered. That judgement belongs to the caller (§1.3).
 
-## 16. v1.18 → v1.19 Change History
+## 17. v1.18 → v1.19 Change History
 
 **The specification failed to follow a change it introduced itself.** This section fixes one thing. When v1.12 decided that `created` and `renormalized` would be displayed separately from `changed` (the v1.11 → v1.12 history section, row 3), it **did not update §7.7's authoritative block or its invariant sentence**, and that state survived seven revisions. The accounting invariant is the very place where this specification writes "if these two break, every number below them is a lie" — and that place was a lie about itself.
 
@@ -1416,7 +1459,7 @@ This is not a formality. There are people in this field who have held on to this
 
 **Not one line of code changed.** The implementation was right and the specification was stale — under the project's rule for divergence, this is "the specification failed to follow a change it introduced itself". Row 3 is **internal consistency of the specification** — even when the standard a text is measured against is the specification itself rather than the code, a standard that exists is a standard that discrepancies must be reconciled against.
 
-## 17. v1.17 → v1.18 Change History
+## 18. v1.17 → v1.18 Change History
 
 | # | Section | Change | Why |
 |---|---|---|---|
@@ -1425,7 +1468,7 @@ This is not a formality. There are people in this field who have held on to this
 | 3 | **10** | The fixture excludes the **truncation confound** itself | The first fixture used Korean filler at 3 bytes per character, hit the 2 MB ceiling, and produced `UNRESOLVED` from **truncation** (§6.3 — a document not fully seen is never called `MISSING`). Ignoring the budget then yields the same state, so discriminating power would be exactly zero. ASCII filler keeps it under the byte ceiling and the gate verifies `truncated` is False — a direct replay of remediation-procedure rule 6 (the fixture needs its axis before it needs the defect) |
 | 4 | **10** | The old gate's disclosed reach is **upgraded to demonstration** | v1.17 disclosed it from the observation "indistinguishable at 20× budget". There is now a reversal demonstration: with `Budget.exhausted()` always False the new gate fails at `MISSING` and 1,066.9 ms while the worst-case gate **passes** at 183.4 ms with `UNRESOLVED 0/100` |
 
-## 18. v1.16 → v1.17 Change History
+## 19. v1.16 → v1.17 Change History
 
 | # | Section | Change | Why |
 |---|---|---|---|
@@ -1435,7 +1478,7 @@ This is not a formality. There are people in this field who have held on to this
 | 4 | **10** | Disclosure that the worst-case gate **does not guard budget enforcement** | At 20× budget, p99 stays at 184.2 ms against a 188.8 ms baseline — the raw cost of a 500K-character scan is already 185 ms, so it finishes before reaching the budget (`UNRESOLVED 0/100` is the evidence). Its name made it read as guarding §6.2's budget mechanism. The silence was fixed rather than the scope widened (the same judgement as §5.5). It also records that **the axis where the budget binds on the foreground path still has no gate** |
 | 5 | **10** | The reach sentence written in v1.7 is updated to match fact | "The normal corpus compares unrevised text against itself, ending at stage 1" was v1.7's accurate observation, but it **was never acted on**. The specification knew its own defect and carried it through nine versions, so the fix is recorded alongside that fact |
 
-## 19. v1.15 → v1.16 Change History
+## 20. v1.15 → v1.16 Change History
 
 **Remediation code is new code, and therefore a new source of defects.** This section is what a second audit found in stage 8's four rounds (D-227–250). Of its 17 findings, this section carries four code fixes and six documentation reconciliations; the rest continue as small items.
 
@@ -1453,7 +1496,7 @@ This is not a formality. There are people in this field who have held on to this
 | 9 | **4.1, 5.5** | Schema **v11**: `versions.last_observed_raw_hash`. `raw_changed` is now measured **against the previous observation** | Compared against the version's own `raw_hash`, one byte change made it **true forever, even on re-checks where nothing moved** — D-242's blind-spot sentence repeated endlessly and the signal died. `raw_hash` is a provenance fact and cannot be overwritten, so the comparand moved to an observation coordinate (D-274) |
 | 10 | **7.3, 7.5, 13** | New `attention[].occurrences_capped` (saturation means "or more"); a version row's `coverage` is **fixed at creation** (pre-v8 NULL rows are not backfilled); the two **known exceptions** to schema stability are written down | `occurrences` saturates at 8 with no qualifier in the JSON, so 50 occurrences read as 8 (D-279). `unchanged` **overwrote an old version's coverage with the current value** (v1 ratio 1.0 → 0.043), so the code betrayed §7.5's promise about "what we did not see at the time" (D-280). The schema-stability test compared neither defaults nor FK actions, so all of v1–v9 diverged while it stayed green (D-256) |
 
-## 20. v1.14 → v1.15 Change History
+## 21. v1.14 → v1.15 Change History
 
 **The specification described something it did not do.** This section fixes §4.2's retention policy having been made unreachable by its own foreign key. It is a round where the third question of the identity block — **can this be taken away?** — applied directly.
 
@@ -1467,7 +1510,7 @@ This is not a formality. There are people in this field who have held on to this
 
 | 6 | **4.1, 9, 10, 7.1, 7.2, 7.3, 7.5** | **Doing what the specification claimed it had done** — §4.1 gains the v8 coverage columns and four indexes (5 listed vs 9 actual), §9's TOML example gains the two retention keys, §10 gains a reclaim-scan row and a "Reclamation and concurrency" note, the §7.1/§7.2/§7.3/§7.5 canonical I/O blocks gain every new field, §7.3's attention list gains `UNREACHABLE`, and §5.2 step 5 plus §10 gain the 403 retry condition | The second audit demonstrated six documentation-code mismatches: §4.1 reads as the authority on the schema yet lacked the coverage columns and four indexes (a later migration decision would rest on a wrong picture); **this very section** claimed "§10 was revised" while §10 contained no such thing; the canonical §7.x blocks carried **none** of the new fields from these three commits (`notes` appeared 0 times); §7.3 **contradicted itself** about the attention list; and §5.2 step 5 still held the pre-v1.11 sentence. **All of these are the specification's to fix** — the code was settled first and the specification failed to follow its own change (D-252, D-253, D-254, D-276, D-277, D-278) |
 
-## 21. v1.13 → v1.14 Change History
+## 22. v1.13 → v1.14 Change History
 
 **We do not judge — not even the identity of a URL.** This section corrects a place where the rule that keeps us from interpreting what `ALTERED` means was never applied to URL sameness.
 
@@ -1479,7 +1522,7 @@ This is not a formality. There are people in this field who have held on to this
 | 4 | **4.1** | Schema **v9**: `anchors.cited_url` (the document's `original_url` at cite time; NULL = unknown). A merge pins the source's `original_url` onto anchors whose `cited_url IS NULL` **immediately before moving them** | `merge_document` keeps only the source's `url` as an alias, discards `original_url`, and deletes the row — the sole path that deletes a `documents` row. Left alone, the moved anchors **inherit the target's identity**. This does not invent a new fact; it catches the fallback value the exports use today before it disappears (D-246). (Also reconciled: the v7 `occurrences` and v8 coverage columns now appear in §4.1's SQL block) |
 | 5 | **7.1** | The response carries `redirect: {to, permanent}` — only when a redirect was traversed. **No judgment is made** | soft-404 cannot be decided in code: every ordinary revision also changes the hash, so hashes cannot tell them apart, and a similarity threshold is itself a judgment (MANIFESTO §6). Connecting the **two signals that already exist** — "a permanent redirect, and then every anchor in that document comes back `MISSING`" — is left to the caller (D-247) |
 
-## 22. v1.12 → v1.13 Change History
+## 23. v1.12 → v1.13 Change History
 
 **We say what we do not know.** This section is the remediation for the largest defect the risk audit found — the tool speaking about a document it had seen 1% of with the same confidence as any other. What was fixed is not the extraction but the **silence**.
 
@@ -1491,7 +1534,7 @@ This is not a formality. There are people in this field who have held on to this
 | 4 | **7.1** | `raw_changed` (v1.12) and coverage are reported **in combination** — a sentence that appears only when both hold | Either signal alone is weak. "The raw bytes changed and this is all we see" is the strongest indicator of a blind spot (D-242) |
 | 5 | **5.5** | PDF is `not-measurable` and a prose-less index is `no-prose` — **the ratio is never invented** | Using pypdf's own output as the denominator always yields 1.0, which is **false confidence**. A two-column PDF loses no characters, only their order (D-075). And 0% for a page with zero prose units is not a fact either (D-243) |
 
-## 23. v1.11 → v1.12 Change History
+## 24. v1.11 → v1.12 Change History
 
 **Adoptability regresses too.** This section covers what the risk audit (three teams: false INTACT / fatal and unbounded / false alarms and perceived performance) found in the batch the user classified as "small things, one pass", plus what was promoted to a contract along the way. Just as accuracy regressions are stopped by CI, latency regressions are stopped the same way.
 
@@ -1511,7 +1554,7 @@ This is not a formality. There are people in this field who have held on to this
 | 12 | **7.8** | `rel="last memento"` is **the version the origin serves now** (ordering stays on `captured_at`); the json form gains `rel` and `last_observed_at` | After a rollback A→B→A, `last` pointed at B, which is no longer served. The export layer never used the observation timeline schema v6 introduced — since RFC 7089's axis is Memento-Datetime, **the ordering stays and only the meaning of `last`** is corrected (D-236) |
 | 13 | 7.3, 8 | Provenance is marked on each CLI attention line, and the `verify_citations` description is corrected to "the live origin, or an archive snapshot" | Only the summary line carried the archive notice, so in a mixed batch there was no telling which item was compared against an archive, and the tool description said only "against the current **live** sources", hiding the possibility (D-234) |
 
-## 24. v1.10 → v1.11 Change History
+## 25. v1.10 → v1.11 Change History
 
 Restores a **measurement instrument** the specification had written down as a requirement (§10 portability → the CI matrix) but which was not actually working. The items in this section concern not the product but **the tools we measure the product with** — recording "satisfied" on an instrument that cannot measure is precisely the failure class this campaign keeps catching.
 
@@ -1523,7 +1566,7 @@ Restores a **measurement instrument** the specification had written down as a re
 | 4 | **8** | The store contract's reach now covers the **act of asking about a path** — a failure in `Path.is_dir()` itself is also a `StorageError` | Python 3.12's `is_dir()` swallows only ENOENT, ENOTDIR, EBADF, and ELOOP and **raises ENAMETOOLONG**. With an over-long `--db`, a direct library caller got a bare `OSError` outside D-138's guarantee. The CLI catches it in D-033's net and prints a sentence, so **CLI tests alone can never reveal it** — it surfaced because §8 binds both entry points to the same contract (D-225) |
 | 5 | 12 | Subprocess tests pin their I/O encoding to UTF-8 | `text=True` alone uses the **locale** encoding. Since the error messages are Korean, on a Windows runner (cp1252) the child dies with `UnicodeEncodeError` and the diagnostics the parent reads are mangled — the cause of failure becomes the helper rather than the code under test (D-226) |
 
-## 25. v1.9 → v1.10 Change History
+## 26. v1.9 → v1.10 Change History
 
 Reflects stage 6 (accounting, configuration, CLI — clusters 9–11) of the remediation for the defects demonstrated in the second parallel audit, plus what was found along the way. Most items in this section are places where **the numbers the tool reports about itself** had drifted from the truth.
 
@@ -1552,7 +1595,7 @@ Reflects stage 6 (accounting, configuration, CLI — clusters 9–11) of the rem
 | 21 | **7.7** | Invariant 2 is now honoured on the **transfer-interrupted** path as well — across all three layers (document body, robots.txt, archive lookup), bytes are spilled the moment they arrive | The preceding remediation (D-134, D-135) applied it only to the success and size-cap branches, so bytes already received were lost wholesale when the connection broke: document 152,023B→23B, robots 60,026B→0B, archive 80,000B→23B. The implementation honoured only half of the contract the specification required (D-212, D-213, D-214) |
 | 22 | **13** | The v0.1 completion criterion is actually revised to **0 body bytes** (cache_hit and direct 304) — in **both** it and §10's table | The first v1.10 revision changed only §10 while **this very section** claimed §13, so **the specification asserted a change it had not made**. §13's criterion stayed in contradiction with the very regression test corrected in the same flow (D-216) |
 
-## 26. v1.8 → v1.9 Change History
+## 27. v1.8 → v1.9 Change History
 
 Reflects stage 5 (Tasks and the server, cluster 8) of the remediation for the defects demonstrated in the second parallel audit. Every item in this section is a place where **what the protocol promises and what the server actually does** had drifted apart — the default call broke, shutdown lost data, or cancellation did not cancel.
 
@@ -1571,7 +1614,7 @@ Reflects stage 5 (Tasks and the server, cluster 8) of the remediation for the de
 | 11 | **10** | The credit (refund of slept time) is **capped at 15% of the budget** | An uncapped refund makes "one anchor's budget" elastic in proportion to contention: measured up to 971 ms per anchor (4.9×), service-layer p99 345/478 ms — violating the 250 ms p99 bound. The trade — verdict path-independence (D-196) bought by giving up bounded time — was written down nowhere (D-203) |
 | 12 | 10 | New **foreground-contention bench** for the matching gates: foreground validity, contention p99, and the UNRESOLVED increment over the foreground baseline | The "polite-mode gates" never opened a foreground section, making them byte-identical to the foreground run (0 sleeps across 52,800 checkpoints) — a tautology. The failure mode of D-120 ("measuring in a batch that is not the real one") recurred inside the gate itself (D-202) |
 
-## 27. v1.7 → v1.8 Change History
+## 28. v1.7 → v1.8 Change History
 
 Reflects the robots and redirect-identity portion of **stage 4 (the honest-client contract, cluster 2)** of the second parallel audit's remediation, plus the audit of that stage's own remediation code. Every item in this section is a place where **the declaration and the reality had drifted apart** — because a document said we never bypass anything, nobody checked, and so nobody noticed for a long time that ordinary configurations made the rules vanish wholesale.
 
@@ -1599,7 +1642,7 @@ Reflects the robots and redirect-identity portion of **stage 4 (the honest-clien
 | 20 | 5.2 | An unfollowable Location (`mailto:` etc.) is that document's `FetchFailed` | `httpx.InvalidURL` is not a subclass of HTTPError, so it escaped the hierarchy and killed the whole re-verification batch (D-106) |
 | 21 | **9** | Configuration is validated **only in its final state** — one construction after layering | Mid-state validation broke "environment variables always win": with a bad file value that env was deployed to override, the server refused to start (D-188) |
 
-## 28. v1.6 → v1.7 Change History
+## 29. v1.6 → v1.7 Change History
 
 Reflects **stage 3 (judgment accuracy, cluster 5)** of the remediation for the defects demonstrated in the second parallel audit (10 Opus auditors, 2026-08-18). Every item in this section belongs to the "silently wrong judgment" family — a false MISSING declares a living quote dead, and a false ALTERED presents a lookalike from another section as "the current form of your quote". The user has no way to check either.
 
@@ -1625,7 +1668,7 @@ Reflects **stage 3 (judgment accuracy, cluster 5)** of the remediation for the d
 
 Many of this section's fixes complete what an earlier fix did **only by half** (1 follows D-042, 2 and 4 follow D-044, 7 follows D-045, 6 follows D-049). The §12 lesson — one passing reproduction script is not completion — repeated itself verbatim.
 
-## 29. v1.5 → v1.6 Change History
+## 30. v1.5 → v1.6 Change History
 
 Reflects **stage 1 (normalization, cluster 1)** of the remediation for the 101 defects demonstrated in the second parallel audit (10 Opus auditors, 2026-08-18). These came out of code written during the first round of remediation, so each entry also records what was broken while fixing something else.
 
@@ -1648,7 +1691,7 @@ Reflects **stage 1 (normalization, cluster 1)** of the remediation for the 101 d
 
 ---
 
-## 30. v1.4 → v1.5 Change History
+## 31. v1.4 → v1.5 Change History
 
 Reflects the remediation of **52 defects demonstrated with reproduction scripts** in a parallel audit (10 Opus instances, 2026-08-17). They emerged in a state where all 198 existing tests passed, so each item is also a blind spot in the specification.
 
@@ -1682,7 +1725,7 @@ Reflects the remediation of **52 defects demonstrated with reproduction scripts*
 
 ---
 
-## 31. v1.3 → v1.4 Change History
+## 32. v1.3 → v1.4 Change History
 
 Cleanup at the v1.0 release (2026-08-17).
 
@@ -1695,7 +1738,7 @@ Cleanup at the v1.0 release (2026-08-17).
 
 ---
 
-## 32. v1.2 → v1.3 Change History
+## 33. v1.2 → v1.3 Change History
 
 Reflects what was settled during the v0.1–v0.4 implementation (2026-08-17). These were found with the implementation running ahead of the specification, so the grounds for each item are in the code and the tests.
 
@@ -1715,7 +1758,7 @@ Reflects what was settled during the v0.1–v0.4 implementation (2026-08-17). Th
 
 ---
 
-## 33. v1.1 → v1.2 Change History
+## 34. v1.1 → v1.2 Change History
 
 Reflects the results of the license audit (2026-08-16). All 16 unverified items were checked and reduced to zero, and in the process one substantive conflict was found.
 
@@ -1745,7 +1788,7 @@ See `THIRD-PARTY.md` for details.
 
 ---
 
-## 34. v1.0 → v1.1 Change History
+## 35. v1.0 → v1.1 Change History
 
 | # | Section | Change | Rationale |
 |---|---|---|---|

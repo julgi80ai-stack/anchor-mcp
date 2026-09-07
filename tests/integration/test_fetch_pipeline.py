@@ -110,7 +110,7 @@ def test_404_reports_gone_status(fixture_server, anchor):
         anchor.fetch(f"{base_url}/article", max_age=0)
     assert excinfo.value.http_status == 404
 
-    (document,) = anchor.list_documents()
+    (document,) = anchor.list_documents().documents
     assert document.status == "gone"
 
 

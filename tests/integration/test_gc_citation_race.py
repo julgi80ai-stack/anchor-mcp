@@ -124,7 +124,7 @@ def test_verify_survives_reclaim_of_the_version_it_is_comparing(
 
         def racing_match(*args, **kwargs):
             if "target" not in observed:
-                document = anchor.list_documents()[0]
+                document = anchor.list_documents().documents[0]
                 target = anchor._repository.current_version(document.id)
                 observed["target"] = target.id
                 observed["pushed"] = _push_until_reclaimed(
@@ -221,7 +221,7 @@ def test_cite_survives_reclaim_of_the_version_it_is_anchoring(
 
         def racing_build(*args, **kwargs):
             if "target" not in observed:
-                document = anchor.list_documents()[0]
+                document = anchor.list_documents().documents[0]
                 target = anchor._repository.current_version(document.id)
                 observed["target"] = target.id
                 observed["pushed"] = _push_until_reclaimed(

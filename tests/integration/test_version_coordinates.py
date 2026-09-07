@@ -120,16 +120,16 @@ def test_reverted_body_counts_as_pending_verification(tmp_path, fixture_server):
         assert quote in (fetched.content or "")
         anchor.cite(url, quote=quote)
         anchor.verify()
-        assert anchor.list_documents(has_pending_verification=True) == []
+        assert anchor.list_documents(has_pending_verification=True).documents == ()
 
         _serve(state, body_b, '"b"')
         anchor.fetch(url, max_age=0)
         anchor.verify()
-        assert anchor.list_documents(has_pending_verification=True) == []
+        assert anchor.list_documents(has_pending_verification=True).documents == ()
 
         _serve(state, body_a, '"a2"')  # 되돌림 — 앵커의 판정이 뒤집힌다
         anchor.fetch(url, max_age=0)
-        pending = anchor.list_documents(has_pending_verification=True)
+        pending = anchor.list_documents(has_pending_verification=True).documents
 
     assert len(pending) == 1, "본문이 되돌아왔는데 재검증 대상이 아니라고 답했다"
 

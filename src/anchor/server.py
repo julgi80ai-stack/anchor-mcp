@@ -660,14 +660,30 @@ def build_server(
         status: str | None = None,
         host: str | None = None,
         has_pending_verification: bool | None = None,
+        has_anchors: bool | None = None,
+        urls: list[str] | None = None,
+        limit: int = 100,
+        offset: int = 0,
     ) -> dict[str, Any]:
         """List cached documents. Filters: status (live|gone|forbidden|paywalled),
-        host, has_pending_verification (anchors not re-verified since the
-        latest version).
+        host, has_pending_verification (anchors not re-verified since the latest
+        version), has_anchors. Pass `urls` to ask about a specific list you hold
+        (a bibliography, say) — aliases are followed, so a pre-redirect URL still
+        matches, and the ones not in the cache come back in `unmatched_urls`.
+        Results are capped by `limit`: `total` is the count before the cap and
+        `truncated` says whether anything was left out. Each document carries
+        `anchor_count`, so "documents that actually have anchors" is answerable.
 
-        캐시된 문서 목록을 필터와 함께 반환한다."""
-        documents = service.list_documents(
-            status=status, host=host, has_pending_verification=has_pending_verification
+        캐시된 문서 목록. `urls`로 가진 목록과 대조할 수 있고 없는 것은
+        `unmatched_urls`로 돌려준다. 상한에서 잘리면 `truncated`가 참이다."""
+        listing = service.list_documents(
+            status=status,
+            host=host,
+            has_pending_verification=has_pending_verification,
+            has_anchors=has_anchors,
+            urls=urls,
+            limit=limit,
+            offset=offset,
         )
         return {
             "documents": [
@@ -678,9 +694,41 @@ def build_server(
                     "status": d.status,
                     "first_seen_at": d.first_seen_at,
                     "last_checked_at": d.last_checked_at,
+                    "anchor_count": d.anchor_count,
                 }
-                for d in documents
-            ]
+                for d in listing.documents
+            ],
+            "total": listing.total,
+            "returned": listing.returned,
+            "truncated": listing.truncated,
+            "unmatched_urls": list(listing.unmatched_urls),
+        }
+
+    @server.tool(name="list_anchors")
+    def list_anchors(
+        state: str | None = None,
+        document_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """List anchors with the state of their **latest** verification
+        (INTACT | MOVED | ALTERED | MISSING | GONE | UNREACHABLE | UNRESOLVED),
+        optionally filtered by that state or by document. `state` is null for an
+        anchor that has never been verified — that is not the same as INTACT.
+        This is how you find out *which* anchors a verify report counted: MOVED
+        in particular never appears in `attention`, because it needs no action.
+        Capped by `limit`; `truncated` says whether anything was left out.
+
+        앵커를 마지막 검증 상태와 함께 연다. `MOVED`처럼 attention에 담기지
+        않는 상태의 앵커를 지목할 수 있다. state가 null이면 미검증이다."""
+        listing = service.list_anchors(
+            state=state, document_id=document_id, limit=limit, offset=offset
+        )
+        return {
+            "anchors": [asdict(row) for row in listing.anchors],
+            "total": listing.total,
+            "returned": listing.returned,
+            "truncated": listing.truncated,
         }
 
     @server.tool(name="cache_stats")

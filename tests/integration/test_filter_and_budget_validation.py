@@ -57,7 +57,7 @@ def test_status_filter_is_case_insensitive(tmp_path, fixture_server):
     base_url, _state = fixture_server
     with Anchor(db_path=tmp_path / "s.db", config=_config(tmp_path)) as anchor:
         anchor.fetch(f"{base_url}/article")
-        assert len(anchor.list_documents(status="LIVE")) == 1
+        assert len(anchor.list_documents(status="LIVE").documents) == 1
 
 
 async def test_mcp_list_documents_unknown_status_returns_tool_error(tmp_path, fixture_server):

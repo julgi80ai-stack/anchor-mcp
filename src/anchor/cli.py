@@ -460,22 +460,71 @@ def serve(
 
 @app.command("list")
 def list_command(
+    anchored: bool = typer.Option(False, "--anchored", help="앵커가 걸린 문서만"),
+    limit: Optional[int] = typer.Option(None, "--limit", help="최대 출력 수"),
+    offset: int = typer.Option(0, "--offset", help="건너뛸 수"),
     db: Optional[Path] = typer.Option(None, "--db", help="SQLite 경로"),
 ) -> None:
-    """캐시된 문서 목록을 상태·최종 확인 시각과 함께 출력한다."""
+    """캐시된 문서 목록을 상태·앵커 수·최종 확인 시각과 함께 출력한다."""
     try:
         with Anchor(db_path=db) as anchor:
-            documents = anchor.list_documents()
+            listing = anchor.list_documents(
+                has_anchors=True if anchored else None, limit=limit, offset=offset
+            )
     except _USER_ERRORS as error:
         typer.secho(f"실패: {error}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
-    if not documents:
+    if not listing.documents:
         typer.echo("캐시된 문서가 없습니다.")
         return
-    for document in documents:
+    for document in listing.documents:
         typer.echo(
-            f"{document.status:10} {document.last_checked_at}  {document.url}"
+            f"{document.status:10} 앵커 {document.anchor_count or 0:>3}  "
+            f"{document.last_checked_at}  {document.url}"
             + (f"  — {document.title}" if document.title else "")
+        )
+    # 자른 사실을 말한다 — 침묵하면 사용자는 이것을 전부로 읽는다 (D-284).
+    if listing.truncated:
+        typer.echo(
+            f"… 전체 {listing.total}건 중 {listing.returned}건 표시"
+            f" (--offset {offset + listing.returned}으로 이어서)"
+        )
+
+
+@app.command("anchors")
+def anchors_command(
+    state: Optional[str] = typer.Option(
+        None, "--state", help="마지막 검증 상태로 거르기 (INTACT | MOVED | ALTERED | …)"
+    ),
+    document: Optional[str] = typer.Option(None, "--document", help="문서 id로 거르기"),
+    limit: Optional[int] = typer.Option(None, "--limit", help="최대 출력 수"),
+    offset: int = typer.Option(0, "--offset", help="건너뛸 수"),
+    db: Optional[Path] = typer.Option(None, "--db", help="SQLite 경로"),
+) -> None:
+    """앵커를 마지막 검증 상태와 함께 출력한다 (`--state MOVED` 등)."""
+    try:
+        with Anchor(db_path=db) as anchor:
+            listing = anchor.list_anchors(
+                state=state, document_id=document, limit=limit, offset=offset
+            )
+    except _USER_ERRORS as error:
+        typer.secho(f"실패: {error}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    if not listing.anchors:
+        typer.echo("해당하는 앵커가 없습니다.")
+        return
+    for row in listing.anchors:
+        # 미검증은 `-`다. INTACT로 적으면 확인한 적 없는 것을 확인했다고 말한다.
+        # 인용문에는 줄바꿈이 그대로 들어 있다 — 한 줄 목록에 그대로 실으면
+        # 출력이 깨진다. 표시용으로만 접는다(저장된 인용문은 건드리지 않는다).
+        flat = " ".join(row.exact.split())
+        quote = flat if len(flat) <= 60 else flat[:57] + "…"
+        typer.echo(f"{row.state or '-':<12} {row.anchor_id}  {row.url}")
+        typer.echo(f"             “{quote}”")
+    if listing.truncated:
+        typer.echo(
+            f"… 전체 {listing.total}건 중 {listing.returned}건 표시"
+            f" (--offset {offset + listing.returned}으로 이어서)"
         )
 
 

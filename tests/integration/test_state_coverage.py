@@ -45,7 +45,7 @@ def test_gone_on_410(fixture_server, anchor):
 
     report = anchor.verify()
     assert report.summary["GONE"] == 1
-    (document,) = anchor.list_documents()
+    (document,) = anchor.list_documents().documents
     assert document.status == "gone"
 
 
